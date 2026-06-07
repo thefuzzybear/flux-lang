@@ -144,9 +144,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 Created by [@thefuzzybear](https://github.com/thefuzzybear)
 
-**Special Thanks:**
-- Claude Sonnet 4.5 - Co-development and architecture design
-
 ## Roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed development timeline.

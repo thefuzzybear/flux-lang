@@ -47,3 +47,6 @@ ENV/
 flamegraph.svg
 perf.data
 perf.data.old
+
+# Misc
+*.kiro/specs

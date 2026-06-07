@@ -66,9 +66,7 @@ cargo fmt
    git add .
    git commit -m "feat(scope): description
 
-   Detailed explanation of changes.
-
-   Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+   Detailed explanation of changes."
    ```
 
 5. **Push and create PR**
@@ -83,8 +81,6 @@ cargo fmt
 <type>(<scope>): <subject>
 
 <body>
-
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
 ```
 
 **Types:**
