@@ -1,0 +1,1595 @@
+use std::collections::HashMap;
+
+use flux_compiler::parser::ast::{BinOp, UnaryOp};
+use flux_compiler::typeck::typed_ast::*;
+use flux_runtime::{BarContext, Signal};
+
+/// Runtime value representation for the AST interpreter.
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    Null,
+    List(Vec<Value>),
+    Signal(Signal),
+}
+
+/// A lightweight AST interpreter that walks the TypedProgram and evaluates
+/// expressions against BarContext values bar-by-bar.
+pub struct Interpreter {
+    pub params: HashMap<String, Value>,
+    pub state: HashMap<String, Value>,
+    pub event_handler: Option<TypedEventHandler>,
+}
+
+impl Interpreter {
+    /// Create a new Interpreter from a TypedProgram.
+    ///
+    /// Initializes params from `TypedParamsBlock` defaults, state from
+    /// `TypedStateBlock` initial values, and stores the `on_bar` handler.
+    pub fn new(program: &TypedProgram) -> Self {
+        let mut params = HashMap::new();
+        let mut state = HashMap::new();
+        let mut event_handler = None;
+
+        for item in &program.strategy.body {
+            match item {
+                TypedStrategyItem::ParamsBlock(pb) => {
+                    for param in &pb.params {
+                        let value = eval_literal(&param.default_value);
+                        params.insert(param.name.clone(), value);
+                    }
+                }
+                TypedStrategyItem::StateBlock(sb) => {
+                    for var in &sb.variables {
+                        let value = eval_literal(&var.initial_value);
+                        state.insert(var.name.clone(), value);
+                    }
+                }
+                TypedStrategyItem::EventHandler(eh) => {
+                    if eh.event_name == "bar" {
+                        event_handler = Some(eh.clone());
+                    }
+                }
+                TypedStrategyItem::Property(_) => {
+                    // Properties are metadata; not needed at runtime
+                }
+            }
+        }
+
+        Interpreter {
+            params,
+            state,
+            event_handler,
+        }
+    }
+
+    /// Execute the `on_bar` event handler against the given bar context.
+    ///
+    /// Binds bar context fields as local variables, executes the event handler body,
+    /// and collects all emitted signals.
+    pub fn on_bar(&mut self, ctx: &BarContext) -> Vec<Signal> {
+        let mut locals = HashMap::new();
+        locals.insert("close".to_string(), Value::Float(ctx.close));
+        locals.insert("open".to_string(), Value::Float(ctx.open));
+        locals.insert("high".to_string(), Value::Float(ctx.high));
+        locals.insert("low".to_string(), Value::Float(ctx.low));
+        locals.insert("volume".to_string(), Value::Float(ctx.volume));
+        locals.insert("symbol".to_string(), Value::Str(ctx.symbol.clone()));
+        locals.insert("in_position".to_string(), Value::Bool(ctx.in_position));
+
+        if let Some(handler) = &self.event_handler {
+            let body = handler.body.clone();
+            match self.exec_stmts(&body, &mut locals) {
+                Ok(signals) => signals,
+                Err(msg) => {
+                    eprintln!("warning: runtime error in on_bar handler: {}", msg);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        }
+    }
+
+    /// Evaluate a typed expression, resolving identifiers from locals, params, then state.
+    pub fn eval_expr(
+        &mut self,
+        expr: &TypedExpr,
+        locals: &HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        match &expr.kind {
+            // --- Literals ---
+            TypedExprKind::IntLiteral(i) => Ok(Value::Int(*i)),
+            TypedExprKind::FloatLiteral(f) => Ok(Value::Float(*f)),
+            TypedExprKind::StringLiteral(s) => Ok(Value::Str(s.clone())),
+            TypedExprKind::BoolLiteral(b) => Ok(Value::Bool(*b)),
+            TypedExprKind::NullLiteral => Ok(Value::Null),
+            TypedExprKind::ListLiteral(items) => {
+                let values: Result<Vec<Value>, String> =
+                    items.iter().map(|item| self.eval_expr(item, locals)).collect();
+                Ok(Value::List(values?))
+            }
+
+            // --- Identifier lookup: locals → params → state ---
+            TypedExprKind::Ident(name) => {
+                if let Some(val) = locals.get(name) {
+                    Ok(val.clone())
+                } else if let Some(val) = self.params.get(name) {
+                    Ok(val.clone())
+                } else if let Some(val) = self.state.get(name) {
+                    Ok(val.clone())
+                } else {
+                    Err(format!("undefined variable: '{}'", name))
+                }
+            }
+
+            // --- Binary operations ---
+            TypedExprKind::BinaryOp { left, op, right } => {
+                // Short-circuit for logical operators
+                if *op == BinOp::And {
+                    let left_val = self.eval_expr(left, locals)?;
+                    match left_val {
+                        Value::Bool(false) => return Ok(Value::Bool(false)),
+                        Value::Bool(true) => {
+                            let right_val = self.eval_expr(right, locals)?;
+                            match right_val {
+                                Value::Bool(b) => return Ok(Value::Bool(b)),
+                                _ => return Err("logical AND requires boolean operands".to_string()),
+                            }
+                        }
+                        _ => return Err("logical AND requires boolean operands".to_string()),
+                    }
+                }
+                if *op == BinOp::Or {
+                    let left_val = self.eval_expr(left, locals)?;
+                    match left_val {
+                        Value::Bool(true) => return Ok(Value::Bool(true)),
+                        Value::Bool(false) => {
+                            let right_val = self.eval_expr(right, locals)?;
+                            match right_val {
+                                Value::Bool(b) => return Ok(Value::Bool(b)),
+                                _ => return Err("logical OR requires boolean operands".to_string()),
+                            }
+                        }
+                        _ => return Err("logical OR requires boolean operands".to_string()),
+                    }
+                }
+
+                let left_val = self.eval_expr(left, locals)?;
+                let right_val = self.eval_expr(right, locals)?;
+
+                match op {
+                    // Arithmetic
+                    BinOp::Add => eval_arith(&left_val, &right_val, "+", |a, b| a + b, |a, b| a + b),
+                    BinOp::Sub => eval_arith(&left_val, &right_val, "-", |a, b| a - b, |a, b| a - b),
+                    BinOp::Mul => eval_arith(&left_val, &right_val, "*", |a, b| a * b, |a, b| a * b),
+                    BinOp::Div => {
+                        // Check for division by zero
+                        match (&left_val, &right_val) {
+                            (Value::Int(_), Value::Int(0)) => {
+                                Err("division by zero".to_string())
+                            }
+                            (Value::Int(_), Value::Float(f)) if *f == 0.0 => {
+                                Err("division by zero".to_string())
+                            }
+                            (Value::Float(_), Value::Int(0)) => {
+                                Err("division by zero".to_string())
+                            }
+                            (Value::Float(_), Value::Float(f)) if *f == 0.0 => {
+                                Err("division by zero".to_string())
+                            }
+                            _ => eval_arith(&left_val, &right_val, "/", |a, b| a / b, |a, b| a / b),
+                        }
+                    }
+                    BinOp::Mod => {
+                        match (&left_val, &right_val) {
+                            (Value::Int(_), Value::Int(0)) => {
+                                Err("division by zero".to_string())
+                            }
+                            _ => eval_arith(&left_val, &right_val, "%", |a, b| a % b, |a, b| a % b),
+                        }
+                    }
+
+                    // Comparisons
+                    BinOp::Gt => eval_cmp(&left_val, &right_val, ">", |a, b| a > b, |a, b| a > b),
+                    BinOp::Lt => eval_cmp(&left_val, &right_val, "<", |a, b| a < b, |a, b| a < b),
+                    BinOp::Ge => eval_cmp(&left_val, &right_val, ">=", |a, b| a >= b, |a, b| a >= b),
+                    BinOp::Le => eval_cmp(&left_val, &right_val, "<=", |a, b| a <= b, |a, b| a <= b),
+                    BinOp::Eq => eval_eq(&left_val, &right_val),
+                    BinOp::Ne => eval_eq(&left_val, &right_val).map(|v| match v {
+                        Value::Bool(b) => Value::Bool(!b),
+                        other => other,
+                    }),
+
+                    // Logical (already handled above via short-circuit)
+                    BinOp::And | BinOp::Or => unreachable!(),
+                }
+            }
+
+            // --- Unary operations ---
+            TypedExprKind::UnaryOp { op, operand } => {
+                let val = self.eval_expr(operand, locals)?;
+                match op {
+                    UnaryOp::Neg => match val {
+                        Value::Int(i) => Ok(Value::Int(-i)),
+                        Value::Float(f) => Ok(Value::Float(-f)),
+                        _ => Err("negation requires a numeric value".to_string()),
+                    },
+                    UnaryOp::Not => match val {
+                        Value::Bool(b) => Ok(Value::Bool(!b)),
+                        _ => Err("logical not requires a boolean value".to_string()),
+                    },
+                }
+            }
+
+            // --- Function calls ---
+            TypedExprKind::FunctionCall { function, args } => {
+                // Get the function name from the function expression
+                let func_name = match &function.kind {
+                    TypedExprKind::Ident(name) => name.clone(),
+                    _ => return Err("unsupported function expression".to_string()),
+                };
+
+                match func_name.as_str() {
+                    "OPEN" => {
+                        if args.len() != 2 {
+                            return Err("OPEN requires 2 arguments (symbol, qty)".to_string());
+                        }
+                        let symbol = self.eval_expr_as_string(&args[0], locals)?;
+                        let qty = self.eval_expr_as_f64(&args[1], locals)?;
+                        Ok(Value::Signal(Signal::open(symbol, qty)))
+                    }
+                    "CLOSE" => {
+                        if args.len() != 1 {
+                            return Err("CLOSE requires 1 argument (symbol)".to_string());
+                        }
+                        let symbol = self.eval_expr_as_string(&args[0], locals)?;
+                        Ok(Value::Signal(Signal::close(symbol)))
+                    }
+                    "CLOSE_QTY" => {
+                        if args.len() != 2 {
+                            return Err("CLOSE_QTY requires 2 arguments (symbol, qty)".to_string());
+                        }
+                        let symbol = self.eval_expr_as_string(&args[0], locals)?;
+                        let qty = self.eval_expr_as_f64(&args[1], locals)?;
+                        Ok(Value::Signal(Signal::close_qty(symbol, qty)))
+                    }
+                    "sma" => {
+                        if args.len() != 2 {
+                            return Err("sma requires 2 arguments (value, period)".to_string());
+                        }
+                        let value = self.eval_expr_as_f64(&args[0], locals)?;
+                        let period = self.eval_expr_as_i64(&args[1], locals)?;
+                        Ok(Value::Float(flux_runtime::sma(value, period)))
+                    }
+                    "ema" => {
+                        if args.len() != 2 {
+                            return Err("ema requires 2 arguments (value, period)".to_string());
+                        }
+                        let value = self.eval_expr_as_f64(&args[0], locals)?;
+                        let period = self.eval_expr_as_i64(&args[1], locals)?;
+                        Ok(Value::Float(flux_runtime::ema(value, period)))
+                    }
+                    _ => Err(format!("unknown function: '{}'", func_name)),
+                }
+            }
+
+            // --- Member access ---
+            TypedExprKind::MemberAccess { object: _, field: _ } => {
+                // Bar context fields are bound as locals directly in on_bar,
+                // so member access on structs isn't needed for MVP.
+                Err("member access is not supported in the interpreter".to_string())
+            }
+
+            // --- Method call ---
+            TypedExprKind::MethodCall { receiver: _, method, args: _ } => {
+                Err(format!("method call '{}' is not supported in the interpreter", method))
+            }
+
+            // --- Index access ---
+            TypedExprKind::IndexAccess { object, index } => {
+                let obj_val = self.eval_expr(object, locals)?;
+                let idx_val = self.eval_expr(index, locals)?;
+                match (&obj_val, &idx_val) {
+                    (Value::List(items), Value::Int(i)) => {
+                        let idx = *i as usize;
+                        if idx < items.len() {
+                            Ok(items[idx].clone())
+                        } else {
+                            Err(format!("index {} out of bounds (length {})", i, items.len()))
+                        }
+                    }
+                    _ => Err("index access requires a list and integer index".to_string()),
+                }
+            }
+        }
+    }
+
+    /// Helper: evaluate an expression and coerce the result to a String.
+    fn eval_expr_as_string(
+        &mut self,
+        expr: &TypedExpr,
+        locals: &HashMap<String, Value>,
+    ) -> Result<String, String> {
+        let val = self.eval_expr(expr, locals)?;
+        match val {
+            Value::Str(s) => Ok(s),
+            _ => Err("expected a string value".to_string()),
+        }
+    }
+
+    /// Helper: evaluate an expression and coerce the result to f64.
+    fn eval_expr_as_f64(
+        &mut self,
+        expr: &TypedExpr,
+        locals: &HashMap<String, Value>,
+    ) -> Result<f64, String> {
+        let val = self.eval_expr(expr, locals)?;
+        match val {
+            Value::Float(f) => Ok(f),
+            Value::Int(i) => Ok(i as f64),
+            _ => Err("expected a numeric value".to_string()),
+        }
+    }
+
+    /// Helper: evaluate an expression and coerce the result to i64.
+    fn eval_expr_as_i64(
+        &mut self,
+        expr: &TypedExpr,
+        locals: &HashMap<String, Value>,
+    ) -> Result<i64, String> {
+        let val = self.eval_expr(expr, locals)?;
+        match val {
+            Value::Int(i) => Ok(i),
+            _ => Err("expected an integer value".to_string()),
+        }
+    }
+
+    /// Execute a single typed statement, returning any signals emitted.
+    pub fn exec_stmt(
+        &mut self,
+        stmt: &TypedStmt,
+        locals: &mut HashMap<String, Value>,
+    ) -> Result<Vec<Signal>, String> {
+        match stmt {
+            TypedStmt::Assignment(assignment) => {
+                // Get target name from the target expression (expect Ident)
+                let name = match &assignment.target.kind {
+                    TypedExprKind::Ident(name) => name.clone(),
+                    _ => return Err("assignment target must be an identifier".to_string()),
+                };
+
+                // Evaluate the RHS
+                let value = self.eval_expr(&assignment.value, locals)?;
+
+                // If the name exists in state, update state; otherwise store in locals
+                if self.state.contains_key(&name) {
+                    self.state.insert(name, value);
+                } else {
+                    locals.insert(name, value);
+                }
+
+                Ok(vec![])
+            }
+
+            TypedStmt::If(if_stmt) => {
+                // Evaluate the main condition
+                let cond_val = self.eval_expr(&if_stmt.condition, locals)?;
+                let cond = match cond_val {
+                    Value::Bool(b) => b,
+                    _ => return Err("if condition must be a boolean".to_string()),
+                };
+
+                if cond {
+                    return self.exec_stmts(&if_stmt.body, locals);
+                }
+
+                // Check elif branches
+                for elif in &if_stmt.elif_branches {
+                    let elif_cond_val = self.eval_expr(&elif.condition, locals)?;
+                    let elif_cond = match elif_cond_val {
+                        Value::Bool(b) => b,
+                        _ => return Err("elif condition must be a boolean".to_string()),
+                    };
+
+                    if elif_cond {
+                        return self.exec_stmts(&elif.body, locals);
+                    }
+                }
+
+                // Execute else body if present
+                if let Some(else_body) = &if_stmt.else_body {
+                    return self.exec_stmts(else_body, locals);
+                }
+
+                Ok(vec![])
+            }
+
+            TypedStmt::For(for_loop) => {
+                // Evaluate iterable — must be Value::List
+                let iterable_val = self.eval_expr(&for_loop.iterable, locals)?;
+                let items = match iterable_val {
+                    Value::List(items) => items,
+                    _ => return Err("for loop iterable must be a list".to_string()),
+                };
+
+                let mut signals = Vec::new();
+
+                for item in items {
+                    locals.insert(for_loop.variable.clone(), item);
+                    let stmts_signals = self.exec_stmts(&for_loop.body, locals)?;
+                    signals.extend(stmts_signals);
+                }
+
+                // Remove the loop variable after the loop completes
+                locals.remove(&for_loop.variable);
+
+                Ok(signals)
+            }
+
+            TypedStmt::While(while_loop) => {
+                let mut signals = Vec::new();
+                let max_iterations = 10_000;
+                let mut iteration = 0;
+
+                loop {
+                    if iteration >= max_iterations {
+                        return Err(format!(
+                            "while loop exceeded maximum iterations ({})",
+                            max_iterations
+                        ));
+                    }
+
+                    let cond_val = self.eval_expr(&while_loop.condition, locals)?;
+                    let cond = match cond_val {
+                        Value::Bool(b) => b,
+                        _ => return Err("while condition must be a boolean".to_string()),
+                    };
+
+                    if !cond {
+                        break;
+                    }
+
+                    let stmts_signals = self.exec_stmts(&while_loop.body, locals)?;
+                    signals.extend(stmts_signals);
+                    iteration += 1;
+                }
+
+                Ok(signals)
+            }
+
+            TypedStmt::Expr(expr_stmt) => {
+                let value = self.eval_expr(&expr_stmt.expr, locals)?;
+                match value {
+                    Value::Signal(sig) => Ok(vec![sig]),
+                    _ => Ok(vec![]),
+                }
+            }
+
+            TypedStmt::Return(_return_stmt) => {
+                // For MVP, return statements in event handlers aren't common.
+                // Just return empty signals (early exit behavior handled at caller level).
+                Ok(vec![])
+            }
+        }
+    }
+
+    /// Execute a sequence of statements, collecting all emitted signals.
+    pub fn exec_stmts(
+        &mut self,
+        stmts: &[TypedStmt],
+        locals: &mut HashMap<String, Value>,
+    ) -> Result<Vec<Signal>, String> {
+        let mut signals = Vec::new();
+        for stmt in stmts {
+            let stmt_signals = self.exec_stmt(stmt, locals)?;
+            signals.extend(stmt_signals);
+        }
+        Ok(signals)
+    }
+}
+
+/// Evaluate a typed expression that is expected to be a literal value.
+///
+/// This is used for param defaults and state initial values, which are
+/// always literals after type checking.
+fn eval_literal(expr: &TypedExpr) -> Value {
+    match &expr.kind {
+        TypedExprKind::IntLiteral(i) => Value::Int(*i),
+        TypedExprKind::FloatLiteral(f) => Value::Float(*f),
+        TypedExprKind::StringLiteral(s) => Value::Str(s.clone()),
+        TypedExprKind::BoolLiteral(b) => Value::Bool(*b),
+        TypedExprKind::NullLiteral => Value::Null,
+        TypedExprKind::ListLiteral(items) => {
+            Value::List(items.iter().map(eval_literal).collect())
+        }
+        _ => panic!(
+            "eval_literal: unexpected non-literal expression kind in default/initial value"
+        ),
+    }
+}
+
+/// Helper for arithmetic binary operations with Int/Float coercion.
+fn eval_arith(
+    left: &Value,
+    right: &Value,
+    op_name: &str,
+    int_op: impl Fn(i64, i64) -> i64,
+    float_op: impl Fn(f64, f64) -> f64,
+) -> Result<Value, String> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(*a, *b))),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(*a as f64, *b))),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(*a, *b as f64))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(*a, *b))),
+        _ => Err(format!("operator '{}' requires numeric operands", op_name)),
+    }
+}
+
+/// Helper for comparison binary operations with Int/Float coercion.
+fn eval_cmp(
+    left: &Value,
+    right: &Value,
+    op_name: &str,
+    int_cmp: impl Fn(i64, i64) -> bool,
+    float_cmp: impl Fn(f64, f64) -> bool,
+) -> Result<Value, String> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(int_cmp(*a, *b))),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool(float_cmp(*a as f64, *b))),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(float_cmp(*a, *b as f64))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(float_cmp(*a, *b))),
+        _ => Err(format!("operator '{}' requires numeric operands", op_name)),
+    }
+}
+
+/// Helper for equality comparison, supporting all Value types.
+fn eval_eq(left: &Value, right: &Value) -> Result<Value, String> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(a == b)),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Bool((*a as f64) == *b)),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Bool(*a == (*b as f64))),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(a == b)),
+        (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
+        (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a == b)),
+        (Value::Null, Value::Null) => Ok(Value::Bool(true)),
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Bool(false)),
+        _ => Err("equality comparison not supported for these types".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flux_compiler::lexer::Span;
+    use flux_compiler::typeck::types::FluxType;
+
+    /// Helper to create a TypedExpr with a given kind and type
+    fn typed_expr(kind: TypedExprKind, resolved_type: FluxType) -> TypedExpr {
+        TypedExpr {
+            kind,
+            resolved_type,
+            span: Span::new(0, 0),
+        }
+    }
+
+    #[test]
+    fn test_eval_literal_int() {
+        let expr = typed_expr(TypedExprKind::IntLiteral(42), FluxType::Int);
+        match eval_literal(&expr) {
+            Value::Int(v) => assert_eq!(v, 42),
+            other => panic!("Expected Value::Int, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_literal_float() {
+        let expr = typed_expr(TypedExprKind::FloatLiteral(3.14), FluxType::Float);
+        match eval_literal(&expr) {
+            Value::Float(v) => assert!((v - 3.14).abs() < f64::EPSILON),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_literal_string() {
+        let expr = typed_expr(
+            TypedExprKind::StringLiteral("hello".to_string()),
+            FluxType::String,
+        );
+        match eval_literal(&expr) {
+            Value::Str(v) => assert_eq!(v, "hello"),
+            other => panic!("Expected Value::Str, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_literal_bool() {
+        let expr = typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool);
+        match eval_literal(&expr) {
+            Value::Bool(v) => assert!(v),
+            other => panic!("Expected Value::Bool, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_literal_null() {
+        let expr = typed_expr(TypedExprKind::NullLiteral, FluxType::Null);
+        match eval_literal(&expr) {
+            Value::Null => {}
+            other => panic!("Expected Value::Null, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_literal_list() {
+        let items = vec![
+            typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int),
+            typed_expr(TypedExprKind::IntLiteral(2), FluxType::Int),
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+        ];
+        let expr = typed_expr(
+            TypedExprKind::ListLiteral(items),
+            FluxType::List(Box::new(FluxType::Int)),
+        );
+        match eval_literal(&expr) {
+            Value::List(v) => {
+                assert_eq!(v.len(), 3);
+                assert!(matches!(v[0], Value::Int(1)));
+                assert!(matches!(v[1], Value::Int(2)));
+                assert!(matches!(v[2], Value::Int(3)));
+            }
+            other => panic!("Expected Value::List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_interpreter_new_basic() {
+        // Build a minimal TypedProgram with params and state
+        let program = TypedProgram {
+            imports: vec![],
+            strategy: TypedStrategy {
+                name: "Test".to_string(),
+                body: vec![
+                    TypedStrategyItem::ParamsBlock(TypedParamsBlock {
+                        params: vec![
+                            TypedParam {
+                                name: "period".to_string(),
+                                default_value: typed_expr(
+                                    TypedExprKind::IntLiteral(20),
+                                    FluxType::Int,
+                                ),
+                                resolved_type: FluxType::Int,
+                                span: Span::new(0, 0),
+                            },
+                            TypedParam {
+                                name: "threshold".to_string(),
+                                default_value: typed_expr(
+                                    TypedExprKind::FloatLiteral(2.5),
+                                    FluxType::Float,
+                                ),
+                                resolved_type: FluxType::Float,
+                                span: Span::new(0, 0),
+                            },
+                        ],
+                        span: Span::new(0, 0),
+                    }),
+                    TypedStrategyItem::StateBlock(TypedStateBlock {
+                        variables: vec![
+                            TypedStateVar {
+                                name: "count".to_string(),
+                                initial_value: typed_expr(
+                                    TypedExprKind::IntLiteral(0),
+                                    FluxType::Int,
+                                ),
+                                resolved_type: FluxType::Int,
+                                span: Span::new(0, 0),
+                            },
+                            TypedStateVar {
+                                name: "active".to_string(),
+                                initial_value: typed_expr(
+                                    TypedExprKind::BoolLiteral(false),
+                                    FluxType::Bool,
+                                ),
+                                resolved_type: FluxType::Bool,
+                                span: Span::new(0, 0),
+                            },
+                        ],
+                        span: Span::new(0, 0),
+                    }),
+                    TypedStrategyItem::EventHandler(TypedEventHandler {
+                        event_name: "bar".to_string(),
+                        body: vec![],
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                span: Span::new(0, 0),
+            },
+            span: Span::new(0, 0),
+        };
+
+        let interp = Interpreter::new(&program);
+
+        // Verify params
+        assert_eq!(interp.params.len(), 2);
+        assert!(matches!(interp.params.get("period"), Some(Value::Int(20))));
+        assert!(matches!(
+            interp.params.get("threshold"),
+            Some(Value::Float(f)) if (*f - 2.5).abs() < f64::EPSILON
+        ));
+
+        // Verify state
+        assert_eq!(interp.state.len(), 2);
+        assert!(matches!(interp.state.get("count"), Some(Value::Int(0))));
+        assert!(matches!(
+            interp.state.get("active"),
+            Some(Value::Bool(false))
+        ));
+
+        // Verify event handler stored
+        assert!(interp.event_handler.is_some());
+        assert_eq!(interp.event_handler.as_ref().unwrap().event_name, "bar");
+    }
+
+    #[test]
+    fn test_interpreter_new_no_handler() {
+        // A program with no event handler
+        let program = TypedProgram {
+            imports: vec![],
+            strategy: TypedStrategy {
+                name: "Empty".to_string(),
+                body: vec![],
+                span: Span::new(0, 0),
+            },
+            span: Span::new(0, 0),
+        };
+
+        let interp = Interpreter::new(&program);
+
+        assert!(interp.params.is_empty());
+        assert!(interp.state.is_empty());
+        assert!(interp.event_handler.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected non-literal expression kind")]
+    fn test_eval_literal_panics_on_non_literal() {
+        let expr = typed_expr(
+            TypedExprKind::Ident("x".to_string()),
+            FluxType::Int,
+        );
+        eval_literal(&expr);
+    }
+
+    // ========================================================================
+    // Helper: create a minimal interpreter for expression evaluation tests
+    // ========================================================================
+
+    fn make_interp() -> Interpreter {
+        Interpreter {
+            params: HashMap::new(),
+            state: HashMap::new(),
+            event_handler: None,
+        }
+    }
+
+    fn make_binop(left: TypedExpr, op: BinOp, right: TypedExpr, ty: FluxType) -> TypedExpr {
+        typed_expr(
+            TypedExprKind::BinaryOp {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            },
+            ty,
+        )
+    }
+
+    fn make_unaryop(op: UnaryOp, operand: TypedExpr, ty: FluxType) -> TypedExpr {
+        typed_expr(
+            TypedExprKind::UnaryOp {
+                op,
+                operand: Box::new(operand),
+            },
+            ty,
+        )
+    }
+
+    fn make_fn_call(name: &str, args: Vec<TypedExpr>, ty: FluxType) -> TypedExpr {
+        typed_expr(
+            TypedExprKind::FunctionCall {
+                function: Box::new(typed_expr(
+                    TypedExprKind::Ident(name.to_string()),
+                    FluxType::Fn {
+                        params: flux_compiler::typeck::types::FnParams::Fixed(vec![]),
+                        ret: Box::new(ty.clone()),
+                    },
+                )),
+                args,
+            },
+            ty,
+        )
+    }
+
+    // ========================================================================
+    // Expression evaluation tests: arithmetic
+    // ========================================================================
+
+    #[test]
+    fn test_eval_expr_int_add() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(2), FluxType::Int),
+            BinOp::Add,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_expr_int_sub() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
+            BinOp::Sub,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(7)));
+    }
+
+    #[test]
+    fn test_eval_expr_int_mul() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(4), FluxType::Int),
+            BinOp::Mul,
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    #[test]
+    fn test_eval_expr_int_div() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        // Integer division: 10 / 3 = 3
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
+            BinOp::Div,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_eval_expr_int_mod() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
+            BinOp::Mod,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_eval_expr_float_add() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::FloatLiteral(1.5), FluxType::Float),
+            BinOp::Add,
+            typed_expr(TypedExprKind::FloatLiteral(2.5), FluxType::Float),
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 4.0).abs() < f64::EPSILON),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_expr_float_div() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::FloatLiteral(10.0), FluxType::Float),
+            BinOp::Div,
+            typed_expr(TypedExprKind::FloatLiteral(3.0), FluxType::Float),
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 10.0 / 3.0).abs() < f64::EPSILON),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_expr_mixed_int_float_add() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        // 1 + 2.5 = 3.5 (Int promoted to Float)
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int),
+            BinOp::Add,
+            typed_expr(TypedExprKind::FloatLiteral(2.5), FluxType::Float),
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 3.5).abs() < f64::EPSILON),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_expr_division_by_zero_int() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
+            BinOp::Div,
+            typed_expr(TypedExprKind::IntLiteral(0), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("division by zero"));
+    }
+
+    #[test]
+    fn test_eval_expr_mod_by_zero() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
+            BinOp::Mod,
+            typed_expr(TypedExprKind::IntLiteral(0), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("division by zero"));
+    }
+
+    // ========================================================================
+    // Expression evaluation tests: comparisons
+    // ========================================================================
+
+    #[test]
+    fn test_eval_expr_gt_true() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            BinOp::Gt,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_gt_false() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            BinOp::Gt,
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_expr_eq_true() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            BinOp::Eq,
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_eq_false() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            BinOp::Eq,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_expr_lt() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            BinOp::Lt,
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_le() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            BinOp::Le,
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_ge() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            BinOp::Ge,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_ne() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            BinOp::Ne,
+            typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    // ========================================================================
+    // Expression evaluation tests: boolean logic
+    // ========================================================================
+
+    #[test]
+    fn test_eval_expr_and_false() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+            BinOp::And,
+            typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_expr_and_true() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+            BinOp::And,
+            typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_or_true() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+            BinOp::Or,
+            typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_or_false() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_binop(
+            typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            BinOp::Or,
+            typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_expr_not_true() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_unaryop(
+            UnaryOp::Not,
+            typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_eval_expr_not_false() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_unaryop(
+            UnaryOp::Not,
+            typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_eval_expr_negation() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_unaryop(
+            UnaryOp::Neg,
+            typed_expr(TypedExprKind::IntLiteral(42), FluxType::Int),
+            FluxType::Int,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(-42)));
+    }
+
+    // ========================================================================
+    // Variable lookup tests
+    // ========================================================================
+
+    #[test]
+    fn test_eval_expr_ident_from_locals() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        locals.insert("x".to_string(), Value::Int(99));
+        let expr = typed_expr(TypedExprKind::Ident("x".to_string()), FluxType::Int);
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(99)));
+    }
+
+    #[test]
+    fn test_eval_expr_ident_from_params() {
+        let mut interp = make_interp();
+        interp.params.insert("period".to_string(), Value::Int(20));
+        let locals = HashMap::new();
+        let expr = typed_expr(TypedExprKind::Ident("period".to_string()), FluxType::Int);
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    #[test]
+    fn test_eval_expr_ident_from_state() {
+        let mut interp = make_interp();
+        interp.state.insert("count".to_string(), Value::Int(5));
+        let locals = HashMap::new();
+        let expr = typed_expr(TypedExprKind::Ident("count".to_string()), FluxType::Int);
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_eval_expr_ident_locals_shadow_params() {
+        let mut interp = make_interp();
+        interp.params.insert("x".to_string(), Value::Int(100));
+        let mut locals = HashMap::new();
+        locals.insert("x".to_string(), Value::Int(42));
+        let expr = typed_expr(TypedExprKind::Ident("x".to_string()), FluxType::Int);
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        // Locals take priority over params
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_eval_expr_ident_undefined_variable() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = typed_expr(TypedExprKind::Ident("undefined_var".to_string()), FluxType::Int);
+        let result = interp.eval_expr(&expr, &locals);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("undefined variable"));
+    }
+
+    // ========================================================================
+    // Statement execution tests: assignment
+    // ========================================================================
+
+    #[test]
+    fn test_exec_stmt_assignment_to_locals() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        let stmt = TypedStmt::Assignment(TypedAssignment {
+            target: typed_expr(TypedExprKind::Ident("x".to_string()), FluxType::Int),
+            value: typed_expr(TypedExprKind::IntLiteral(42), FluxType::Int),
+            span: Span::new(0, 0),
+        });
+        let signals = interp.exec_stmt(&stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+        assert!(matches!(locals.get("x"), Some(Value::Int(42))));
+    }
+
+    #[test]
+    fn test_exec_stmt_assignment_to_state() {
+        let mut interp = make_interp();
+        interp.state.insert("count".to_string(), Value::Int(0));
+        let mut locals = HashMap::new();
+        let stmt = TypedStmt::Assignment(TypedAssignment {
+            target: typed_expr(TypedExprKind::Ident("count".to_string()), FluxType::Int),
+            value: typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
+            span: Span::new(0, 0),
+        });
+        let signals = interp.exec_stmt(&stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+        // Should update state, not locals
+        assert!(matches!(interp.state.get("count"), Some(Value::Int(10))));
+        assert!(locals.get("count").is_none());
+    }
+
+    // ========================================================================
+    // Statement execution tests: if/else branching
+    // ========================================================================
+
+    #[test]
+    fn test_exec_stmt_if_true_branch() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        let stmt = TypedStmt::If(TypedIfStmt {
+            condition: typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+            body: vec![TypedStmt::Assignment(TypedAssignment {
+                target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                value: typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int),
+                span: Span::new(0, 0),
+            })],
+            elif_branches: vec![],
+            else_body: Some(vec![TypedStmt::Assignment(TypedAssignment {
+                target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                value: typed_expr(TypedExprKind::IntLiteral(2), FluxType::Int),
+                span: Span::new(0, 0),
+            })]),
+            span: Span::new(0, 0),
+        });
+        let signals = interp.exec_stmt(&stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+        assert!(matches!(locals.get("result"), Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn test_exec_stmt_if_else_branch() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        let stmt = TypedStmt::If(TypedIfStmt {
+            condition: typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            body: vec![TypedStmt::Assignment(TypedAssignment {
+                target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                value: typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int),
+                span: Span::new(0, 0),
+            })],
+            elif_branches: vec![],
+            else_body: Some(vec![TypedStmt::Assignment(TypedAssignment {
+                target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                value: typed_expr(TypedExprKind::IntLiteral(2), FluxType::Int),
+                span: Span::new(0, 0),
+            })]),
+            span: Span::new(0, 0),
+        });
+        let signals = interp.exec_stmt(&stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+        assert!(matches!(locals.get("result"), Some(Value::Int(2))));
+    }
+
+    #[test]
+    fn test_exec_stmt_if_elif_branch() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        let stmt = TypedStmt::If(TypedIfStmt {
+            condition: typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
+            body: vec![TypedStmt::Assignment(TypedAssignment {
+                target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                value: typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int),
+                span: Span::new(0, 0),
+            })],
+            elif_branches: vec![TypedElifBranch {
+                condition: typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
+                body: vec![TypedStmt::Assignment(TypedAssignment {
+                    target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                    value: typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+                    span: Span::new(0, 0),
+                })],
+                span: Span::new(0, 0),
+            }],
+            else_body: Some(vec![TypedStmt::Assignment(TypedAssignment {
+                target: typed_expr(TypedExprKind::Ident("result".to_string()), FluxType::Int),
+                value: typed_expr(TypedExprKind::IntLiteral(2), FluxType::Int),
+                span: Span::new(0, 0),
+            })]),
+            span: Span::new(0, 0),
+        });
+        let signals = interp.exec_stmt(&stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+        assert!(matches!(locals.get("result"), Some(Value::Int(3))));
+    }
+
+    // ========================================================================
+    // Signal emission tests
+    // ========================================================================
+
+    #[test]
+    fn test_eval_expr_open_signal() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "OPEN",
+            vec![
+                typed_expr(TypedExprKind::StringLiteral("AAPL".to_string()), FluxType::String),
+                typed_expr(TypedExprKind::FloatLiteral(100.0), FluxType::Float),
+            ],
+            FluxType::Signal,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Signal(sig) => {
+                assert_eq!(sig.symbol(), "AAPL");
+                assert_eq!(sig.qty(), Some(100.0));
+                assert!(matches!(sig, Signal::Open { .. }));
+            }
+            other => panic!("Expected Signal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_expr_close_signal() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "CLOSE",
+            vec![typed_expr(
+                TypedExprKind::StringLiteral("MSFT".to_string()),
+                FluxType::String,
+            )],
+            FluxType::Signal,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Signal(sig) => {
+                assert_eq!(sig.symbol(), "MSFT");
+                assert_eq!(sig.qty(), None);
+                assert!(matches!(sig, Signal::Close { .. }));
+            }
+            other => panic!("Expected Signal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_expr_close_qty_signal() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "CLOSE_QTY",
+            vec![
+                typed_expr(TypedExprKind::StringLiteral("GOOG".to_string()), FluxType::String),
+                typed_expr(TypedExprKind::FloatLiteral(50.0), FluxType::Float),
+            ],
+            FluxType::Signal,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Signal(sig) => {
+                assert_eq!(sig.symbol(), "GOOG");
+                assert_eq!(sig.qty(), Some(50.0));
+                assert!(matches!(sig, Signal::CloseQty { .. }));
+            }
+            other => panic!("Expected Signal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_exec_stmt_signal_emission() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        // An expression statement that calls OPEN → emits signal
+        let stmt = TypedStmt::Expr(TypedExprStmt {
+            expr: make_fn_call(
+                "OPEN",
+                vec![
+                    typed_expr(TypedExprKind::StringLiteral("SPY".to_string()), FluxType::String),
+                    typed_expr(TypedExprKind::FloatLiteral(10.0), FluxType::Float),
+                ],
+                FluxType::Signal,
+            ),
+            span: Span::new(0, 0),
+        });
+        let signals = interp.exec_stmt(&stmt, &mut locals).unwrap();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].symbol(), "SPY");
+        assert!(matches!(signals[0], Signal::Open { .. }));
+    }
+
+    // ========================================================================
+    // Indicator function tests (sma, ema)
+    // ========================================================================
+
+    #[test]
+    fn test_eval_expr_sma_call() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "sma",
+            vec![
+                typed_expr(TypedExprKind::FloatLiteral(100.0), FluxType::Float),
+                typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            ],
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        // sma with one value and period 5 should return that value / 5 or the initial call
+        // The exact value depends on the runtime implementation, just verify it's a Float
+        assert!(matches!(result, Value::Float(_)));
+    }
+
+    #[test]
+    fn test_eval_expr_ema_call() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "ema",
+            vec![
+                typed_expr(TypedExprKind::FloatLiteral(50.0), FluxType::Float),
+                typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+            ],
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Float(_)));
+    }
+
+    // ========================================================================
+    // on_bar integration test
+    // ========================================================================
+
+    #[test]
+    fn test_on_bar_emits_open_when_close_gt_open() {
+        // Build a program: on bar { if close > open { OPEN(symbol, 100.0) } }
+        let program = TypedProgram {
+            imports: vec![],
+            strategy: TypedStrategy {
+                name: "TestStrategy".to_string(),
+                body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
+                    event_name: "bar".to_string(),
+                    body: vec![TypedStmt::If(TypedIfStmt {
+                        condition: make_binop(
+                            typed_expr(TypedExprKind::Ident("close".to_string()), FluxType::Float),
+                            BinOp::Gt,
+                            typed_expr(TypedExprKind::Ident("open".to_string()), FluxType::Float),
+                            FluxType::Bool,
+                        ),
+                        body: vec![TypedStmt::Expr(TypedExprStmt {
+                            expr: make_fn_call(
+                                "OPEN",
+                                vec![
+                                    typed_expr(
+                                        TypedExprKind::Ident("symbol".to_string()),
+                                        FluxType::String,
+                                    ),
+                                    typed_expr(TypedExprKind::FloatLiteral(100.0), FluxType::Float),
+                                ],
+                                FluxType::Signal,
+                            ),
+                            span: Span::new(0, 0),
+                        })],
+                        elif_branches: vec![],
+                        else_body: None,
+                        span: Span::new(0, 0),
+                    })],
+                    span: Span::new(0, 0),
+                })],
+                span: Span::new(0, 0),
+            },
+            span: Span::new(0, 0),
+        };
+
+        let mut interp = Interpreter::new(&program);
+
+        // Bar where close > open → should emit Open signal
+        let ctx_bullish = BarContext {
+            close: 150.0,
+            open: 140.0,
+            high: 155.0,
+            low: 138.0,
+            volume: 1_000_000.0,
+            symbol: "AAPL".to_string(),
+            in_position: false,
+        };
+        let signals = interp.on_bar(&ctx_bullish);
+        assert_eq!(signals.len(), 1);
+        assert!(matches!(&signals[0], Signal::Open { symbol, qty } if symbol == "AAPL" && *qty == 100.0));
+
+        // Bar where close <= open → no signals
+        let ctx_bearish = BarContext {
+            close: 130.0,
+            open: 140.0,
+            high: 145.0,
+            low: 128.0,
+            volume: 500_000.0,
+            symbol: "AAPL".to_string(),
+            in_position: false,
+        };
+        let signals = interp.on_bar(&ctx_bearish);
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn test_on_bar_no_handler_returns_empty() {
+        let program = TypedProgram {
+            imports: vec![],
+            strategy: TypedStrategy {
+                name: "Empty".to_string(),
+                body: vec![],
+                span: Span::new(0, 0),
+            },
+            span: Span::new(0, 0),
+        };
+        let mut interp = Interpreter::new(&program);
+        let ctx = BarContext {
+            close: 100.0,
+            open: 99.0,
+            high: 101.0,
+            low: 98.0,
+            volume: 1000.0,
+            symbol: "TEST".to_string(),
+            in_position: false,
+        };
+        let signals = interp.on_bar(&ctx);
+        assert!(signals.is_empty());
+    }
+}

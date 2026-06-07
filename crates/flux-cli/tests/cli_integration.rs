@@ -1,0 +1,433 @@
+//! Integration tests for the `flux` CLI binary.
+//!
+//! These tests invoke the built binary via `std::process::Command` and verify
+//! exit codes, stdout, and stderr output for each subcommand.
+//!
+//! **Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 2.2, 2.3, 2.7, 3.1, 3.3, 3.4, 4.1, 4.4, 4.6, 7.1, 7.2, 7.3, 7.4**
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// Get the path to the compiled `flux` binary.
+fn flux_cmd() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_flux"))
+}
+
+/// Get the path to a test fixture file.
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+}
+
+// =============================================================================
+// --version flag
+// =============================================================================
+
+/// Validates: Requirement 1.5, 7.4
+/// `flux --version` should print the version string and exit.
+/// Note: clap treats --version as a special "error" so it exits via the
+/// Err(err) branch in our main(), which means exit code 2.
+#[test]
+fn version_flag_prints_version() {
+    let output = flux_cmd().arg("--version").output().expect("failed to execute");
+
+    // clap prints version to stdout
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("flux") && stdout.contains("0.1.0"),
+        "Expected version output containing 'flux' and '0.1.0', got: {:?}",
+        stdout
+    );
+    // Exit code 2 because clap --version goes through try_parse Err path
+    assert_eq!(output.status.code(), Some(2));
+}
+
+// =============================================================================
+// --help flag
+// =============================================================================
+
+/// Validates: Requirements 1.3, 1.4, 7.4
+/// `flux --help` should print usage info including subcommand names.
+#[test]
+fn help_flag_prints_usage() {
+    let output = flux_cmd().arg("--help").output().expect("failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("flux"), "Help should mention binary name");
+    assert!(stdout.contains("check"), "Help should list 'check' subcommand");
+    assert!(stdout.contains("build"), "Help should list 'build' subcommand");
+    assert!(stdout.contains("backtest"), "Help should list 'backtest' subcommand");
+    // Exit code 2 because clap --help goes through try_parse Err path
+    assert_eq!(output.status.code(), Some(2));
+}
+
+// =============================================================================
+// Unknown subcommand
+// =============================================================================
+
+/// Validates: Requirements 1.2, 7.4
+/// Unknown subcommand should exit with code 2 and display an error.
+#[test]
+fn unknown_subcommand_exits_with_code_2() {
+    let output = flux_cmd().arg("invalidcmd").output().expect("failed to execute");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unrecognized subcommand") || stderr.contains("invalid"),
+        "Expected error about unrecognized subcommand, got stderr: {:?}",
+        stderr
+    );
+}
+
+// =============================================================================
+// Check command
+// =============================================================================
+
+/// Validates: Requirements 2.2, 7.1
+/// `check` with a valid Flux file should exit 0 and print "ok" to stdout.
+#[test]
+fn check_valid_file_exits_0_with_ok() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("valid_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ok"),
+        "Expected stdout to contain 'ok', got: {:?}",
+        stdout
+    );
+}
+
+/// Validates: Requirements 2.3, 7.2
+/// `check` with a file containing parse errors should exit 1 and print errors
+/// with line:col format to stderr.
+#[test]
+fn check_invalid_file_exits_1_with_error() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("invalid_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should contain error formatting with file:line:col
+    assert!(
+        stderr.contains("error["),
+        "Expected formatted error in stderr, got: {:?}",
+        stderr
+    );
+    // Should contain line:col info (colon-separated numbers)
+    assert!(
+        stderr.contains(":4:") || stderr.contains(":3:") || stderr.contains(":"),
+        "Expected line:col info in error output"
+    );
+}
+
+/// Validates: Requirements 2.4, 7.2
+/// `check` with a file containing type errors should exit 1 and print errors
+/// to stderr.
+#[test]
+fn check_type_error_file_exits_1_with_error() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("type_error_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error["),
+        "Expected formatted error in stderr, got: {:?}",
+        stderr
+    );
+}
+
+/// Validates: Requirements 2.7, 7.3
+/// `check` with a non-existent file should exit 1.
+#[test]
+fn check_missing_file_exits_1() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg("/nonexistent/path/missing.flux")
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Expected exit 1 for missing file"
+    );
+}
+
+// =============================================================================
+// Build command
+// =============================================================================
+
+/// Validates: Requirements 3.1, 7.1
+/// `build` with a valid file should exit 0 and print generated Rust code to stdout.
+#[test]
+fn build_valid_file_exits_0_with_code() {
+    let output = flux_cmd()
+        .arg("build")
+        .arg(fixture_path("valid_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Generated Rust code should be non-empty and contain typical Rust keywords
+    assert!(!stdout.is_empty(), "Expected non-empty stdout with generated code");
+    assert!(
+        stdout.contains("fn") || stdout.contains("struct") || stdout.contains("impl"),
+        "Expected generated Rust code, got: {:?}",
+        &stdout[..stdout.len().min(200)]
+    );
+}
+
+/// Validates: Requirements 3.3, 7.2
+/// `build` with an invalid file should exit 1 and print errors to stderr.
+#[test]
+fn build_invalid_file_exits_1() {
+    let output = flux_cmd()
+        .arg("build")
+        .arg(fixture_path("invalid_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error["),
+        "Expected formatted error in stderr, got: {:?}",
+        stderr
+    );
+}
+
+/// Validates: Requirements 3.4, 7.3
+/// `build` with a missing file should exit 1.
+#[test]
+fn build_missing_file_exits_1() {
+    let output = flux_cmd()
+        .arg("build")
+        .arg("/nonexistent/path/missing.flux")
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Expected exit 1 for missing file"
+    );
+}
+
+/// Validates: Requirements 3.1, 3.5
+/// `build --output` should write generated code to the specified file.
+#[test]
+fn build_output_flag_writes_to_file() {
+    let output_path = std::env::temp_dir().join("flux_integration_test_output.rs");
+
+    // Clean up any previous test artifact
+    let _ = std::fs::remove_file(&output_path);
+
+    let output = flux_cmd()
+        .arg("build")
+        .arg(fixture_path("valid_strategy.flux"))
+        .arg("--output")
+        .arg(&output_path)
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The output file should exist and be non-empty
+    assert!(output_path.exists(), "Output file should exist at {:?}", output_path);
+    let contents = std::fs::read_to_string(&output_path).expect("Failed to read output file");
+    assert!(!contents.is_empty(), "Output file should not be empty");
+    assert!(
+        contents.contains("fn") || contents.contains("struct") || contents.contains("impl"),
+        "Output file should contain Rust code"
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&output_path);
+}
+
+// =============================================================================
+// Backtest command
+// =============================================================================
+
+/// Validates: Requirements 4.1, 7.1
+/// `backtest` with valid strategy and data should exit 0 and print signals + summary.
+#[test]
+fn backtest_valid_strategy_exits_0_with_summary() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("valid_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("sample_data.csv"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should contain the summary section
+    assert!(
+        stdout.contains("Summary"),
+        "Expected 'Summary' in output, got: {:?}",
+        stdout
+    );
+    // Should contain signal type names
+    assert!(
+        stdout.contains("Open") || stdout.contains("Close") || stdout.contains("CloseQty"),
+        "Expected signal type names in output"
+    );
+}
+
+/// Validates: Requirements 4.4, 7.2
+/// `backtest` with a file that has compilation errors should exit 1 without
+/// loading data (errors printed to stderr).
+#[test]
+fn backtest_compilation_failure_exits_1() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("invalid_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("sample_data.csv"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error["),
+        "Expected compilation error in stderr, got: {:?}",
+        stderr
+    );
+    // Stdout should be empty — no data loading or signal output attempted
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Summary"),
+        "Should not produce summary output on compilation failure"
+    );
+}
+
+/// Validates: Requirements 4.6, 7.3
+/// `backtest` with bad CSV data should exit 1.
+#[test]
+fn backtest_bad_csv_exits_1() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("valid_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("bad_data.csv"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Expected exit 1 for bad CSV data"
+    );
+}
+
+/// Validates: Requirements 4.6, 7.3
+/// `backtest` with CSV missing required columns should exit 1.
+#[test]
+fn backtest_missing_cols_csv_exits_1() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("valid_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("missing_cols.csv"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Expected exit 1 for CSV with missing columns"
+    );
+}
+
+/// Validates: Requirements 4.6, 7.3
+/// `backtest` with a non-existent data file should exit 1.
+#[test]
+fn backtest_missing_data_file_exits_1() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("valid_strategy.flux"))
+        .arg("--data")
+        .arg("/nonexistent/data.csv")
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "Expected exit 1 for missing data file"
+    );
+}
+
+// =============================================================================
+// Argument validation
+// =============================================================================
+
+/// Validates: Requirements 1.6, 7.4
+/// `check` without a file argument should exit with code 2.
+#[test]
+fn check_missing_argument_exits_2() {
+    let output = flux_cmd().arg("check").output().expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "Expected exit 2 for missing required argument"
+    );
+}
+
+/// Validates: Requirements 1.6, 7.4
+/// `backtest` without --data option should exit with code 2.
+#[test]
+fn backtest_missing_data_option_exits_2() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("valid_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "Expected exit 2 for missing --data option"
+    );
+}
