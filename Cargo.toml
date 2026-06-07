@@ -1,0 +1,58 @@
+[workspace]
+members = [
+    "crates/flux-compiler",
+    "crates/flux-runtime",
+    "crates/flux-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["thefuzzybear <https://github.com/thefuzzybear>"]
+license = "MIT"
+repository = "https://github.com/thefuzzybear/flux-lang"
+homepage = "https://fluxlang.io"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Parsing
+logos = "0.14"
+
+# Testing
+proptest = "1.4"
+criterion = "0.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Data processing
+polars = { version = "0.37", features = ["parquet", "lazy"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Utilities
+once_cell = "1.19"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.test]
+opt-level = 1  # Slightly faster tests
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
+
+[profile.bench]
+inherits = "release"
+debug = true  # Keep debug symbols for flamegraph

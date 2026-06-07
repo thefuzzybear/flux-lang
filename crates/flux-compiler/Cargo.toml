@@ -1,0 +1,27 @@
+[package]
+name = "flux-compiler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Workspace dependencies
+thiserror.workspace = true
+anyhow.workspace = true
+logos.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "lexer_bench"
+harness = false
+
+[[bench]]
+name = "parser_bench"
+harness = false

@@ -1,0 +1,49 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+tests/tmp/
+*.profraw
+*.profdata
+
+# Benchmarks
+criterion/
+
+# Documentation
+docs/_build/
+
+# Python (for notebooks later)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+ENV/
+.venv/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Build artifacts
+*.wasm
+*.so
+*.dylib
+*.dll
+
+# Profiling
+flamegraph.svg
+perf.data
+perf.data.old
