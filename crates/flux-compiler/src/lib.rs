@@ -37,7 +37,7 @@
 
 pub mod error;
 pub mod lexer;
-// pub mod parser;  // TODO: Implement
+pub mod parser;
 // pub mod typeck;  // TODO: Implement
 // pub mod codegen; // TODO: Implement
 
