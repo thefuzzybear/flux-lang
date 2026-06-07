@@ -39,7 +39,7 @@ pub mod error;
 pub mod lexer;
 pub mod parser;
 pub mod typeck;
-// pub mod codegen; // TODO: Implement
+pub mod codegen;
 
 pub use error::{CompileError, Result};
 
