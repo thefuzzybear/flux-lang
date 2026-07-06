@@ -9,4 +9,5 @@ pub mod math_builtins;
 pub mod stat_indicators;
 pub mod portfolio_ops;
 pub mod csv_loader;
+pub mod data;
 pub mod error;

@@ -3,6 +3,7 @@ mod error;
 mod diagnostics;
 mod formatter;
 mod csv_loader;
+mod data;
 mod interpreter;
 mod math_builtins;
 mod stat_indicators;
@@ -72,6 +73,29 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Fetch historical market data from a provider
+    Fetch {
+        /// One or more stock symbols (comma-separated)
+        symbols: String,
+        /// Data provider (default: yahoo)
+        #[arg(long, default_value = "yahoo")]
+        source: String,
+        /// Relative time period (e.g., 1y, 6mo, 5d)
+        #[arg(long)]
+        period: Option<String>,
+        /// Bar interval (e.g., 1d, 1h, 5m)
+        #[arg(long, default_value = "1d")]
+        interval: String,
+        /// Start date (YYYY-MM-DD)
+        #[arg(long)]
+        from: Option<String>,
+        /// End date (YYYY-MM-DD)
+        #[arg(long)]
+        to: Option<String>,
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -140,6 +164,31 @@ fn main() {
                             // Diagnostic already printed to stderr by run_fmt
                             FAILURE
                         }
+                    }
+                }
+            }
+        },
+        Commands::Fetch { symbols, source, period, interval, from, to, output } => {
+            match commands::fetch::run_fetch(
+                &symbols,
+                &source,
+                period.as_deref(),
+                &interval,
+                from.as_deref(),
+                to.as_deref(),
+                output.as_ref(),
+            ) {
+                Ok(()) => SUCCESS,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    if e.contains("mutually exclusive")
+                        || e.contains("invalid")
+                        || e.contains("requires")
+                        || e.contains("no symbols")
+                    {
+                        USAGE_ERROR
+                    } else {
+                        FAILURE
                     }
                 }
             }

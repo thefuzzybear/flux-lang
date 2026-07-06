@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 is-terminal = "0.4"
+reqwest = { version = "0.12", features = ["blocking", "cookies"] }
+chrono = { version = "0.4", features = ["serde"] }
 flux-compiler = { path = "../flux-compiler" }
 flux-runtime = { path = "../flux-runtime" }
 
