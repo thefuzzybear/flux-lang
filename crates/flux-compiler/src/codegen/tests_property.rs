@@ -102,6 +102,12 @@ mod tests {
                 span,
             })
             .boxed(),
+            FluxType::VecFloat | FluxType::MatFloat => Just(TypedExpr {
+                kind: TypedExprKind::NullLiteral,
+                resolved_type: ty,
+                span,
+            })
+            .boxed(),
             FluxType::Fn { .. } => unreachable!("Generator excludes Fn"),
         }
     }
@@ -147,6 +153,8 @@ mod tests {
                     prop_assert!(rust_type.starts_with("Vec<"), "List type should start with Vec<, got: {}", rust_type);
                     prop_assert!(rust_type.ends_with('>'), "List type should end with >, got: {}", rust_type);
                 }
+                FluxType::VecFloat => prop_assert_eq!(&rust_type, "Vec<f64>"),
+                FluxType::MatFloat => prop_assert_eq!(&rust_type, "Vec<f64>"),
                 FluxType::Fn { .. } => unreachable!("Generator excludes Fn"),
             }
         }

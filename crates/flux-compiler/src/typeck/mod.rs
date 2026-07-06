@@ -558,4 +558,242 @@ mod integration_tests {
             other => panic!("Expected CompileError::Type, got: {other:?}"),
         }
     }
+
+    // ===== Task 6.3: Type checker registration tests for math/stats/portfolio functions =====
+
+    /// Helper: lex → parse → check a Flux source string. Returns the check result.
+    fn check_source(source: &str) -> crate::error::Result<TypedProgram> {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let tokens = lex_with_spans(source).expect("Lexing failed");
+        let program = parse(tokens).expect("Parsing failed");
+        check(program)
+    }
+
+    #[test]
+    fn test_tier1_math_functions_pass_type_checking() {
+        // Validates: Requirements 3.4, 3.5
+        // All Tier 1 math functions should be accepted without imports.
+        let source = r#"strategy TestMath {
+    on_bar {
+        a = abs(close)
+        b = sqrt(close)
+        c = exp(close)
+        d = log(close)
+        e = floor(close)
+        f = ceil(close)
+        g = round(close)
+        h = sign(close)
+        i = pow(close, 2.0)
+        j = min(close, open)
+        k = max(close, open)
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "Tier 1 math functions should pass type checking: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_tier2_stat_indicators_pass_type_checking() {
+        // Validates: Requirements 9.6
+        // All Tier 2 statistical functions should be accepted without imports.
+        let source = r#"strategy TestStats {
+    params {
+        period = 20
+    }
+    on_bar {
+        a = stddev(close, period)
+        b = variance(close, period)
+        c = zscore(close, period)
+        d = rsi(close, period)
+        e = corr(close, open, period)
+        f = covariance(close, open, period)
+        g = atr(high, low, close, period)
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "Tier 2 stat indicators should pass type checking: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_tier1_functions_return_float_type() {
+        // Validates: Requirements 3.1, 3.2, 3.3
+        // Tier 1 math functions should resolve to Float return type.
+        let source = r#"strategy TestMathTypes {
+    on_bar {
+        x = abs(close)
+        if x > 0.0 {
+            OPEN(symbol, 100.0)
+        }
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "Math function result used in comparison should pass: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_tier2_functions_return_float_type() {
+        // Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5
+        // Tier 2 stat functions should resolve to Float return type.
+        let source = r#"strategy TestStatTypes {
+    params {
+        period = 14
+    }
+    on_bar {
+        r = rsi(close, period)
+        if r > 70.0 {
+            CLOSE(symbol)
+        }
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "Stat indicator result used in comparison should pass: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_tier3_fixed_param_functions_wrong_arg_count() {
+        // Validates: Requirements 17.1, 17.2
+        // Tier 3 functions with Fixed params should produce errors for wrong arg counts.
+        // `det` expects 1 argument (MatFloat), calling with 2 should error.
+        let source = r#"strategy TestWrongArgs {
+    on_bar {
+        x = det(close, open)
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(result.is_err(), "Wrong argument count should produce type error");
+
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(
+                    msg.contains("det"),
+                    "Error should mention the function name 'det', got: {msg}"
+                );
+                assert!(
+                    msg.contains("expects") || msg.contains("argument"),
+                    "Error should mention expected arguments, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Type, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_tier3_transpose_wrong_arg_count() {
+        // Validates: Requirements 17.1, 17.2
+        // `transpose` expects 1 MatFloat argument, calling with 0 should error.
+        let source = r#"strategy TestWrongArgs2 {
+    on_bar {
+        x = transpose()
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(result.is_err(), "Zero arguments for transpose should produce type error");
+
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(
+                    msg.contains("transpose"),
+                    "Error should mention 'transpose', got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Type, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_variadic_numeric_rejects_non_numeric_arg() {
+        // Validates: Requirements 3.4, 17.1
+        // Variadic numeric functions should reject non-numeric arguments (e.g., String).
+        let source = r#"strategy TestBadArg {
+    on_bar {
+        x = abs("hello")
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(result.is_err(), "Non-numeric argument to abs should produce type error");
+
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(
+                    msg.contains("abs"),
+                    "Error should mention 'abs', got: {msg}"
+                );
+                assert!(
+                    msg.contains("numeric"),
+                    "Error should mention 'numeric', got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Type, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_math_functions_no_import_required() {
+        // Validates: Requirements 3.5, 9.6
+        // Math functions should work without any import statement.
+        let source = r#"strategy NoImport {
+    on_bar {
+        x = sqrt(abs(close))
+        y = max(x, 0.0)
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "Math functions should work without imports: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_math_functions_composable() {
+        // Validates: Requirements 3.1, 3.5
+        // Math functions should be composable (nesting calls).
+        let source = r#"strategy Composable {
+    params {
+        period = 20
+    }
+    on_bar {
+        x = abs(sqrt(close))
+        y = max(min(close, open), 0.0)
+        z = round(stddev(close, period))
+    }
+}"#;
+
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "Composed math functions should pass type checking: {:?}",
+            result.err()
+        );
+    }
 }

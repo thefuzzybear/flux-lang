@@ -427,3 +427,63 @@ fn backtest_missing_data_option_exits_2() {
         "Expected exit 2 for missing --data option"
     );
 }
+
+// =============================================================================
+// Math strategy integration tests (Tier 1, 2, and 3 functions)
+// =============================================================================
+
+/// Validates: Requirements 3.5, 9.6, 15.1
+/// `flux check` with a strategy using Tier 1 and 2 math/stats functions should
+/// pass type checking without errors.
+#[test]
+fn test_check_math_strategy() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("math_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0 for math strategy check, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ok"),
+        "Expected stdout to contain 'ok', got: {:?}",
+        stdout
+    );
+}
+
+/// Validates: Requirements 3.5, 9.6, 15.1, 16.1
+/// `flux backtest` with a strategy using Tier 1 and 2 math/stats functions should
+/// execute without errors and produce output (signals and/or summary).
+#[test]
+fn test_backtest_math_strategy() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("math_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("sample_data.csv"))
+        .arg("--capital")
+        .arg("10000")
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0 for math strategy backtest, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should contain the portfolio summary section
+    assert!(
+        stdout.contains("Summary"),
+        "Expected 'Summary' in backtest output, got: {:?}",
+        stdout
+    );
+}

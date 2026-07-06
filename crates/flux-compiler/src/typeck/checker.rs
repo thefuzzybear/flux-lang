@@ -263,6 +263,11 @@ impl TypeChecker {
             self.env.insert(name.to_string(), ty);
         }
 
+        // Inject math/stats/portfolio function bindings
+        for (name, ty) in builtins::math_function_bindings() {
+            self.env.insert(name.to_string(), ty);
+        }
+
         // Check handler body statements
         let mut typed_body = Vec::new();
         for stmt in handler.body {

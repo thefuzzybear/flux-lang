@@ -27,6 +27,8 @@ pub fn map_type(ty: &FluxType, span_start: usize) -> Result<String> {
         FluxType::Signal => Ok("Signal".to_string()),
         FluxType::Null => Ok("()".to_string()),
         FluxType::Void => Ok("()".to_string()),
+        FluxType::VecFloat => Ok("Vec<f64>".to_string()),
+        FluxType::MatFloat => Ok("Vec<f64>".to_string()), // row-major flat storage
         FluxType::Fn { .. } => Err(CompileError::Codegen(format!(
             "at byte {}: function types cannot be emitted as Rust types",
             span_start

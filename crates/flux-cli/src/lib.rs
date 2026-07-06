@@ -2,3 +2,6 @@
 
 pub mod interpreter;
 pub mod exit_codes;
+pub mod math_builtins;
+pub mod stat_indicators;
+pub mod portfolio_ops;

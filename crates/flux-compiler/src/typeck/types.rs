@@ -14,6 +14,10 @@ pub enum FluxType {
     Void,
     Signal,
     List(Box<FluxType>),
+    /// A one-dimensional vector of Float values (e.g., weights, returns).
+    VecFloat,
+    /// A two-dimensional matrix of Float values (e.g., covariance matrix).
+    MatFloat,
     /// Function type: parameter specification and return type.
     /// Used internally for imported functions and built-in signals.
     Fn { params: FnParams, ret: Box<FluxType> },
@@ -76,6 +80,8 @@ impl fmt::Display for FluxType {
             FluxType::Void => write!(f, "Void"),
             FluxType::Signal => write!(f, "Signal"),
             FluxType::List(t) => write!(f, "List({})", t),
+            FluxType::VecFloat => write!(f, "VecFloat"),
+            FluxType::MatFloat => write!(f, "MatFloat"),
             FluxType::Fn { ret, .. } => write!(f, "Fn -> {}", ret),
         }
     }
@@ -209,6 +215,8 @@ mod tests {
             FluxType::List(Box::new(FluxType::Int)).to_string(),
             "List(Int)"
         );
+        assert_eq!(FluxType::VecFloat.to_string(), "VecFloat");
+        assert_eq!(FluxType::MatFloat.to_string(), "MatFloat");
         assert_eq!(
             FluxType::Fn {
                 params: FnParams::Fixed(vec![FluxType::Int]),
@@ -217,5 +225,41 @@ mod tests {
             .to_string(),
             "Fn -> Float"
         );
+    }
+
+    #[test]
+    fn test_vecfloat_assignable_to_self() {
+        assert!(FluxType::VecFloat.is_assignable_to(&FluxType::VecFloat));
+    }
+
+    #[test]
+    fn test_matfloat_assignable_to_self() {
+        assert!(FluxType::MatFloat.is_assignable_to(&FluxType::MatFloat));
+    }
+
+    #[test]
+    fn test_vecfloat_not_assignable_to_other_types() {
+        assert!(!FluxType::VecFloat.is_assignable_to(&FluxType::MatFloat));
+        assert!(!FluxType::VecFloat.is_assignable_to(&FluxType::Float));
+        assert!(!FluxType::VecFloat.is_assignable_to(&FluxType::Int));
+        assert!(!FluxType::VecFloat.is_assignable_to(&FluxType::List(Box::new(FluxType::Float))));
+    }
+
+    #[test]
+    fn test_matfloat_not_assignable_to_other_types() {
+        assert!(!FluxType::MatFloat.is_assignable_to(&FluxType::VecFloat));
+        assert!(!FluxType::MatFloat.is_assignable_to(&FluxType::Float));
+        assert!(!FluxType::MatFloat.is_assignable_to(&FluxType::Int));
+        assert!(!FluxType::MatFloat.is_assignable_to(&FluxType::List(Box::new(FluxType::Float))));
+    }
+
+    #[test]
+    fn test_vecfloat_not_numeric() {
+        assert!(!FluxType::VecFloat.is_numeric());
+    }
+
+    #[test]
+    fn test_matfloat_not_numeric() {
+        assert!(!FluxType::MatFloat.is_numeric());
     }
 }

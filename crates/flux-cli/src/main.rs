@@ -3,6 +3,9 @@ mod error;
 mod diagnostics;
 mod csv_loader;
 mod interpreter;
+mod math_builtins;
+mod stat_indicators;
+mod portfolio_ops;
 mod commands;
 
 use std::path::PathBuf;

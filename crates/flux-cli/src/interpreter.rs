@@ -14,6 +14,11 @@ pub enum Value {
     Null,
     List(Vec<Value>),
     Signal(Signal),
+    /// A one-dimensional array of floats (e.g., asset weights, return vectors).
+    VecFloat(Vec<f64>),
+    /// A two-dimensional matrix of floats stored in row-major order.
+    /// Element (i, j) is at index `i * cols + j` in `data`.
+    MatFloat { data: Vec<f64>, rows: usize, cols: usize },
 }
 
 /// State entry for interpreter-managed indicator computations.
@@ -32,6 +37,52 @@ pub enum IndicatorStateEntry {
     Ema {
         prev_ema: Option<f64>,
         k: f64,
+    },
+    /// Rolling state for stddev, variance, and zscore computations.
+    /// Maintains a circular buffer with running sum and sum-of-squares
+    /// for O(1) incremental updates.
+    RollingStats {
+        buffer: Vec<f64>,
+        period: usize,
+        index: usize,
+        count: usize,
+        sum: f64,
+        sum_sq: f64,
+    },
+    /// Rolling state for corr and covariance computations.
+    /// Maintains paired circular buffers for two series.
+    RollingPair {
+        buffer_a: Vec<f64>,
+        buffer_b: Vec<f64>,
+        period: usize,
+        index: usize,
+        count: usize,
+    },
+    /// Rolling state for RSI (Relative Strength Index) using Wilder's smoothing.
+    /// Tracks the previous value and exponentially smoothed average gain/loss.
+    Rsi {
+        prev_value: Option<f64>,
+        avg_gain: f64,
+        avg_loss: f64,
+        period: usize,
+        count: usize,
+    },
+    /// Rolling state for ATR (Average True Range) using Wilder's smoothing.
+    /// Tracks previous close for True Range calculation and the smoothed ATR value.
+    Atr {
+        prev_close: Option<f64>,
+        atr_value: Option<f64>,
+        period: usize,
+        count: usize,
+    },
+    /// Rolling state for cov_matrix and corr_matrix computations.
+    /// Maintains a circular buffer of return vectors (one per bar).
+    RollingMatrix {
+        window: Vec<Vec<f64>>,
+        period: usize,
+        index: usize,
+        count: usize,
+        n_assets: usize,
     },
 }
 
@@ -267,36 +318,100 @@ impl Interpreter {
                     _ => return Err("unsupported function expression".to_string()),
                 };
 
+                // Construct a unique call-site key from the expression span
+                let call_site_key = format!("{}_{}_{}", func_name, expr.span.start, expr.span.end);
+
+                // Evaluate all arguments eagerly for tier dispatch
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a, locals))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Try Tier 1 — stateless math builtins
+                if let Some(result) = crate::math_builtins::eval_math_builtin(&func_name, &evaluated_args)? {
+                    return Ok(result);
+                }
+
+                // Try Tier 2 — stateful rolling indicators
+                if let Some(result) = crate::stat_indicators::eval_stat_indicator(
+                    &func_name,
+                    &evaluated_args,
+                    &mut self.indicators,
+                    &call_site_key,
+                )? {
+                    return Ok(result);
+                }
+
+                // Try Tier 3 — stateless matrix operations
+                if let Some(result) = crate::portfolio_ops::eval_matrix_op(&func_name, &evaluated_args)? {
+                    return Ok(result);
+                }
+
+                // Try Tier 3 — stateful portfolio operations (cov_matrix, corr_matrix, etc.)
+                if let Some(result) = crate::portfolio_ops::eval_portfolio_op(
+                    &func_name,
+                    &evaluated_args,
+                    &mut self.indicators,
+                    &call_site_key,
+                )? {
+                    return Ok(result);
+                }
+
+                // Existing built-in functions: OPEN, CLOSE, CLOSE_QTY, sma, ema
                 match func_name.as_str() {
                     "OPEN" => {
-                        if args.len() != 2 {
+                        if evaluated_args.len() != 2 {
                             return Err("OPEN requires 2 arguments (symbol, qty)".to_string());
                         }
-                        let symbol = self.eval_expr_as_string(&args[0], locals)?;
-                        let qty = self.eval_expr_as_f64(&args[1], locals)?;
+                        let symbol = match &evaluated_args[0] {
+                            Value::Str(s) => s.clone(),
+                            _ => return Err("expected a string value".to_string()),
+                        };
+                        let qty = match &evaluated_args[1] {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => return Err("expected a numeric value".to_string()),
+                        };
                         Ok(Value::Signal(Signal::open(symbol, qty)))
                     }
                     "CLOSE" => {
-                        if args.len() != 1 {
+                        if evaluated_args.len() != 1 {
                             return Err("CLOSE requires 1 argument (symbol)".to_string());
                         }
-                        let symbol = self.eval_expr_as_string(&args[0], locals)?;
+                        let symbol = match &evaluated_args[0] {
+                            Value::Str(s) => s.clone(),
+                            _ => return Err("expected a string value".to_string()),
+                        };
                         Ok(Value::Signal(Signal::close(symbol)))
                     }
                     "CLOSE_QTY" => {
-                        if args.len() != 2 {
+                        if evaluated_args.len() != 2 {
                             return Err("CLOSE_QTY requires 2 arguments (symbol, qty)".to_string());
                         }
-                        let symbol = self.eval_expr_as_string(&args[0], locals)?;
-                        let qty = self.eval_expr_as_f64(&args[1], locals)?;
+                        let symbol = match &evaluated_args[0] {
+                            Value::Str(s) => s.clone(),
+                            _ => return Err("expected a string value".to_string()),
+                        };
+                        let qty = match &evaluated_args[1] {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => return Err("expected a numeric value".to_string()),
+                        };
                         Ok(Value::Signal(Signal::close_qty(symbol, qty)))
                     }
                     "sma" => {
-                        if args.len() != 2 {
+                        if evaluated_args.len() != 2 {
                             return Err("sma requires 2 arguments (value, period)".to_string());
                         }
-                        let value = self.eval_expr_as_f64(&args[0], locals)?;
-                        let period = self.eval_expr_as_i64(&args[1], locals)? as usize;
+                        let value = match &evaluated_args[0] {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => return Err("expected a numeric value".to_string()),
+                        };
+                        let period = match &evaluated_args[1] {
+                            Value::Int(i) => *i as usize,
+                            _ => return Err("expected an integer value".to_string()),
+                        };
                         let key = format!("sma_{}_{}", expr.span.start, expr.span.end);
 
                         let entry = self.indicators.entry(key).or_insert_with(|| {
@@ -337,11 +452,18 @@ impl Interpreter {
                         Ok(Value::Float(result))
                     }
                     "ema" => {
-                        if args.len() != 2 {
+                        if evaluated_args.len() != 2 {
                             return Err("ema requires 2 arguments (value, period)".to_string());
                         }
-                        let value = self.eval_expr_as_f64(&args[0], locals)?;
-                        let period = self.eval_expr_as_i64(&args[1], locals)? as usize;
+                        let value = match &evaluated_args[0] {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => return Err("expected a numeric value".to_string()),
+                        };
+                        let period = match &evaluated_args[1] {
+                            Value::Int(i) => *i as usize,
+                            _ => return Err("expected an integer value".to_string()),
+                        };
                         let key = format!("ema_{}_{}", expr.span.start, expr.span.end);
 
                         let entry = self.indicators.entry(key).or_insert_with(|| {
@@ -1685,5 +1807,285 @@ mod tests {
         };
         let signals = interp.on_bar(&ctx);
         assert!(signals.is_empty());
+    }
+
+    // ========================================================================
+    // Dispatch integration tests (Task 7.2)
+    // Validates: Requirements 16.1, 16.3
+    // ========================================================================
+
+    /// Test that a Tier 1 math function (abs) dispatches correctly through eval_expr.
+    /// Validates: Requirement 16.1 — stateless functions produce identical outputs for identical inputs.
+    #[test]
+    fn test_dispatch_math_abs_negative_float() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "abs",
+            vec![typed_expr(TypedExprKind::FloatLiteral(-3.5), FluxType::Float)],
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 3.5).abs() < f64::EPSILON, "abs(-3.5) should be 3.5, got {}", f),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    /// Test that a Tier 1 math function (sqrt) dispatches correctly through eval_expr.
+    #[test]
+    fn test_dispatch_math_sqrt() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "sqrt",
+            vec![typed_expr(TypedExprKind::FloatLiteral(9.0), FluxType::Float)],
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 3.0).abs() < f64::EPSILON, "sqrt(9.0) should be 3.0, got {}", f),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    /// Test that a Tier 1 math function (abs) works with Int values through eval_expr.
+    #[test]
+    fn test_dispatch_math_abs_int() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+        let expr = make_fn_call(
+            "abs",
+            vec![typed_expr(TypedExprKind::IntLiteral(-7), FluxType::Int)],
+            FluxType::Float, // dispatch returns Float for type resolution, but abs(Int) → Int
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::Int(i) => assert_eq!(i, 7, "abs(-7) should be 7"),
+            other => panic!("Expected Value::Int, got {:?}", other),
+        }
+    }
+
+    /// Test that a stateful indicator (stddev) maintains state across multiple calls
+    /// through the interpreter dispatch.
+    /// Validates: Requirement 16.3 — stateful functions use per-call-site state.
+    #[test]
+    fn test_dispatch_stddev_maintains_state_across_calls() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // Feed values [2.0, 4.0, 4.0, 4.0, 5.0] with period=5
+        // Population stddev of [2,4,4,4,5] = sqrt(((2-3.8)^2 + (4-3.8)^2 + (4-3.8)^2 + (4-3.8)^2 + (5-3.8)^2)/5)
+        // = sqrt((3.24 + 0.04 + 0.04 + 0.04 + 1.44)/5) = sqrt(4.8/5) = sqrt(0.96) ≈ 0.9798
+        let values = [2.0, 4.0, 4.0, 4.0, 5.0];
+
+        // Use span (10, 20) for the call-site key
+        let mut last_result = Value::Float(0.0);
+        for &val in &values {
+            let expr = TypedExpr {
+                kind: TypedExprKind::FunctionCall {
+                    function: Box::new(TypedExpr {
+                        kind: TypedExprKind::Ident("stddev".to_string()),
+                        resolved_type: FluxType::Fn {
+                            params: flux_compiler::typeck::types::FnParams::Fixed(vec![]),
+                            ret: Box::new(FluxType::Float),
+                        },
+                        span: Span::new(10, 20),
+                    }),
+                    args: vec![
+                        typed_expr(TypedExprKind::FloatLiteral(val), FluxType::Float),
+                        typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+                    ],
+                },
+                resolved_type: FluxType::Float,
+                span: Span::new(10, 20),
+            };
+            last_result = interp.eval_expr(&expr, &locals).unwrap();
+        }
+
+        // After all 5 values, stddev should be sqrt(0.96) ≈ 0.9798
+        match last_result {
+            Value::Float(f) => {
+                let expected = (0.96_f64).sqrt();
+                assert!(
+                    (f - expected).abs() < 1e-10,
+                    "stddev of [2,4,4,4,5] with period=5 should be {}, got {}",
+                    expected,
+                    f
+                );
+            }
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+
+        // Verify that indicator state was actually stored
+        assert!(!interp.indicators.is_empty(), "Indicators map should have state entries after stateful calls");
+    }
+
+    /// Test that feeding a constant series through stddev yields 0.0 (no variance).
+    #[test]
+    fn test_dispatch_stddev_constant_series_zero() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        let mut last_result = Value::Float(0.0);
+        for _ in 0..5 {
+            let expr = TypedExpr {
+                kind: TypedExprKind::FunctionCall {
+                    function: Box::new(TypedExpr {
+                        kind: TypedExprKind::Ident("stddev".to_string()),
+                        resolved_type: FluxType::Fn {
+                            params: flux_compiler::typeck::types::FnParams::Fixed(vec![]),
+                            ret: Box::new(FluxType::Float),
+                        },
+                        span: Span::new(30, 40),
+                    }),
+                    args: vec![
+                        typed_expr(TypedExprKind::FloatLiteral(5.0), FluxType::Float),
+                        typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+                    ],
+                },
+                resolved_type: FluxType::Float,
+                span: Span::new(30, 40),
+            };
+            last_result = interp.eval_expr(&expr, &locals).unwrap();
+        }
+
+        match last_result {
+            Value::Float(f) => assert!(
+                f.abs() < 1e-10,
+                "stddev of constant series should be 0.0, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    /// Test that existing sma function still works correctly through the dispatch.
+    /// Validates: Requirement 16.3 — existing sma/ema still work after refactoring.
+    #[test]
+    fn test_dispatch_sma_correct_results() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // Feed values [10.0, 20.0, 30.0] with period=3
+        // After 3 values, sma should be (10+20+30)/3 = 20.0
+        let values = [10.0, 20.0, 30.0];
+        let mut last_result = Value::Float(0.0);
+
+        for &val in &values {
+            let expr = make_fn_call(
+                "sma",
+                vec![
+                    typed_expr(TypedExprKind::FloatLiteral(val), FluxType::Float),
+                    typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+                ],
+                FluxType::Float,
+            );
+            last_result = interp.eval_expr(&expr, &locals).unwrap();
+        }
+
+        match last_result {
+            Value::Float(f) => assert!(
+                (f - 20.0).abs() < f64::EPSILON,
+                "sma([10, 20, 30], 3) should be 20.0, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    /// Test sma with a rolling window — verify older values are dropped.
+    #[test]
+    fn test_dispatch_sma_rolling_window() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // Feed values [10.0, 20.0, 30.0, 40.0] with period=3
+        // After 4th value, window should be [20, 30, 40], sma = 30.0
+        let values = [10.0, 20.0, 30.0, 40.0];
+        let mut last_result = Value::Float(0.0);
+
+        for &val in &values {
+            let expr = make_fn_call(
+                "sma",
+                vec![
+                    typed_expr(TypedExprKind::FloatLiteral(val), FluxType::Float),
+                    typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+                ],
+                FluxType::Float,
+            );
+            last_result = interp.eval_expr(&expr, &locals).unwrap();
+        }
+
+        match last_result {
+            Value::Float(f) => assert!(
+                (f - 30.0).abs() < f64::EPSILON,
+                "sma([10,20,30,40], period=3) final should be 30.0, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    /// Test that existing ema function still works correctly through the dispatch.
+    #[test]
+    fn test_dispatch_ema_correct_results() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // Feed values [10.0, 20.0, 30.0] with period=3
+        // EMA: k = 2/(3+1) = 0.5
+        // After value 10.0: ema = 10.0 (first value)
+        // After value 20.0: ema = 20.0 * 0.5 + 10.0 * 0.5 = 15.0
+        // After value 30.0: ema = 30.0 * 0.5 + 15.0 * 0.5 = 22.5
+        let values = [10.0, 20.0, 30.0];
+        let mut last_result = Value::Float(0.0);
+
+        for &val in &values {
+            let expr = make_fn_call(
+                "ema",
+                vec![
+                    typed_expr(TypedExprKind::FloatLiteral(val), FluxType::Float),
+                    typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
+                ],
+                FluxType::Float,
+            );
+            last_result = interp.eval_expr(&expr, &locals).unwrap();
+        }
+
+        match last_result {
+            Value::Float(f) => assert!(
+                (f - 22.5).abs() < f64::EPSILON,
+                "ema([10, 20, 30], period=3) should be 22.5, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    /// Test that ema first call returns the input value itself.
+    #[test]
+    fn test_dispatch_ema_first_value() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        let expr = make_fn_call(
+            "ema",
+            vec![
+                typed_expr(TypedExprKind::FloatLiteral(42.0), FluxType::Float),
+                typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
+            ],
+            FluxType::Float,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+
+        match result {
+            Value::Float(f) => assert!(
+                (f - 42.0).abs() < f64::EPSILON,
+                "ema first value should return the input itself (42.0), got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
     }
 }
