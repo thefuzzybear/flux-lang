@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Green upward caret (bull tick) - left, higher -->
+  <polygon points="2,20 10,10 18,20" fill="#22c55e" stroke="none"/>
+  <!-- Red downward caret (bear tick) - right, lower, no overlap -->
+  <polygon points="14,12 22,22 30,12" fill="#ef4444" stroke="none"/>
+</svg>

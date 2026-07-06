@@ -1,6 +1,7 @@
 mod exit_codes;
 mod error;
 mod diagnostics;
+mod formatter;
 mod csv_loader;
 mod interpreter;
 mod math_builtins;
@@ -54,6 +55,23 @@ enum Commands {
         /// Project name (defaults to current directory name)
         name: Option<String>,
     },
+    /// Format a Flux source file with optional colorization
+    Fmt {
+        /// Path to the Flux source file
+        file: PathBuf,
+        /// Force color output even when not a TTY
+        #[arg(long)]
+        color: bool,
+        /// Disable color output
+        #[arg(long)]
+        no_color: bool,
+        /// Reformat the file in place
+        #[arg(long)]
+        write: bool,
+        /// Check if file needs formatting (exit 1 if yes)
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() {
@@ -90,6 +108,40 @@ fn main() {
             Err(e) => {
                 eprintln!("error: {e}");
                 FAILURE
+            }
+        },
+        Commands::Fmt { file, color, no_color, write, check } => {
+            // Determine color mode — mutually exclusive flags
+            let color_mode = if color && no_color {
+                eprintln!("error: flags '--color' and '--no-color' are mutually exclusive");
+                process::exit(USAGE_ERROR);
+            } else if color {
+                formatter::ansi::ColorMode::Always
+            } else if no_color {
+                formatter::ansi::ColorMode::Never
+            } else {
+                formatter::ansi::ColorMode::Auto
+            };
+
+            match commands::fmt::run_fmt(&file, color_mode, write, check) {
+                Ok(()) => SUCCESS,
+                Err(e) => {
+                    match &e {
+                        commands::fmt::FmtError::MutuallyExclusive(_, _) => {
+                            eprintln!("error: {e}");
+                            USAGE_ERROR
+                        }
+                        commands::fmt::FmtError::FileRead { .. }
+                        | commands::fmt::FmtError::FileWrite { .. } => {
+                            eprintln!("error: {e}");
+                            FAILURE
+                        }
+                        commands::fmt::FmtError::Compile(_) => {
+                            // Diagnostic already printed to stderr by run_fmt
+                            FAILURE
+                        }
+                    }
+                }
             }
         },
     };

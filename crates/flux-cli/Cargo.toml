@@ -20,10 +20,12 @@ clap = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+is-terminal = "0.4"
 flux-compiler = { path = "../flux-compiler" }
 flux-runtime = { path = "../flux-runtime" }
 
 [dev-dependencies]
 proptest = { workspace = true }
 regex = "1.10"
+serde_json = { workspace = true }
 toml = "0.8"

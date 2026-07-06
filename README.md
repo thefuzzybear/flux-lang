@@ -148,8 +148,28 @@ flux build strategy.flux           # Compile to Rust code (stdout)
 flux build strategy.flux --output out.rs  # Compile to file
 flux backtest strategy.flux --data prices.csv              # Backtest (default $10k capital)
 flux backtest strategy.flux --data prices.csv --capital 50000  # Custom capital
+flux fmt strategy.flux             # Format and display with color
+flux fmt strategy.flux --write     # Format file in place
+flux fmt strategy.flux --check     # Check formatting (for CI)
 flux init my-project              # Scaffold a new project
 ```
+
+## Editor Support
+
+Flux ships with a VS Code / Kiro extension for syntax highlighting:
+
+```bash
+cd editors/vscode
+npx @vscode/vsce package --allow-missing-repository
+```
+
+Then install the `.vsix` from the command palette: **Cmd+Shift+P** → "Extensions: Install from VSIX..."
+
+The extension provides:
+- Syntax highlighting for all Flux language elements
+- Bracket matching and auto-closing
+- Comment toggling (`#`)
+- Custom file icon for `.flux` files
 
 ## Documentation
 
@@ -190,7 +210,8 @@ Native Binary
 
 **Compiler:** Lexer → Parser → Type Checker → Code Generator  
 **Runtime:** PositionTracker (fill simulation, P&L, mark-to-market), Indicators (SMA, EMA)  
-**CLI:** check, build, backtest, init
+**CLI:** check, build, backtest, fmt, init  
+**Editor:** VS Code / Kiro extension (TextMate grammar, file icon)
 
 ## Project Goals
 

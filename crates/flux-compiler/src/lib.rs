@@ -42,6 +42,7 @@ pub mod typeck;
 pub mod codegen;
 
 pub use error::{CompileError, Result};
+pub use lexer::{Comment, CommentPlacement, extract_comments};
 
 /// Compile Flux source code to Rust code.
 ///

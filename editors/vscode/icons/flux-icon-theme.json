@@ -1,0 +1,10 @@
+{
+  "iconDefinitions": {
+    "flux": {
+      "iconPath": "./flux.svg"
+    }
+  },
+  "languageIds": {
+    "flux": "flux"
+  }
+}

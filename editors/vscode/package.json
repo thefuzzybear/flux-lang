@@ -1,0 +1,33 @@
+{
+  "name": "flux-lang",
+  "displayName": "Flux Language",
+  "description": "Syntax highlighting for the Flux trading language",
+  "version": "0.2.0",
+  "publisher": "flux-lang",
+  "icon": "icons/flux.png",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "flux",
+        "aliases": ["Flux", "flux"],
+        "extensions": [".flux"],
+        "icon": {
+          "light": "./icons/flux.svg",
+          "dark": "./icons/flux.svg"
+        },
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "flux",
+        "scopeName": "source.flux",
+        "path": "./syntaxes/flux.tmLanguage.json"
+      }
+    ]
+  }
+}

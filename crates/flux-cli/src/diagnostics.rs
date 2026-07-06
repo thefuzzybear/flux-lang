@@ -1,5 +1,66 @@
 use crate::error::CompileErrorWithSpan;
 
+/// Get the content of a specific line (1-based) from source.
+/// Returns an empty string if the line number is out of range.
+fn get_source_line(source: &str, line_num: usize) -> &str {
+    source.lines().nth(line_num - 1).unwrap_or("")
+}
+
+/// Format an error with optional ANSI coloring and source context.
+///
+/// Renders the error header (`error[file:line:col]: message`) with optional color,
+/// followed by the source line containing the error and a caret (`^`) pointing
+/// to the error column.
+///
+/// When `use_color` is true:
+/// - `error` is rendered in bold red (`\x1b[1;31m`)
+/// - `file:line:col` is rendered in cyan (`\x1b[36m`)
+///
+/// Edge case: if the offset points to end-of-file, the last source line is shown
+/// with the caret positioned one column past the last character.
+pub fn format_error_colored(
+    file: &str,
+    source: &str,
+    offset: usize,
+    message: &str,
+    use_color: bool,
+) -> String {
+    let (line_num, col) = byte_offset_to_line_col(source, offset);
+
+    // Build header
+    let header = if use_color {
+        format!(
+            "\x1b[1;31merror\x1b[0m[\x1b[36m{}:{}:{}\x1b[0m]: {}",
+            file, line_num, col, message
+        )
+    } else {
+        format!("error[{}:{}:{}]: {}", file, line_num, col, message)
+    };
+
+    // Get the source line
+    let source_line = get_source_line(source, line_num);
+
+    // Build the line number gutter width
+    let line_num_str = line_num.to_string();
+    let gutter_width = line_num_str.len();
+
+    // Source line: "   3 | x = if y"
+    let source_display = format!(
+        "{:>width$} | {}",
+        line_num,
+        source_line,
+        width = gutter_width
+    );
+
+    // Caret line: the caret goes at column position (col - 1) offset by the gutter
+    // Gutter takes: gutter_width + " | " (3 chars)
+    let gutter_padding = " ".repeat(gutter_width + 3); // digits + " | "
+    let col_padding = " ".repeat(col.saturating_sub(1));
+    let caret_line = format!("{}{}^", gutter_padding, col_padding);
+
+    format!("{}\n{}\n{}", header, source_display, caret_line)
+}
+
 /// Converts a byte offset in a source string to a 1-based (line, column) pair.
 ///
 /// - Lines are 1-based (first line is line 1).
@@ -225,6 +286,93 @@ mod tests {
         ];
         let result = format_errors("test.flux", source, &errors);
         assert_eq!(result, "error[test.flux:1:7]: bad value");
+    }
+
+    // --- Tests for format_error_colored ---
+
+    #[test]
+    fn format_error_colored_with_color() {
+        let source = "x = if y\nz = 10";
+        // offset 4 is 'i' in 'if' → line 1, col 5
+        let result = format_error_colored("file.flux", source, 4, "unexpected token 'if'", true);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            "\x1b[1;31merror\x1b[0m[\x1b[36mfile.flux:1:5\x1b[0m]: unexpected token 'if'"
+        );
+        assert_eq!(lines[1], "1 | x = if y");
+        assert_eq!(lines[2], "        ^");
+    }
+
+    #[test]
+    fn format_error_colored_without_color() {
+        let source = "x = if y\nz = 10";
+        let result = format_error_colored("file.flux", source, 4, "unexpected token 'if'", false);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "error[file.flux:1:5]: unexpected token 'if'");
+        assert_eq!(lines[1], "1 | x = if y");
+        assert_eq!(lines[2], "        ^");
+    }
+
+    #[test]
+    fn format_error_colored_second_line() {
+        let source = "let x = 42\nlet y = bad";
+        // offset 15 is 'b' in 'bad' → line 2, col 9-offset from newline at pos 10: 15-10 = 5
+        // Actually: newline at pos 10, so col = 15 - 10 = 5
+        let result = format_error_colored("test.flux", source, 15, "unknown identifier", false);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "error[test.flux:2:5]: unknown identifier");
+        assert_eq!(lines[1], "2 | let y = bad");
+        assert_eq!(lines[2], "        ^");
+    }
+
+    #[test]
+    fn format_error_colored_multi_digit_line_number() {
+        // Create source with 10+ lines
+        let source = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl";
+        // offset for 'k' on line 11: each line is 2 bytes (char + newline) except last
+        // 'k' is at offset 20 → line 11, col 1
+        let result = format_error_colored("test.flux", source, 20, "error here", false);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "error[test.flux:11:1]: error here");
+        assert_eq!(lines[1], "11 | k");
+        // gutter is "11 | " (5 chars), col 1 means caret under 'k' → 5 spaces + ^
+        assert_eq!(lines[2], "     ^");
+    }
+
+    #[test]
+    fn format_error_colored_offset_at_eof() {
+        let source = "hello";
+        // offset 5 == source.len(), clamped → line 1, col 6 (one past last char)
+        let result = format_error_colored("test.flux", source, 5, "unexpected EOF", false);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "error[test.flux:1:6]: unexpected EOF");
+        assert_eq!(lines[1], "1 | hello");
+        assert_eq!(lines[2], "         ^");
+    }
+
+    #[test]
+    fn format_error_colored_empty_source() {
+        let source = "";
+        // offset 0 on empty → line 1, col 1
+        let result = format_error_colored("test.flux", source, 0, "empty file", false);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "error[test.flux:1:1]: empty file");
+        assert_eq!(lines[1], "1 | ");
+        assert_eq!(lines[2], "    ^");
+    }
+
+    #[test]
+    fn format_error_colored_offset_at_first_char() {
+        let source = "hello world";
+        // offset 0 → line 1, col 1
+        let result = format_error_colored("test.flux", source, 0, "bad start", false);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines[0], "error[test.flux:1:1]: bad start");
+        assert_eq!(lines[1], "1 | hello world");
+        assert_eq!(lines[2], "    ^");
     }
 
     // **Validates: Requirements 2.9, 6.3**

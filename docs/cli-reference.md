@@ -235,6 +235,134 @@ Created Flux project 'my-project' at /home/user/my-project
 
 ---
 
+## `flux fmt`
+
+Format a Flux source file with consistent style. Outputs colorized code to the terminal by default, or can rewrite files in place or check formatting in CI.
+
+### Usage
+
+```
+flux fmt <file> [--color] [--no-color] [--write] [--check]
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `file`   | Yes      | Path to the `.flux` source file to format |
+
+### Flags
+
+| Flag         | Required | Default | Description |
+|--------------|----------|---------|-------------|
+| `--color`    | No       | —       | Force ANSI color output even when stdout is not a TTY |
+| `--no-color` | No       | —       | Disable ANSI color output (plain text) |
+| `--write`    | No       | —       | Reformat the file in place (overwrites the source file) |
+| `--check`    | No       | —       | Check if the file needs formatting without modifying it |
+
+**Mutually exclusive:** `--color` and `--no-color` cannot be combined (exit code 2). `--write` and `--check` cannot be combined (exit code 2).
+
+### Exit Codes
+
+- **0** — Success (file formatted to stdout, written in place, or already formatted in check mode).
+- **1** — Compilation error in the source file, or file needs formatting (in `--check` mode).
+- **2** — Invalid usage (mutually exclusive flags, missing arguments).
+
+### Modes
+
+#### Default (stdout)
+
+Formats the file and prints the result to stdout. When stdout is a terminal, output is colorized with ANSI codes (keywords in blue, strings in green, numbers in cyan, etc.). When piped, output is plain text.
+
+```bash
+$ flux fmt strategies/sma_crossover.flux
+```
+
+#### Write mode (`--write`)
+
+Reformats the file in place. The file is overwritten with the formatted output (no ANSI codes). If the file is already correctly formatted, it's left untouched.
+
+```bash
+$ flux fmt strategies/sma_crossover.flux --write
+```
+
+#### Check mode (`--check`)
+
+Compares the formatted output to the file contents without modifying anything. Useful for CI pipelines to enforce consistent style.
+
+```bash
+$ flux fmt strategies/sma_crossover.flux --check
+```
+
+If the file needs formatting, the command prints the file path and exits with code 1:
+
+```
+strategies/sma_crossover.flux: needs formatting
+```
+
+### Formatting Rules
+
+The formatter enforces a canonical style for all `.flux` files:
+
+- **Indentation:** 4 spaces per nesting level (no tabs)
+- **Braces:** Opening `{` on the same line as the declaration, closing `}` on its own line
+- **Block separation:** One blank line between top-level blocks (params, state, on bar)
+- **Operators:** One space around binary operators (`x + y`, `a == b`, `x and y`)
+- **Function calls:** No space before `(`, one space after commas (`sma(close, 20)`)
+- **Elif/else:** `} elif` and `} else` on the same line as the closing brace
+- **Trailing whitespace:** Stripped from every line
+- **Trailing newline:** Exactly one at end of file
+- **Comments:** Preserved in their original relative position (above or trailing)
+
+### Color Theme
+
+When color is active, tokens are highlighted as:
+
+| Element | Color |
+|---------|-------|
+| Keywords (strategy, if, for, etc.) | Bold Blue |
+| Signal functions (OPEN, CLOSE, CLOSE_QTY) | Bold Magenta |
+| String literals | Green |
+| Numeric literals (int and float) | Cyan |
+| Comments | Dim Gray |
+| Operators | Yellow |
+| Boolean/null literals | Bold Blue |
+| Identifiers | Default |
+| Delimiters | Default |
+
+### Examples
+
+Format and display with color:
+
+```bash
+$ flux fmt strategies/mean_reversion.flux --color
+```
+
+Format all files in a project (shell loop):
+
+```bash
+$ for f in strategies/*.flux; do flux fmt "$f" --write; done
+```
+
+CI check (fails if any file is unformatted):
+
+```bash
+$ for f in strategies/*.flux; do flux fmt "$f" --check || exit 1; done
+```
+
+### Error Diagnostics
+
+If the source file has syntax errors, `flux fmt` prints colorized diagnostics to stderr showing the error location with a caret:
+
+```bash
+$ flux fmt broken.flux
+error[broken.flux:3:10]: unexpected token
+   3 | x = if y
+             ^
+```
+
+---
+
 ## Error Handling
 
 When a command receives invalid arguments (missing required flags, unknown options, or malformed values), the CLI exits with code **2** and prints a usage error message to stderr:

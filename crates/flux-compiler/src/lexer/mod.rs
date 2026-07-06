@@ -12,10 +12,12 @@
 //! // tokens contains: [Strategy, Ident("Simple"), OpenBrace, CloseBrace]
 //! ```
 
+pub mod comments;
 pub(crate) mod logos_token;
 pub mod span;
 pub mod token;
 
+pub use comments::{Comment, CommentPlacement, extract_comments};
 pub use span::{Span, SpannedToken};
 pub use token::Token;
 
@@ -1104,3 +1106,6 @@ mod tests {
 
 #[cfg(test)]
 mod tests_property;
+
+#[cfg(test)]
+mod comments_property;
