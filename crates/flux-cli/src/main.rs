@@ -43,6 +43,11 @@ enum Commands {
         #[arg(long)]
         data: PathBuf,
     },
+    /// Initialize a new Flux project
+    Init {
+        /// Project name (defaults to current directory name)
+        name: Option<String>,
+    },
 }
 
 fn main() {
@@ -74,6 +79,13 @@ fn main() {
                 Err(_e) => FAILURE,
             }
         }
+        Commands::Init { name } => match commands::init::run_init(name.as_deref()) {
+            Ok(()) => SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                FAILURE
+            }
+        },
     };
 
     process::exit(exit_code);

@@ -18,3 +18,10 @@ pub use context::BarContext;
 pub use signal::Signal;
 pub use indicators::{sma, ema};
 pub use backtest::{run_backtest, BacktestResult};
+
+pub mod position_tracker;
+
+pub use position_tracker::{
+    Fill, FillSide, Position, PortfolioState, PositionTracker,
+    run_backtest_with_tracker, TrackedBacktestResult,
+};

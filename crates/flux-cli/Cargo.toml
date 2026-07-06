@@ -25,3 +25,5 @@ flux-runtime = { path = "../flux-runtime" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+regex = "1.10"
+toml = "0.8"
