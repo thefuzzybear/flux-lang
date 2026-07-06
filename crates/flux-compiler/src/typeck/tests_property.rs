@@ -1534,7 +1534,7 @@ mod tests {
 
     // **Validates: Requirements 2.3, 2.5, 2.6**
     //
-    // Homogeneous list → List(T). Mixed Int/Float → List(Float).
+    // Homogeneous numeric list → VecFloat. Mixed Int/Float → VecFloat.
     // Incompatible (String+Int) → error.
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
@@ -1582,8 +1582,8 @@ mod tests {
             if let TypedStrategyItem::StateBlock(sb) = &typed.strategy.body[0] {
                 prop_assert_eq!(
                     &sb.variables[0].resolved_type,
-                    &FluxType::List(Box::new(FluxType::Int)),
-                    "Expected List(Int), got {:?}",
+                    &FluxType::VecFloat,
+                    "Expected VecFloat, got {:?}",
                     sb.variables[0].resolved_type
                 );
             } else {
@@ -1642,8 +1642,8 @@ mod tests {
             if let TypedStrategyItem::StateBlock(sb) = &typed.strategy.body[0] {
                 prop_assert_eq!(
                     &sb.variables[0].resolved_type,
-                    &FluxType::List(Box::new(FluxType::Float)),
-                    "Expected List(Float) for mixed numeric, got {:?}",
+                    &FluxType::VecFloat,
+                    "Expected VecFloat for mixed numeric, got {:?}",
                     sb.variables[0].resolved_type
                 );
             } else {
@@ -1858,16 +1858,16 @@ mod tests {
 
         #[test]
         fn prop_list_method_append_returns_void(
-            append_val in 0i64..10000,
+            append_val in "[a-z]{1,5}",
             span in arb_span(),
         ) {
-            // state: items = [1]
+            // state: items = ["a"] (use String list to keep List(T) type)
             // handler: items.append(N) → Void
             let state_vars = vec![StateVar {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -1878,7 +1878,7 @@ mod tests {
                 kind: ExprKind::MethodCall {
                     receiver: Box::new(Expr { kind: ExprKind::Ident("items".to_string()), span }),
                     method: "append".to_string(),
-                    args: vec![Expr { kind: ExprKind::IntLiteral(append_val), span }],
+                    args: vec![Expr { kind: ExprKind::StringLiteral(append_val), span }],
                 },
                 span,
             };
@@ -1928,7 +1928,7 @@ mod tests {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -1995,7 +1995,7 @@ mod tests {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -2042,8 +2042,8 @@ mod tests {
                 if let TypedStmt::Assignment(assign) = &eh.body[0] {
                     prop_assert_eq!(
                         &assign.value.resolved_type,
-                        &FluxType::Int,
-                        "pop on List(Int) should return Int, got {:?}",
+                        &FluxType::String,
+                        "pop on List(String) should return String, got {:?}",
                         assign.value.resolved_type
                     );
                 } else {
@@ -2066,7 +2066,7 @@ mod tests {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -2191,13 +2191,13 @@ mod tests {
             idx_val in 0i64..100,
             span in arb_span(),
         ) {
-            // state: items = [1]
+            // state: items = ["a"] (use String list to keep List(T) type)
             // handler: result = items[idx]
             let state_vars = vec![StateVar {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -2243,8 +2243,8 @@ mod tests {
                 if let TypedStmt::Assignment(assign) = &eh.body[0] {
                     prop_assert_eq!(
                         &assign.value.resolved_type,
-                        &FluxType::Int,
-                        "List(Int)[Int] should yield Int, got {:?}",
+                        &FluxType::String,
+                        "List(String)[Int] should yield String, got {:?}",
                         assign.value.resolved_type
                     );
                 } else {
@@ -2320,7 +2320,7 @@ mod tests {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -2771,14 +2771,14 @@ mod tests {
         fn prop_for_loop_binds_variable_to_element_type(
             span in arb_span(),
         ) {
-            // state: items = [1]
+            // state: items = ["a"] (use String list to keep List(T) type)
             // handler: for item in items { x = item }
-            // Verify x resolves to Int (element type of List(Int))
+            // Verify x resolves to String (element type of List(String))
             let state_vars = vec![StateVar {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -2821,19 +2821,19 @@ mod tests {
             let typed = result.unwrap();
             if let TypedStrategyItem::EventHandler(eh) = &typed.strategy.body[1] {
                 if let TypedStmt::For(f) = &eh.body[0] {
-                    // Loop variable type should be Int
+                    // Loop variable type should be String
                     prop_assert_eq!(
                         &f.variable_type,
-                        &FluxType::Int,
-                        "Loop variable should be Int, got {:?}",
+                        &FluxType::String,
+                        "Loop variable should be String, got {:?}",
                         f.variable_type
                     );
-                    // Body assignment x = item: value should be Int
+                    // Body assignment x = item: value should be String
                     if let TypedStmt::Assignment(assign) = &f.body[0] {
                         prop_assert_eq!(
                             &assign.value.resolved_type,
-                            &FluxType::Int,
-                            "x = item should resolve item as Int, got {:?}",
+                            &FluxType::String,
+                            "x = item should resolve item as String, got {:?}",
                             assign.value.resolved_type
                         );
                     } else {
@@ -2851,13 +2851,13 @@ mod tests {
         fn prop_for_loop_variable_not_accessible_after(
             span in arb_span(),
         ) {
-            // state: items = [1]
+            // state: items = ["a"]
             // handler: for item in items { z = item }; y = item  ← error
             let state_vars = vec![StateVar {
                 name: "items".to_string(),
                 initial_value: Expr {
                     kind: ExprKind::ListLiteral(vec![
-                        Expr { kind: ExprKind::IntLiteral(1), span },
+                        Expr { kind: ExprKind::StringLiteral("a".to_string()), span },
                     ]),
                     span,
                 },
@@ -3031,6 +3031,268 @@ mod tests {
                     prop_assert!(
                         msg.contains("undefined identifier") && msg.contains("wvar"),
                         "Error should mention undefined identifier 'wvar', got: {}", msg
+                    );
+                }
+                other => {
+                    prop_assert!(false, "Expected CompileError::Type, got: {:?}", other);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Feature: portfolio-construction, Property 1: All-Numeric List Literal Infers VecFloat
+    // ========================================================================
+
+    // **Validates: Requirements 1.1, 1.2**
+    //
+    // For any list literal expression containing only elements that resolve to
+    // numeric types (Int or Float), the type checker SHALL infer the type as
+    // VecFloat.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_portfolio_vecfloat_inference(
+            numeric_exprs in arb_span().prop_flat_map(|s| {
+                prop::collection::vec(arb_numeric_expr(s), 1..=20)
+            }),
+            span in arb_span(),
+        ) {
+            // Extract expressions from the (Expr, FluxType) pairs
+            let elements: Vec<Expr> = numeric_exprs.iter().map(|(expr, _)| expr.clone()).collect();
+            let list_len = elements.len();
+
+            // Wrap the list literal in a state variable assignment
+            let state_vars = vec![StateVar {
+                name: "weights".to_string(),
+                initial_value: Expr {
+                    kind: ExprKind::ListLiteral(elements),
+                    span,
+                },
+                span,
+            }];
+
+            let program = Program {
+                imports: vec![],
+                strategy: AstStrategy {
+                    name: "T".to_string(),
+                    body: vec![
+                        StrategyItem::StateBlock(StateBlock { variables: state_vars, span }),
+                        StrategyItem::EventHandler(EventHandler {
+                            event_name: "bar".to_string(),
+                            body: vec![Stmt::Expr(ExprStmt {
+                                expr: Expr { kind: ExprKind::IntLiteral(1), span },
+                                span,
+                            })],
+                            span,
+                        }),
+                    ],
+                    span,
+                },
+                span,
+            };
+
+            let result = super::super::check(program);
+            prop_assert!(
+                result.is_ok(),
+                "All-numeric list of length {} should pass type checking: {:?}",
+                list_len,
+                result.err()
+            );
+
+            let typed = result.unwrap();
+            if let TypedStrategyItem::StateBlock(sb) = &typed.strategy.body[0] {
+                prop_assert_eq!(
+                    &sb.variables[0].resolved_type,
+                    &FluxType::VecFloat,
+                    "All-numeric list literal (length {}) should infer VecFloat, got {:?}",
+                    list_len,
+                    sb.variables[0].resolved_type
+                );
+            } else {
+                prop_assert!(false, "Expected StateBlock as first strategy item");
+            }
+        }
+    }
+
+    // ========================================================================
+    // Feature: portfolio-construction, Property 3: Non-Numeric List Element Produces Type Error
+    // ========================================================================
+
+    // **Validates: Requirements 1.6**
+    //
+    // For any list literal containing at least one element whose resolved type
+    // is not Int or Float, the type checker SHALL report a type error indicating
+    // the expected numeric type and the actual offending element type.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_portfolio_non_numeric_list_element_type_error(
+            numeric_count in 1usize..=5,
+            non_numeric_insert_pos in 0usize..6,
+            non_numeric in arb_span().prop_flat_map(|s| arb_non_numeric_expr(s)),
+            span in arb_span(),
+        ) {
+            // Build a list with numeric elements first, then insert a non-numeric
+            let mut elements: Vec<Expr> = (0..numeric_count).map(|i| Expr {
+                kind: ExprKind::FloatLiteral(1.0 + i as f64),
+                span,
+            }).collect();
+
+            // Insert the non-numeric element at a valid position
+            let insert_at = non_numeric_insert_pos.min(elements.len());
+            let (non_numeric_expr, _non_numeric_ty) = non_numeric;
+            elements.insert(insert_at, non_numeric_expr);
+
+            // Place the list literal in the handler body as an assignment.
+            // This ensures it goes through check_list_literal() which produces
+            // the "list literal expected numeric element" error.
+            let handler_stmt = Stmt::Assignment(Assignment {
+                target: Expr {
+                    kind: ExprKind::Ident("mixed".to_string()),
+                    span,
+                },
+                value: Expr { kind: ExprKind::ListLiteral(elements), span },
+                span,
+            });
+
+            let program = Program {
+                imports: vec![],
+                strategy: AstStrategy {
+                    name: "T".to_string(),
+                    body: vec![
+                        StrategyItem::EventHandler(EventHandler {
+                            event_name: "bar".to_string(),
+                            body: vec![handler_stmt],
+                            span,
+                        }),
+                    ],
+                    span,
+                },
+                span,
+            };
+
+            let result = super::super::check(program);
+            prop_assert!(
+                result.is_err(),
+                "List with non-numeric element among numerics should produce a type error"
+            );
+
+            let err = result.unwrap_err();
+            match &err {
+                CompileError::Type(msg) => {
+                    prop_assert!(
+                        msg.contains("list literal expected numeric element"),
+                        "Error should contain 'list literal expected numeric element', got: {}", msg
+                    );
+                }
+                other => {
+                    prop_assert!(false, "Expected CompileError::Type, got: {:?}", other);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Feature: portfolio-construction, Property 5: Non-Int VecFloat Index Produces Type Error
+    // ========================================================================
+
+    // **Validates: Requirements 2.5**
+    //
+    // For any VecFloat value and any index expression whose type is not Int
+    // (Float, String, Bool), the type checker SHALL report a type error
+    // indicating the index must be Int.
+
+    /// Generate a non-Int index expression (Float, String, or Bool literal).
+    fn arb_non_int_index_expr(span: Span) -> impl Strategy<Value = Expr> {
+        prop_oneof![
+            // Float index
+            (1u32..999, 1u32..99).prop_map(move |(i, d)| {
+                let f: f64 = format!("{}.{}", i, d).parse().unwrap();
+                Expr {
+                    kind: ExprKind::FloatLiteral(f),
+                    span,
+                }
+            }),
+            // String index
+            "[a-z]{1,8}".prop_map(move |s| Expr {
+                kind: ExprKind::StringLiteral(s),
+                span,
+            }),
+            // Bool index
+            any::<bool>().prop_map(move |b| Expr {
+                kind: ExprKind::BoolLiteral(b),
+                span,
+            }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_portfolio_vecfloat_non_int_index(
+            num_elements in 1usize..=5,
+            float_vals in prop::collection::vec(1u32..999u32, 1..=5),
+            non_int_index in arb_span().prop_flat_map(|s| arb_non_int_index_expr(s)),
+            span in arb_span(),
+        ) {
+            // Build a VecFloat literal with numeric elements
+            let elements: Vec<Expr> = float_vals.iter().take(num_elements).map(|v| Expr {
+                kind: ExprKind::FloatLiteral(*v as f64),
+                span,
+            }).collect();
+
+            // Create a state variable initialized to a VecFloat
+            let state_vars = vec![StateVar {
+                name: "weights".to_string(),
+                initial_value: Expr { kind: ExprKind::ListLiteral(elements), span },
+                span,
+            }];
+
+            // Index the VecFloat with a non-Int expression
+            let index_expr = Expr {
+                kind: ExprKind::IndexAccess {
+                    object: Box::new(Expr { kind: ExprKind::Ident("weights".to_string()), span }),
+                    index: Box::new(non_int_index),
+                },
+                span,
+            };
+
+            let stmt = Stmt::Assignment(Assignment {
+                target: Expr { kind: ExprKind::Ident("val".to_string()), span },
+                value: index_expr,
+                span,
+            });
+
+            let program = Program {
+                imports: vec![],
+                strategy: AstStrategy {
+                    name: "T".to_string(),
+                    body: vec![
+                        StrategyItem::StateBlock(StateBlock { variables: state_vars, span }),
+                        StrategyItem::EventHandler(EventHandler {
+                            event_name: "bar".to_string(),
+                            body: vec![stmt],
+                            span,
+                        }),
+                    ],
+                    span,
+                },
+                span,
+            };
+
+            let result = super::super::check(program);
+            prop_assert!(result.is_err(), "Non-Int VecFloat index should produce a type error");
+
+            let err = result.unwrap_err();
+            match &err {
+                CompileError::Type(msg) => {
+                    prop_assert!(
+                        msg.contains("VecFloat index must be Int"),
+                        "Error should mention 'VecFloat index must be Int', got: {}", msg
                     );
                 }
                 other => {

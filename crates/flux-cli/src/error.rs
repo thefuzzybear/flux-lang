@@ -19,6 +19,9 @@ pub enum CsvError {
 
     #[error("file contains no data rows")]
     EmptyFile,
+
+    #[error("row {row}: timestamp value is required")]
+    EmptyTimestamp { row: usize },
 }
 
 /// Top-level CLI error type.

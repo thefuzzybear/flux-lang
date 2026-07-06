@@ -1,11 +1,75 @@
+use std::collections::HashMap;
 use std::path::Path;
 
-use flux_runtime::{PositionTracker, FillSide, Signal};
+use flux_runtime::{BarContext, PositionTracker, FillSide, Signal};
 
 use crate::csv_loader;
 use crate::diagnostics;
 use crate::error::{CliError, CompileErrorWithSpan};
 use crate::interpreter::Interpreter;
+
+/// A group of bars sharing the same timestamp.
+///
+/// When a multi-asset CSV is loaded, consecutive rows with the same timestamp
+/// are grouped together for joint processing in the backtest loop.
+pub struct BarGroup {
+    /// The timestamp string shared by all bars in this group.
+    pub timestamp: String,
+    /// Bars in this group, in CSV row order.
+    pub bars: Vec<BarContext>,
+    /// Close prices indexed by symbol for quick lookup.
+    pub closes: HashMap<String, f64>,
+}
+
+/// Group bars by consecutive same-timestamp sequences.
+///
+/// Bars sharing the same timestamp string are grouped together.
+/// Groups are produced in first-occurrence order, and bar order
+/// within each group matches CSV row order.
+///
+/// # Arguments
+/// - `bars` — Slice of bar records in CSV row order.
+/// - `timestamps` — Parallel slice of timestamp strings (one per bar).
+///
+/// # Errors
+/// Returns an error if any group contains more than 100 distinct symbols.
+pub fn group_bars_by_timestamp(
+    bars: &[BarContext],
+    timestamps: &[String],
+) -> Result<Vec<BarGroup>, String> {
+    let mut groups: Vec<BarGroup> = Vec::new();
+    let mut i = 0;
+
+    while i < bars.len() {
+        let ts = &timestamps[i];
+        let mut group_bars: Vec<BarContext> = Vec::new();
+        let mut closes: HashMap<String, f64> = HashMap::new();
+
+        // Collect consecutive bars with the same timestamp
+        while i < bars.len() && &timestamps[i] == ts {
+            closes.insert(bars[i].symbol.clone(), bars[i].close);
+            group_bars.push(bars[i].clone());
+            i += 1;
+        }
+
+        // Validate max 100 symbols per group
+        if closes.len() > 100 {
+            return Err(format!(
+                "timestamp group '{}' exceeds maximum of 100 symbols (found {})",
+                ts,
+                closes.len()
+            ));
+        }
+
+        groups.push(BarGroup {
+            timestamp: ts.clone(),
+            bars: group_bars,
+            closes,
+        });
+    }
+
+    Ok(groups)
+}
 
 /// Extract byte offset from a compiler error message string.
 ///
@@ -141,6 +205,9 @@ pub fn run_backtest_cmd(file: &Path, data: &Path, initial_capital: f64) -> Resul
 
     let mut results: Vec<(usize, Signal)> = Vec::new();
     for (i, bar) in bars.iter().enumerate() {
+        // Set in_position from tracker state (multi-symbol aware)
+        interpreter.in_position = tracker.open_position_count() > 0;
+
         let signals = interpreter.on_bar(bar);
 
         // Feed signals through position tracker

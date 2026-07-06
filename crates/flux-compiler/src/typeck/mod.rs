@@ -99,18 +99,18 @@ mod integration_tests {
             span: Span::new(50, 100),
         };
 
-        // State block: prices = [0.0] (List(Float)), count = 0 (Int)
+        // State block: prices = [""] (List(String)), count = 0 (Int)
         let state_block = StateBlock {
             variables: vec![
                 StateVar {
                     name: "prices".to_string(),
                     initial_value: Expr {
                         kind: ExprKind::ListLiteral(vec![
-                            expr(ExprKind::FloatLiteral(0.0), 120, 123),
+                            expr(ExprKind::StringLiteral("".to_string()), 120, 122),
                         ]),
-                        span: Span::new(119, 124),
+                        span: Span::new(119, 123),
                     },
-                    span: Span::new(110, 124),
+                    span: Span::new(110, 123),
                 },
                 StateVar {
                     name: "count".to_string(),
@@ -122,17 +122,17 @@ mod integration_tests {
         };
 
         // Event handler body:
-        // Statement 1: prices.append(close)
+        // Statement 1: prices.append(symbol)
         let stmt1 = Stmt::Expr(ExprStmt {
             expr: Expr {
                 kind: ExprKind::MethodCall {
                     receiver: Box::new(expr(ExprKind::Ident("prices".to_string()), 160, 166)),
                     method: "append".to_string(),
-                    args: vec![expr(ExprKind::Ident("close".to_string()), 174, 179)],
+                    args: vec![expr(ExprKind::Ident("symbol".to_string()), 174, 180)],
                 },
-                span: Span::new(160, 180),
+                span: Span::new(160, 181),
             },
-            span: Span::new(160, 180),
+            span: Span::new(160, 181),
         });
 
         // Statement 2: count = count + 1
@@ -278,7 +278,7 @@ mod integration_tests {
         if let TypedStrategyItem::StateBlock(ref sb) = typed.strategy.body[1] {
             assert_eq!(sb.variables.len(), 2);
             assert_eq!(sb.variables[0].name, "prices");
-            assert_eq!(sb.variables[0].resolved_type, FluxType::List(Box::new(FluxType::Float)));
+            assert_eq!(sb.variables[0].resolved_type, FluxType::List(Box::new(FluxType::String)));
             assert_eq!(sb.variables[1].name, "count");
             assert_eq!(sb.variables[1].resolved_type, FluxType::Int);
         } else {

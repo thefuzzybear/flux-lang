@@ -136,8 +136,12 @@ impl TypeChecker {
                 } else {
                     // Infer element type from first element (must be literal)
                     let first_ty = self.infer_literal_type(&elements[0])?;
+                    let mut all_numeric = first_ty.is_numeric();
                     for elem in elements.iter().skip(1) {
                         let elem_ty = self.infer_literal_type(elem)?;
+                        if !elem_ty.is_numeric() {
+                            all_numeric = false;
+                        }
                         if elem_ty != first_ty {
                             // Check numeric coercion
                             if first_ty.is_numeric() && elem_ty.is_numeric() {
@@ -152,12 +156,9 @@ impl TypeChecker {
                             ));
                         }
                     }
-                    // If mixed numeric, result is Float
-                    let has_float = elements.iter().any(|e| {
-                        matches!(e.kind, ExprKind::FloatLiteral(_))
-                    });
-                    if first_ty.is_numeric() && has_float {
-                        Ok(FluxType::List(Box::new(FluxType::Float)))
+                    // All-numeric list literals infer VecFloat
+                    if all_numeric {
+                        Ok(FluxType::VecFloat)
                     } else {
                         Ok(FluxType::List(Box::new(first_ty)))
                     }
@@ -1019,9 +1020,34 @@ impl TypeChecker {
         let typed_object = self.check_expr(object)?;
         let typed_index = self.check_expr(index)?;
 
-        // Receiver must be List(T)
+        // Determine element type based on receiver
         let elem_type = match &typed_object.resolved_type {
-            FluxType::List(t) => t.as_ref().clone(),
+            FluxType::VecFloat => {
+                // VecFloat index must be Int
+                if typed_index.resolved_type != FluxType::Int {
+                    return Err(self.type_error(
+                        typed_index.span,
+                        format!(
+                            "VecFloat index must be Int, found {}",
+                            typed_index.resolved_type
+                        ),
+                    ));
+                }
+                FluxType::Float
+            }
+            FluxType::List(t) => {
+                // List index must be Int
+                if typed_index.resolved_type != FluxType::Int {
+                    return Err(self.type_error(
+                        typed_index.span,
+                        format!(
+                            "index must be Int, found {}",
+                            typed_index.resolved_type
+                        ),
+                    ));
+                }
+                t.as_ref().clone()
+            }
             other => {
                 return Err(self.type_error(
                     span,
@@ -1029,17 +1055,6 @@ impl TypeChecker {
                 ));
             }
         };
-
-        // Index must be Int
-        if typed_index.resolved_type != FluxType::Int {
-            return Err(self.type_error(
-                typed_index.span,
-                format!(
-                    "index must be Int, found {}",
-                    typed_index.resolved_type
-                ),
-            ));
-        }
 
         Ok(TypedExpr {
             kind: TypedExprKind::IndexAccess {
@@ -1079,15 +1094,40 @@ impl TypeChecker {
             }
         }
 
+        if all_numeric {
+            // All elements are numeric (Int or Float) → infer VecFloat
+            return Ok(TypedExpr {
+                kind: TypedExprKind::ListLiteral(typed_elements),
+                resolved_type: FluxType::VecFloat,
+                span,
+            });
+        }
+
+        // Check if some elements are numeric and others are not → type error
+        // on the non-numeric element
+        let has_any_numeric = typed_elements.iter().any(|e| e.resolved_type.is_numeric());
+        if has_any_numeric {
+            // Find the first non-numeric element and report the error with its span
+            let (pos, offending) = typed_elements
+                .iter()
+                .enumerate()
+                .find(|(_, e)| !e.resolved_type.is_numeric())
+                .unwrap();
+            return Err(self.type_error(
+                offending.span,
+                format!(
+                    "list literal expected numeric element, found {} at position {}",
+                    offending.resolved_type, pos
+                ),
+            ));
+        }
+
+        // All elements are non-numeric
         let elem_type = if all_same {
-            // Homogeneous list
+            // Homogeneous non-numeric list
             first_ty
-        } else if all_numeric {
-            // Mixed Int/Float → List(Float)
-            FluxType::Float
         } else {
-            // Incompatible types
-            // Find the first type that differs from the first element
+            // Incompatible non-numeric types
             let other_ty = typed_elements
                 .iter()
                 .skip(1)
@@ -1573,7 +1613,8 @@ mod tests {
             make_expr(ExprKind::IntLiteral(3)),
         ]));
         let result = tc.check_expr(expr).unwrap();
-        assert_eq!(result.resolved_type, FluxType::List(Box::new(FluxType::Int)));
+        // All-numeric lists now infer VecFloat
+        assert_eq!(result.resolved_type, FluxType::VecFloat);
     }
 
     #[test]
@@ -1584,7 +1625,8 @@ mod tests {
             make_expr(ExprKind::FloatLiteral(2.0)),
         ]));
         let result = tc.check_expr(expr).unwrap();
-        assert_eq!(result.resolved_type, FluxType::List(Box::new(FluxType::Float)));
+        // Mixed Int/Float lists also infer VecFloat
+        assert_eq!(result.resolved_type, FluxType::VecFloat);
     }
 
     #[test]
@@ -1596,7 +1638,8 @@ mod tests {
         ]));
         let err = tc.check_expr(expr).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("incompatible types"), "got: {}", msg);
+        // Numeric + non-numeric → error on the non-numeric element
+        assert!(msg.contains("list literal expected numeric element, found String at position 1"), "got: {}", msg);
     }
 
     // -----------------------------------------------------------------------

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use flux_compiler::parser::ast::{BinOp, UnaryOp};
 use flux_compiler::typeck::typed_ast::*;
+use flux_compiler::typeck::types::FluxType;
 use flux_runtime::{BarContext, Signal};
 
 /// Runtime value representation for the AST interpreter.
@@ -94,6 +95,10 @@ pub struct Interpreter {
     pub event_handler: Option<TypedEventHandler>,
     pub indicators: HashMap<String, IndicatorStateEntry>,
     pub in_position: bool,
+    /// Previous bar group's close prices per symbol (for ret() computation).
+    pub prev_closes: HashMap<String, f64>,
+    /// Current bar group's close prices per symbol.
+    pub current_closes: HashMap<String, f64>,
 }
 
 impl Interpreter {
@@ -137,7 +142,18 @@ impl Interpreter {
             event_handler,
             indicators: HashMap::new(),
             in_position: false,
+            prev_closes: HashMap::new(),
+            current_closes: HashMap::new(),
         }
+    }
+
+    /// Update per-symbol price state for a new bar group.
+    ///
+    /// Copies `current_closes` into `prev_closes`, then sets `current_closes`
+    /// to the new bar group's close prices.
+    pub fn update_prices(&mut self, new_closes: &HashMap<String, f64>) {
+        self.prev_closes = self.current_closes.clone();
+        self.current_closes = new_closes.clone();
     }
 
     /// Execute the `on_bar` event handler against the given bar context.
@@ -193,9 +209,24 @@ impl Interpreter {
             TypedExprKind::BoolLiteral(b) => Ok(Value::Bool(*b)),
             TypedExprKind::NullLiteral => Ok(Value::Null),
             TypedExprKind::ListLiteral(items) => {
-                let values: Result<Vec<Value>, String> =
-                    items.iter().map(|item| self.eval_expr(item, locals)).collect();
-                Ok(Value::List(values?))
+                if expr.resolved_type == FluxType::VecFloat {
+                    let values: Result<Vec<f64>, String> = items
+                        .iter()
+                        .map(|item| {
+                            let val = self.eval_expr(item, locals)?;
+                            match val {
+                                Value::Float(f) => Ok(f),
+                                Value::Int(i) => Ok(i as f64),
+                                _ => Err("expected a numeric value in VecFloat literal".to_string()),
+                            }
+                        })
+                        .collect();
+                    Ok(Value::VecFloat(values?))
+                } else {
+                    let values: Result<Vec<Value>, String> =
+                        items.iter().map(|item| self.eval_expr(item, locals)).collect();
+                    Ok(Value::List(values?))
+                }
             }
 
             // --- Identifier lookup: locals → params → state ---
@@ -364,6 +395,9 @@ impl Interpreter {
                             return Err("OPEN requires 2 arguments (symbol, qty)".to_string());
                         }
                         let symbol = match &evaluated_args[0] {
+                            Value::Str(s) if s.is_empty() => {
+                                return Err("OPEN: invalid symbol (empty string)".to_string());
+                            }
                             Value::Str(s) => s.clone(),
                             _ => return Err("expected a string value".to_string()),
                         };
@@ -379,6 +413,9 @@ impl Interpreter {
                             return Err("CLOSE requires 1 argument (symbol)".to_string());
                         }
                         let symbol = match &evaluated_args[0] {
+                            Value::Str(s) if s.is_empty() => {
+                                return Err("CLOSE: invalid symbol (empty string)".to_string());
+                            }
                             Value::Str(s) => s.clone(),
                             _ => return Err("expected a string value".to_string()),
                         };
@@ -389,6 +426,9 @@ impl Interpreter {
                             return Err("CLOSE_QTY requires 2 arguments (symbol, qty)".to_string());
                         }
                         let symbol = match &evaluated_args[0] {
+                            Value::Str(s) if s.is_empty() => {
+                                return Err("CLOSE_QTY: invalid symbol (empty string)".to_string());
+                            }
                             Value::Str(s) => s.clone(),
                             _ => return Err("expected a string value".to_string()),
                         };
@@ -487,6 +527,23 @@ impl Interpreter {
 
                         Ok(Value::Float(result))
                     }
+                    "ret" => {
+                        if evaluated_args.len() != 1 {
+                            return Err("ret requires 1 argument (symbol)".to_string());
+                        }
+                        let symbol = match &evaluated_args[0] {
+                            Value::Str(s) => s.clone(),
+                            _ => return Err("ret: expected a string argument".to_string()),
+                        };
+                        let current_close = self.current_closes.get(&symbol).copied();
+                        let prev_close = self.prev_closes.get(&symbol).copied();
+                        match (current_close, prev_close) {
+                            (Some(curr), Some(prev)) if prev != 0.0 => {
+                                Ok(Value::Float((curr / prev) - 1.0))
+                            }
+                            _ => Ok(Value::Float(0.0)),
+                        }
+                    }
                     _ => Err(format!("unknown function: '{}'", func_name)),
                 }
             }
@@ -508,6 +565,18 @@ impl Interpreter {
                 let obj_val = self.eval_expr(object, locals)?;
                 let idx_val = self.eval_expr(index, locals)?;
                 match (&obj_val, &idx_val) {
+                    (Value::VecFloat(vec), Value::Int(i)) => {
+                        if *i < 0 {
+                            Err(format!("index {} out of bounds (length {})", i, vec.len()))
+                        } else {
+                            let idx = *i as usize;
+                            if idx >= vec.len() {
+                                Err(format!("index {} out of bounds (length {})", i, vec.len()))
+                            } else {
+                                Ok(Value::Float(vec[idx]))
+                            }
+                        }
+                    }
                     (Value::List(items), Value::Int(i)) => {
                         let idx = *i as usize;
                         if idx < items.len() {
@@ -989,6 +1058,8 @@ mod tests {
             event_handler: None,
             indicators: HashMap::new(),
             in_position: false,
+            prev_closes: HashMap::new(),
+            current_closes: HashMap::new(),
         }
     }
 

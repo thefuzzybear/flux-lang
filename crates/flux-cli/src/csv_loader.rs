@@ -4,6 +4,18 @@ use flux_runtime::BarContext;
 
 use crate::error::CsvError;
 
+/// Result of loading a CSV file with timestamp data preserved.
+///
+/// Contains both the parsed bar data and the raw timestamp strings
+/// for each row, enabling downstream grouping by timestamp.
+#[derive(Debug, Clone)]
+pub struct LoadedCsvData {
+    /// Parsed bar records in CSV row order.
+    pub bars: Vec<BarContext>,
+    /// Timestamp string for each row (parallel to `bars`).
+    pub timestamps: Vec<String>,
+}
+
 /// Loads bar data from a CSV file.
 ///
 /// The CSV must contain a header row with (at minimum) the columns:
@@ -121,6 +133,106 @@ fn parse_f64(
         row,
         column: column.to_string(),
     })
+}
+
+/// Loads bar data from a CSV file, also capturing the timestamp string per row.
+///
+/// Behaves identically to [`load_csv`] for bar parsing, but additionally returns
+/// the raw timestamp string for each row. This enables downstream grouping by
+/// timestamp for multi-asset backtesting.
+///
+/// Returns an error if any timestamp cell is empty.
+pub fn load_csv_with_timestamps(path: &Path) -> Result<LoadedCsvData, CsvError> {
+    let content = std::fs::read_to_string(path).map_err(CsvError::FileAccess)?;
+
+    let mut lines = content.lines();
+
+    // Parse header row
+    let header_line = match lines.next() {
+        Some(line) => line,
+        None => return Err(CsvError::EmptyFile),
+    };
+
+    let headers: Vec<String> = header_line
+        .split(',')
+        .map(|h| h.trim().to_lowercase())
+        .collect();
+
+    // Find indices of required columns
+    let mut missing: Vec<String> = Vec::new();
+
+    let timestamp_idx = find_column_index(&headers, "timestamp", &mut missing);
+    let symbol_idx = find_column_index(&headers, "symbol", &mut missing);
+    let open_idx = find_column_index(&headers, "open", &mut missing);
+    let high_idx = find_column_index(&headers, "high", &mut missing);
+    let low_idx = find_column_index(&headers, "low", &mut missing);
+    let close_idx = find_column_index(&headers, "close", &mut missing);
+    let volume_idx = find_column_index(&headers, "volume", &mut missing);
+
+    if !missing.is_empty() {
+        return Err(CsvError::MissingColumns(missing));
+    }
+
+    // Safe to unwrap since we verified no columns are missing
+    let timestamp_idx = timestamp_idx.unwrap();
+    let symbol_idx = symbol_idx.unwrap();
+    let open_idx = open_idx.unwrap();
+    let high_idx = high_idx.unwrap();
+    let low_idx = low_idx.unwrap();
+    let close_idx = close_idx.unwrap();
+    let volume_idx = volume_idx.unwrap();
+
+    // Parse data rows
+    let mut bars: Vec<BarContext> = Vec::new();
+    let mut timestamps: Vec<String> = Vec::new();
+
+    for (line_number, line) in lines.enumerate() {
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let row = line_number + 1; // 1-based row number (after header)
+        let fields: Vec<&str> = line.split(',').map(|f| f.trim()).collect();
+
+        // Extract and validate timestamp
+        let timestamp = fields
+            .get(timestamp_idx)
+            .unwrap_or(&"")
+            .to_string();
+
+        if timestamp.is_empty() {
+            return Err(CsvError::EmptyTimestamp { row });
+        }
+
+        let symbol = fields
+            .get(symbol_idx)
+            .unwrap_or(&"")
+            .to_string();
+
+        let open = parse_f64(&fields, open_idx, row, "open")?;
+        let high = parse_f64(&fields, high_idx, row, "high")?;
+        let low = parse_f64(&fields, low_idx, row, "low")?;
+        let close = parse_f64(&fields, close_idx, row, "close")?;
+        let volume = parse_f64(&fields, volume_idx, row, "volume")?;
+
+        bars.push(BarContext {
+            close,
+            open,
+            high,
+            low,
+            volume,
+            symbol,
+            in_position: false,
+        });
+        timestamps.push(timestamp);
+    }
+
+    if bars.is_empty() {
+        return Err(CsvError::EmptyFile);
+    }
+
+    Ok(LoadedCsvData { bars, timestamps })
 }
 
 #[cfg(test)]

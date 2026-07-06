@@ -167,6 +167,12 @@ pub(crate) fn math_function_bindings() -> Vec<(&'static str, FluxType)> {
             params: FnParams::Fixed(vec![FluxType::VecFloat, FluxType::Float]),
             ret: Box::new(FluxType::Float),
         }),
+
+        // ── Cross-Asset Data Accessor ──
+        ("ret", FluxType::Fn {
+            params: FnParams::Fixed(vec![FluxType::String]),
+            ret: Box::new(FluxType::Float),
+        }),
     ]
 }
 
