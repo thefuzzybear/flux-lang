@@ -26,9 +26,7 @@ fn fixture_path(name: &str) -> PathBuf {
 // =============================================================================
 
 /// Validates: Requirement 1.5, 7.4
-/// `flux --version` should print the version string and exit.
-/// Note: clap treats --version as a special "error" so it exits via the
-/// Err(err) branch in our main(), which means exit code 2.
+/// `flux --version` should print the version string and exit successfully.
 #[test]
 fn version_flag_prints_version() {
     let output = flux_cmd().arg("--version").output().expect("failed to execute");
@@ -40,8 +38,7 @@ fn version_flag_prints_version() {
         "Expected version output containing 'flux' and '0.1.0', got: {:?}",
         stdout
     );
-    // Exit code 2 because clap --version goes through try_parse Err path
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
 }
 
 // =============================================================================
@@ -59,8 +56,7 @@ fn help_flag_prints_usage() {
     assert!(stdout.contains("check"), "Help should list 'check' subcommand");
     assert!(stdout.contains("build"), "Help should list 'build' subcommand");
     assert!(stdout.contains("backtest"), "Help should list 'backtest' subcommand");
-    // Exit code 2 because clap --help goes through try_parse Err path
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
 }
 
 // =============================================================================

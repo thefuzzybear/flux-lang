@@ -50,3 +50,5 @@ perf.data.old
 
 # Misc
 *.kiro/specs
+
+.planning/

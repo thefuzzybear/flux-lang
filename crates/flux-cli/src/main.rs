@@ -8,6 +8,7 @@ mod commands;
 use std::path::PathBuf;
 use std::process;
 
+use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
 use exit_codes::{FAILURE, SUCCESS, USAGE_ERROR};
@@ -49,7 +50,10 @@ fn main() {
         Ok(cli) => cli,
         Err(err) => {
             err.print().expect("failed to write error");
-            process::exit(USAGE_ERROR);
+            match err.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => process::exit(SUCCESS),
+                _ => process::exit(USAGE_ERROR),
+            }
         }
     };
 

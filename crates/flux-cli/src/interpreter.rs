@@ -16,12 +16,33 @@ pub enum Value {
     Signal(Signal),
 }
 
+/// State entry for interpreter-managed indicator computations.
+///
+/// Each distinct `sma()` or `ema()` call-site (keyed by AST span) gets its own
+/// independent state buffer, avoiding the `#[track_caller]` collision in the runtime.
+#[derive(Debug, Clone)]
+pub enum IndicatorStateEntry {
+    Sma {
+        buffer: Vec<f64>,
+        period: usize,
+        index: usize,
+        count: usize,
+        sum: f64,
+    },
+    Ema {
+        prev_ema: Option<f64>,
+        k: f64,
+    },
+}
+
 /// A lightweight AST interpreter that walks the TypedProgram and evaluates
 /// expressions against BarContext values bar-by-bar.
 pub struct Interpreter {
     pub params: HashMap<String, Value>,
     pub state: HashMap<String, Value>,
     pub event_handler: Option<TypedEventHandler>,
+    pub indicators: HashMap<String, IndicatorStateEntry>,
+    pub in_position: bool,
 }
 
 impl Interpreter {
@@ -63,6 +84,8 @@ impl Interpreter {
             params,
             state,
             event_handler,
+            indicators: HashMap::new(),
+            in_position: false,
         }
     }
 
@@ -78,12 +101,23 @@ impl Interpreter {
         locals.insert("low".to_string(), Value::Float(ctx.low));
         locals.insert("volume".to_string(), Value::Float(ctx.volume));
         locals.insert("symbol".to_string(), Value::Str(ctx.symbol.clone()));
-        locals.insert("in_position".to_string(), Value::Bool(ctx.in_position));
+        locals.insert("in_position".to_string(), Value::Bool(self.in_position));
 
         if let Some(handler) = &self.event_handler {
             let body = handler.body.clone();
             match self.exec_stmts(&body, &mut locals) {
-                Ok(signals) => signals,
+                Ok(signals) => {
+                    // Update in_position based on emitted signals, processing in order
+                    // so the final state reflects the last relevant signal on this bar.
+                    for signal in &signals {
+                        match signal {
+                            Signal::Open { .. } => self.in_position = true,
+                            Signal::Close { .. } => self.in_position = false,
+                            Signal::CloseQty { .. } => {} // partial close does not flatten
+                        }
+                    }
+                    signals
+                }
                 Err(msg) => {
                     eprintln!("warning: runtime error in on_bar handler: {}", msg);
                     vec![]
@@ -262,16 +296,74 @@ impl Interpreter {
                             return Err("sma requires 2 arguments (value, period)".to_string());
                         }
                         let value = self.eval_expr_as_f64(&args[0], locals)?;
-                        let period = self.eval_expr_as_i64(&args[1], locals)?;
-                        Ok(Value::Float(flux_runtime::sma(value, period)))
+                        let period = self.eval_expr_as_i64(&args[1], locals)? as usize;
+                        let key = format!("sma_{}_{}", expr.span.start, expr.span.end);
+
+                        let entry = self.indicators.entry(key).or_insert_with(|| {
+                            IndicatorStateEntry::Sma {
+                                buffer: vec![0.0; period],
+                                period,
+                                index: 0,
+                                count: 0,
+                                sum: 0.0,
+                            }
+                        });
+
+                        let result = match entry {
+                            IndicatorStateEntry::Sma {
+                                buffer,
+                                period: p,
+                                index,
+                                count,
+                                sum,
+                            } => {
+                                if *count < *p {
+                                    buffer[*index] = value;
+                                    *sum += value;
+                                    *count += 1;
+                                    *index = (*index + 1) % *p;
+                                    *sum / *count as f64
+                                } else {
+                                    *sum -= buffer[*index];
+                                    buffer[*index] = value;
+                                    *sum += value;
+                                    *index = (*index + 1) % *p;
+                                    *sum / *p as f64
+                                }
+                            }
+                            _ => return Err("indicator state mismatch for sma".to_string()),
+                        };
+
+                        Ok(Value::Float(result))
                     }
                     "ema" => {
                         if args.len() != 2 {
                             return Err("ema requires 2 arguments (value, period)".to_string());
                         }
                         let value = self.eval_expr_as_f64(&args[0], locals)?;
-                        let period = self.eval_expr_as_i64(&args[1], locals)?;
-                        Ok(Value::Float(flux_runtime::ema(value, period)))
+                        let period = self.eval_expr_as_i64(&args[1], locals)? as usize;
+                        let key = format!("ema_{}_{}", expr.span.start, expr.span.end);
+
+                        let entry = self.indicators.entry(key).or_insert_with(|| {
+                            IndicatorStateEntry::Ema {
+                                prev_ema: None,
+                                k: 2.0 / (period as f64 + 1.0),
+                            }
+                        });
+
+                        let result = match entry {
+                            IndicatorStateEntry::Ema { prev_ema, k } => {
+                                let ema = match *prev_ema {
+                                    None => value,
+                                    Some(prev) => value * *k + prev * (1.0 - *k),
+                                };
+                                *prev_ema = Some(ema);
+                                ema
+                            }
+                            _ => return Err("indicator state mismatch for ema".to_string()),
+                        };
+
+                        Ok(Value::Float(result))
                     }
                     _ => Err(format!("unknown function: '{}'", func_name)),
                 }
@@ -773,6 +865,8 @@ mod tests {
             params: HashMap::new(),
             state: HashMap::new(),
             event_handler: None,
+            indicators: HashMap::new(),
+            in_position: false,
         }
     }
 

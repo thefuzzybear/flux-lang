@@ -60,17 +60,11 @@ pub use error::{CompileError, Result};
 ///
 /// Returns `CompileError` if any compilation phase fails.
 pub fn compile(source: &str) -> Result<String> {
-    // TODO: Implement full compilation pipeline
-    //
-    // let tokens = lexer::lex(source)?;
-    // let ast = parser::parse(tokens)?;
-    // let typed_ast = typeck::check(ast)?;
-    // let rust_code = codegen::generate(typed_ast)?;
-    // Ok(rust_code)
-
-    Err(CompileError::NotImplemented {
-        feature: "compilation pipeline".into(),
-    })
+    let tokens = lexer::lex_with_spans(source)?;
+    let ast = parser::parse(tokens)?;
+    let typed_ast = typeck::check(ast)?;
+    let code = codegen::generate(&typed_ast)?;
+    Ok(code)
 }
 
 #[cfg(test)]
@@ -78,9 +72,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compile_not_yet_implemented() {
-        let source = "strategy Test {}";
+    fn compile_valid_strategy() {
+        let source = r#"strategy Simple {
+    on_bar {
+        if close > open {
+            OPEN(symbol, 100)
+        }
+    }
+}"#;
+        let result = compile(source);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+        let code = result.unwrap();
+        assert!(code.contains("struct Simple"), "Generated code should contain the strategy struct");
+    }
+
+    #[test]
+    fn compile_syntax_error_returns_parser_error() {
+        let source = "strategy {"; // missing name
         let result = compile(source);
         assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CompileError::Parser(_)));
+    }
+
+    #[test]
+    fn compile_type_error_returns_type_error() {
+        let source = r#"strategy Bad {
+    on_bar {
+        if 42 {
+            OPEN(symbol, 100)
+        }
+    }
+}"#;
+        let result = compile(source);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CompileError::Type(_)));
     }
 }
