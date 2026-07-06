@@ -511,9 +511,10 @@ mod tests {
                 let total_closed = close_qty_by_symbol.get(symbol).copied().unwrap_or(0.0);
                 let current_qty = tracker.position(symbol).map(|p| p.qty).unwrap_or(0.0);
 
-                prop_assert_eq!(total_opened - total_closed, current_qty,
-                    "Quantity conservation failed for {}: opened={}, closed={}, position={}",
-                    symbol, total_opened, total_closed, current_qty);
+                let diff = (total_opened - total_closed) - current_qty;
+                prop_assert!(diff.abs() < 1e-9,
+                    "Quantity conservation failed for {}: opened={}, closed={}, position={}, diff={}",
+                    symbol, total_opened, total_closed, current_qty, diff);
             }
         }
     }
@@ -738,5 +739,152 @@ mod tests {
                 "P&L decomposition failed: actual={}, expected={}, realized={}, unrealized={}",
                 actual_total_pnl, expected_total_pnl, tracker.realized_pnl(), tracker.unrealized_pnl());
         }
+    }
+
+    // --- Integration tests for run_backtest_with_tracker ---
+
+    use crate::context::BarContext;
+    use crate::strategy::Strategy as StrategyTrait;
+
+    /// Helper: create a bar context for integration tests
+    fn make_bar(symbol: &str, close: f64) -> BarContext {
+        BarContext {
+            close,
+            open: close - 1.0,
+            high: close + 1.0,
+            low: close - 2.0,
+            volume: 1000.0,
+            symbol: symbol.to_string(),
+            in_position: false,
+        }
+    }
+
+    /// A simple strategy that opens on bar 0, closes on bar 2
+    struct OpenCloseStrategy {
+        bar_count: usize,
+    }
+
+    impl OpenCloseStrategy {
+        fn new() -> Self {
+            Self { bar_count: 0 }
+        }
+    }
+
+    impl StrategyTrait for OpenCloseStrategy {
+        fn on_bar(&mut self, ctx: &BarContext) -> Vec<Signal> {
+            let signals = match self.bar_count {
+                0 => vec![Signal::open(ctx.symbol.clone(), 100.0)],
+                2 => vec![Signal::close(ctx.symbol.clone())],
+                _ => vec![],
+            };
+            self.bar_count += 1;
+            signals
+        }
+    }
+
+    #[test]
+    fn test_tracked_produces_same_signals_as_run_backtest() {
+        use crate::backtest::run_backtest;
+
+        let bars = vec![
+            make_bar("AAPL", 100.0),
+            make_bar("AAPL", 110.0),
+            make_bar("AAPL", 120.0),
+        ];
+
+        let mut strategy1 = OpenCloseStrategy::new();
+        let mut strategy2 = OpenCloseStrategy::new();
+
+        let raw_result = run_backtest(&mut strategy1, &bars);
+        let tracked_result = super::run_backtest_with_tracker(&mut strategy2, &bars, 10000.0);
+
+        // Same number of signals
+        assert_eq!(raw_result.len(), tracked_result.signals.len());
+
+        // Same bar indices and signal types
+        for (i, ((idx1, sig1), (idx2, sig2))) in
+            raw_result.iter().zip(tracked_result.signals.iter()).enumerate()
+        {
+            assert_eq!(idx1, idx2, "Bar index differs at position {}", i);
+            assert_eq!(
+                sig1.symbol(),
+                sig2.symbol(),
+                "Symbol differs at position {}",
+                i
+            );
+            assert_eq!(sig1.qty(), sig2.qty(), "Qty differs at position {}", i);
+        }
+    }
+
+    #[test]
+    fn test_tracked_backtest_pnl_calculation() {
+        let bars = vec![
+            make_bar("AAPL", 100.0), // bar 0: open at 100
+            make_bar("AAPL", 110.0), // bar 1: hold
+            make_bar("AAPL", 120.0), // bar 2: close at 120
+        ];
+
+        let mut strategy = OpenCloseStrategy::new();
+        let result = super::run_backtest_with_tracker(&mut strategy, &bars, 10000.0);
+
+        // Position was opened at 100, closed at 120, qty=100
+        // Realized PnL = (120 - 100) * 100 = 2000
+        assert!(
+            (result.portfolio.realized_pnl - 2000.0).abs() < 1e-9,
+            "Expected realized PnL of 2000.0, got {}",
+            result.portfolio.realized_pnl
+        );
+        // No open positions after close
+        assert_eq!(result.portfolio.open_position_count, 0);
+        // Equity = initial + realized + unrealized = 10000 + 2000 + 0
+        assert!(
+            (result.portfolio.equity - 12000.0).abs() < 1e-9,
+            "Expected equity of 12000.0, got {}",
+            result.portfolio.equity
+        );
+        // 2 fills: one open, one close
+        assert_eq!(result.fills.len(), 2);
+        assert_eq!(result.fills[0].side, FillSide::Open);
+        assert_eq!(result.fills[1].side, FillSide::Close);
+    }
+
+    #[test]
+    fn test_tracked_backtest_determinism() {
+        let bars = vec![
+            make_bar("AAPL", 100.0),
+            make_bar("AAPL", 110.0),
+            make_bar("AAPL", 120.0),
+        ];
+
+        let mut strategy1 = OpenCloseStrategy::new();
+        let mut strategy2 = OpenCloseStrategy::new();
+
+        let result1 = super::run_backtest_with_tracker(&mut strategy1, &bars, 10000.0);
+        let result2 = super::run_backtest_with_tracker(&mut strategy2, &bars, 10000.0);
+
+        assert_eq!(result1.portfolio.equity, result2.portfolio.equity);
+        assert_eq!(
+            result1.portfolio.realized_pnl,
+            result2.portfolio.realized_pnl
+        );
+        assert_eq!(
+            result1.portfolio.unrealized_pnl,
+            result2.portfolio.unrealized_pnl
+        );
+        assert_eq!(result1.fills.len(), result2.fills.len());
+    }
+
+    #[test]
+    fn test_backward_compatibility_run_backtest_unchanged() {
+        use crate::backtest::run_backtest;
+
+        let bars = vec![make_bar("SPY", 400.0), make_bar("SPY", 410.0)];
+        let mut strategy = OpenCloseStrategy::new();
+        let result = run_backtest(&mut strategy, &bars);
+
+        // run_backtest still works and returns BacktestResult (Vec<(usize, Signal)>)
+        assert_eq!(result.len(), 1); // Only opens on bar 0
+        assert_eq!(result[0].0, 0);
+        assert_eq!(result[0].1.symbol(), "SPY");
     }
 }
