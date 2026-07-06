@@ -106,19 +106,25 @@ pub fn write_manifest(dir: &Path, project_name: &str) -> Result<(), InitError> {
 pub fn write_example_strategy(dir: &Path) -> Result<(), InitError> {
     let strategies_dir = dir.join("strategies");
     fs::create_dir_all(&strategies_dir)?;
-    let content = r#"strategy Example {
+    let content = r#"from indicators import {sma}
+
+strategy SmaCrossover {
     params {
-        period = 20
-        threshold = 1.5
+        period = 5
     }
 
     state {
-        count = 0
+        bar_count = 0
     }
 
     on bar {
-        if close > open {
+        bar_count = bar_count + 1
+        avg = sma(close, period)
+
+        if close > avg and not in_position {
             OPEN(symbol, 100.0)
+        } elif close < avg and in_position {
+            CLOSE(symbol)
         }
     }
 }
@@ -127,10 +133,85 @@ pub fn write_example_strategy(dir: &Path) -> Result<(), InitError> {
     Ok(())
 }
 
+/// Writes a sample data CSV file to `data/sample.csv` within the given directory.
+/// Provides a small working dataset so new users can immediately run a backtest.
+pub fn write_sample_data(dir: &Path) -> Result<(), InitError> {
+    let data_dir = dir.join("data");
+    fs::create_dir_all(&data_dir)?;
+    let content = "timestamp,symbol,open,high,low,close,volume\n\
+                   2024-01-02,AAPL,185.50,186.75,185.10,186.20,1200000\n\
+                   2024-01-03,AAPL,186.20,186.90,185.80,186.50,980000\n\
+                   2024-01-04,AAPL,186.50,187.10,186.30,186.80,750000\n\
+                   2024-01-05,AAPL,186.80,187.25,186.60,187.00,620000\n\
+                   2024-01-08,AAPL,187.00,187.50,186.90,187.30,830000\n\
+                   2024-01-09,AAPL,187.30,187.60,186.80,186.90,540000\n\
+                   2024-01-10,AAPL,186.90,187.20,186.50,187.10,670000\n\
+                   2024-01-11,AAPL,187.10,187.40,186.70,186.60,720000\n\
+                   2024-01-12,AAPL,186.60,186.80,185.90,186.00,890000\n\
+                   2024-01-15,AAPL,186.00,186.50,185.50,186.30,950000\n";
+    fs::write(data_dir.join("sample.csv"), content)?;
+    Ok(())
+}
+
+/// Writes a project README with quick-start instructions.
+pub fn write_project_readme(dir: &Path, project_name: &str) -> Result<(), InitError> {
+    let content = format!(
+        r#"# {}
+
+A Flux trading strategy project.
+
+## Quick Start
+
+```bash
+# Check your strategy for errors
+flux check strategies/example.flux
+
+# Run a backtest
+flux backtest strategies/example.flux --data data/sample.csv --capital 10000
+```
+
+## Project Structure
+
+```
+{}/
+├── flux.toml              # Project manifest
+├── strategies/
+│   └── example.flux       # Example SMA crossover strategy
+├── data/
+│   └── sample.csv         # Sample OHLCV data (AAPL)
+└── .gitignore
+```
+
+## Writing Strategies
+
+See `strategies/example.flux` for a working SMA crossover strategy.
+
+Key concepts:
+- `params {{ }}` — configurable constants
+- `state {{ }}` — variables that persist across bars
+- `on bar {{ }}` — event handler called once per bar
+- `OPEN(symbol, qty)` — open a position
+- `CLOSE(symbol)` — close entire position
+- `sma(value, period)` — simple moving average indicator
+- `in_position` — boolean: true if you have an open position
+
+## CSV Data Format
+
+Your data CSV needs these columns (case-insensitive):
+```csv
+timestamp,symbol,open,high,low,close,volume
+```
+"#,
+        project_name, project_name
+    );
+    fs::write(dir.join("README.md"), content)?;
+    Ok(())
+}
+
 /// Writes a `.gitignore` file to the given directory with patterns for build artifacts,
 /// market data, and OS-generated files.
 pub fn write_gitignore(dir: &Path) -> Result<(), InitError> {
-    let content = "# Build artifacts\ntarget/\n\n# Market data\ndata/*.csv\n\n# OS files\n.DS_Store\nThumbs.db\n";
+    let content = "# Build artifacts\ntarget/\n\n# Large data files (sample.csv is tracked)\ndata/*.csv\n!data/sample.csv\n\n# OS files\n.DS_Store\nThumbs.db\n";
     fs::write(dir.join(".gitignore"), content)?;
     Ok(())
 }
@@ -177,6 +258,8 @@ pub fn run_init(name: Option<&str>) -> Result<(), InitError> {
     // 7. Write files
     write_manifest(&project_dir, &project_name)?;
     write_example_strategy(&project_dir)?;
+    write_sample_data(&project_dir)?;
+    write_project_readme(&project_dir, &project_name)?;
     write_gitignore(&project_dir)?;
 
     // 8. Print success message

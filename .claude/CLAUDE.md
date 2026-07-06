@@ -18,32 +18,25 @@ Flux is a trading-native programming language designed for quantitative traders 
 
 **Example Flux Code:**
 ```flux
-from flux.indicators import {sma, stddev}
+from indicators import {sma}
 
 strategy MeanReversion {
-    book_side = LONG
-    
     params {
         period = 20
         threshold = 2.0
     }
-    
+
     state {
-        prices = []
+        bar_count = 0
     }
-    
-    on_bar {
-        prices.append(close)
-        
-        if len(prices) < period {
-            return
-        }
-        
-        zscore = (close - sma(prices, period)) / stddev(prices, period)
-        
-        if zscore < -threshold and not in_position {
-            OPEN(symbol, 100)
-        } elif zscore > threshold and in_position {
+
+    on bar {
+        bar_count = bar_count + 1
+        avg = sma(close, period)
+
+        if close < avg and not in_position {
+            OPEN(symbol, 100.0)
+        } elif close > avg and in_position {
             CLOSE(symbol)
         }
     }
@@ -60,11 +53,16 @@ Tokens
 Abstract Syntax Tree (AST)
     ↓ Type Checker (crates/flux-compiler/src/typeck/)
 Typed AST
-    ↓ Code Generator (crates/flux-compiler/src/codegen/)
-Rust Source Code (.rs)
-    ↓ Cargo
-Native Binary
+    ├─→ Code Generator (crates/flux-compiler/src/codegen/)
+    │       → Rust Source Code (.rs) → Cargo → Native Binary
+    │
+    └─→ Interpreter (crates/flux-cli/src/interpreter.rs)
+            → Signals per bar
+                ↓ PositionTracker (crates/flux-runtime/src/position_tracker.rs)
+            → Fills, Positions, P&L, Equity, Exposure
 ```
+
+The **backtest** command uses the interpreter path. The **build** command uses the codegen path.
 
 ## Repository Structure
 
@@ -75,21 +73,38 @@ flux-lang/
 │   ├── skills/                # Development skills (see below)
 │   └── prompts/               # Common prompts/templates
 ├── .kiro/
-│   └── steering/              # Kiro AI steering files
+│   ├── steering/              # Kiro AI steering files
+│   └── specs/                 # Feature specs (requirements, design, tasks)
 ├── crates/
 │   ├── flux-compiler/         # Compiler (lexer, parser, typeck, codegen)
-│   ├── flux-runtime/          # Runtime library (backtesting, indicators)
-│   └── flux-cli/              # CLI tool (flux compile, flux run)
-├── docs/
-│   ├── architecture/          # How Flux works internally
-│   ├── contributing/          # How to contribute
-│   ├── language-spec/         # Flux language specification
-│   ├── examples/              # Example Flux strategies
-│   └── tutorials/             # Step-by-step guides
-├── tests/
-│   ├── fixtures/              # Test Flux code
-│   └── integration/           # End-to-end tests
-└── Cargo.toml                 # Workspace root
+│   │   └── src/
+│   │       ├── lexer/         # Logos-based lexer with spans
+│   │       ├── parser/        # Recursive descent parser → AST
+│   │       ├── typeck/        # Type checker → Typed AST
+│   │       └── codegen/       # Rust code emitter
+│   ├── flux-runtime/          # Runtime library
+│   │   └── src/
+│   │       ├── backtest.rs        # run_backtest (signal collection)
+│   │       ├── position_tracker.rs # PositionTracker, Fill, Position, run_backtest_with_tracker
+│   │       ├── signal.rs          # Signal enum (Open, Close, CloseQty)
+│   │       ├── strategy.rs        # Strategy trait
+│   │       ├── context.rs         # BarContext struct
+│   │       └── indicators/        # SMA, EMA (per-call-site state)
+│   └── flux-cli/              # CLI tool
+│       └── src/
+│           ├── main.rs            # CLI entry (check, build, backtest, init)
+│           ├── interpreter.rs     # AST-walking interpreter for backtest
+│           ├── csv_loader.rs      # CSV → Vec<BarContext>
+│           ├── commands/
+│           │   ├── backtest.rs    # backtest command (interpreter + PositionTracker)
+│           │   ├── build.rs       # build command (codegen)
+│           │   ├── check.rs       # check command (typecheck only)
+│           │   └── init.rs        # init command (project scaffold)
+│           └── diagnostics.rs     # Error formatting with source spans
+├── .planning/                 # Architecture docs, language spec, roadmap
+├── Cargo.toml                 # Workspace root
+├── CODING_STANDARDS.md        # Coding conventions
+└── CONTRIBUTING.md            # How to contribute
 ```
 
 ## Development Skills
@@ -217,11 +232,34 @@ As you learn Flux patterns, capture them:
 
 ## Current Status
 
-**Phase:** Foundation (Month 0-3)
-**Focus:** Lexer + Parser implementation
-**Next Milestone:** Parse all example strategies without errors
+**Phase:** Foundation (Core Pipeline Complete)
+**Focus:** The full compile + backtest pipeline is operational
+**What's done:**
+- Lexer (Logos-based, spans, all tokens)
+- Parser (full AST with expressions, statements, strategies)
+- Type Checker (type inference, validation, typed AST)
+- Code Generator (emits valid Rust implementing Strategy trait)
+- Runtime: `run_backtest` (signal collection), `run_backtest_with_tracker` (fills + P&L + portfolio state)
+- Position Tracker: fill simulation, VWAP averaging, mark-to-market, portfolio metrics
+- CLI: `check`, `build`, `backtest` (with `--capital` flag), `init`
+- Interpreter: AST-walking execution for backtest mode (no compile step needed)
+- Indicators: SMA, EMA (stateful, per-call-site)
+- CSV loader (OHLCV data ingestion)
 
-See `docs/ROADMAP.md` for full development timeline.
+**End-to-end workflow:**
+```bash
+flux backtest strategy.flux --data prices.csv --capital 10000
+```
+This lexes → parses → typechecks → interprets bar-by-bar → feeds signals through PositionTracker → prints fills, P&L, equity, exposure.
+
+**Next milestones:**
+- More indicators (stddev, RSI, Bollinger Bands)
+- CLOSE_QTY support in language syntax
+- Equity curve output (per-bar CSV)
+- Multi-symbol backtests
+- Performance metrics (Sharpe, max drawdown)
+
+See `.kiro/specs/` for detailed implementation specs.
 
 ## Getting Help
 

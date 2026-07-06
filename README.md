@@ -5,22 +5,25 @@
 Flux is designed for quantitative traders and researchers. Write strategies in a Python-ergonomic syntax with trading primitives built-in, get the performance of compiled Rust.
 
 ```flux
-from flux.indicators import {sma, stddev}
+from indicators import {sma}
 
 strategy MeanReversion {
-    book_side = LONG
-    
     params {
         period = 20
         threshold = 2.0
     }
     
-    on_bar {
-        zscore = (close - sma(close, period)) / stddev(close, period)
+    state {
+        bar_count = 0
+    }
+
+    on bar {
+        bar_count = bar_count + 1
+        avg = sma(close, period)
         
-        if zscore < -threshold and not in_position {
-            OPEN(symbol, 100)
-        } elif zscore > threshold and in_position {
+        if close < avg and not in_position {
+            OPEN(symbol, 100.0)
+        } elif close > avg and in_position {
             CLOSE(symbol)
         }
     }
@@ -38,30 +41,114 @@ strategy MeanReversion {
 
 ## Status
 
-**Early Development (Pre-Alpha)**
+**Early Development (Alpha)**
 
-Flux is in active development. The language specification is complete, compiler implementation is in progress.
+Flux is in active development. The compiler pipeline (lexer → parser → typechecker → codegen) is complete, with an interpreter-based backtest engine that includes full portfolio tracking.
 
-**Current milestone:** Lexer + Parser (Month 0-3)
+**What works today:**
+- Write strategies in `.flux` files
+- Compile and type-check (`flux check`, `flux build`)
+- Run backtests with CSV data and see P&L results (`flux backtest`)
+- Portfolio tracking with fills, positions, equity, and exposure metrics
+- Built-in indicators (SMA, EMA)
+- Project scaffolding (`flux init`)
 
-See [ROADMAP.md](docs/ROADMAP.md) for development timeline.
+**Current milestone:** Position Tracking & Portfolio Metrics (Complete)
 
 ## Quick Start
 
-*Coming soon - compiler not yet functional*
+```bash
+# Build from source
+git clone https://github.com/thefuzzybear/flux-lang.git
+cd flux-lang
+cargo build --release
+
+# Initialize a new project
+cargo run -p flux-cli -- init my-strategy
+
+# Or if installed:
+# flux init my-strategy
+
+cd my-strategy
+```
+
+Write a strategy in `strategy.flux`:
+```flux
+from indicators import {sma}
+
+strategy SmaCrossover {
+    params {
+        period = 5
+    }
+
+    state {
+        bar_count = 0
+    }
+
+    on bar {
+        bar_count = bar_count + 1
+        avg = sma(close, period)
+
+        if close > avg and not in_position {
+            OPEN(symbol, 100.0)
+        } elif close < avg and in_position {
+            CLOSE(symbol)
+        }
+    }
+}
+```
+
+Run a backtest:
+```bash
+flux backtest strategy.flux --data data.csv --capital 10000
+```
+
+Output:
+```
+--- Signals ---
+  2 Open AAPL 100
+  5 Close AAPL
+
+--- Fills ---
+  Bar    2 |  BUY | AAPL     100.00 @     186.80
+  Bar    5 |  SELL | AAPL     100.00 @     186.90
+
+--- Portfolio Summary ---
+  Initial Capital:       10000.00
+  Final Equity:          10010.00
+  Realized P&L:             10.00
+  Unrealized P&L:            0.00
+  Total Return:             0.10%
+  Open Positions:               0
+  Gross Exposure:            0.00
+  Net Exposure:              0.00
+  Total Fills:                  2
+
+--- Summary ---
+Total signals: 2
+Open: 1
+Close: 1
+CloseQty: 0
+```
+
+### CSV Data Format
+
+Your data CSV needs these columns (case-insensitive, order doesn't matter):
+```csv
+timestamp,symbol,open,high,low,close,volume
+2024-01-02,AAPL,185.50,186.75,185.10,186.20,1200000
+2024-01-03,AAPL,186.20,186.90,185.80,186.50,980000
+```
+
+### CLI Commands
 
 ```bash
-# Install Flux
-cargo install flux-cli
-
-# Create a strategy
-flux new my-strategy
-
-# Run backtest
-flux run my-strategy.flux --data SPY.parquet
-
-# Compile to binary
-flux build my-strategy.flux --release
+flux check strategy.flux          # Type-check only (no execution)
+flux build strategy.flux           # Compile to Rust code (stdout)
+flux build strategy.flux --output out.rs  # Compile to file
+flux backtest strategy.flux --data prices.csv              # Backtest (default $10k capital)
+flux backtest strategy.flux --data prices.csv --capital 50000  # Custom capital
+flux init my-project              # Scaffold a new project
 ```
 
 ## Documentation
@@ -86,18 +173,24 @@ flux build my-strategy.flux --release
 
 ```
 Flux Source (.flux)
-    ↓ Compiler (Rust)
-Rust Code (.rs)
+    ↓ Lexer (tokenization)
+Tokens
+    ↓ Parser (AST construction)
+AST
+    ↓ Type Checker (type inference + validation)
+Typed AST
+    ↓ Interpreter (backtest mode)
+Signals → PositionTracker → Portfolio Results
+
+    ↓ Code Generator (build mode)
+Rust Source (.rs)
     ↓ Cargo
 Native Binary
-    ↓ Runtime
-Backtest Results
 ```
 
 **Compiler:** Lexer → Parser → Type Checker → Code Generator  
-**Runtime:** Backtesting engine, matching simulation, portfolio management, indicators
-
-See [Architecture Overview](docs/architecture/00-overview.md) for details.
+**Runtime:** PositionTracker (fill simulation, P&L, mark-to-market), Indicators (SMA, EMA)  
+**CLI:** check, build, backtest, init
 
 ## Project Goals
 
