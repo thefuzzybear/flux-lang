@@ -42,6 +42,9 @@ enum Commands {
         /// Path to the CSV data file
         #[arg(long)]
         data: PathBuf,
+        /// Initial capital for portfolio tracking (default: 10000)
+        #[arg(long, default_value = "10000.0")]
+        capital: f64,
     },
     /// Initialize a new Flux project
     Init {
@@ -73,8 +76,8 @@ fn main() {
                 Err(_e) => FAILURE,
             }
         }
-        Commands::Backtest { file, data } => {
-            match commands::backtest::run_backtest_cmd(&file, &data) {
+        Commands::Backtest { file, data, capital } => {
+            match commands::backtest::run_backtest_cmd(&file, &data, capital) {
                 Ok(()) => SUCCESS,
                 Err(_e) => FAILURE,
             }

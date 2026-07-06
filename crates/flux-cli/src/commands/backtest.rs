@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use flux_runtime::Signal;
+use flux_runtime::{PositionTracker, FillSide, Signal};
 
 use crate::csv_loader;
 use crate::diagnostics;
@@ -95,7 +95,7 @@ pub fn format_summary(results: &[(usize, Signal)]) -> String {
     )
 }
 
-pub fn run_backtest_cmd(file: &Path, data: &Path) -> Result<(), CliError> {
+pub fn run_backtest_cmd(file: &Path, data: &Path, initial_capital: f64) -> Result<(), CliError> {
     let source = std::fs::read_to_string(file).map_err(CliError::Io)?;
     let file_display = file.display().to_string();
 
@@ -135,24 +135,69 @@ pub fn run_backtest_cmd(file: &Path, data: &Path) -> Result<(), CliError> {
     // Load CSV bar data
     let bars = csv_loader::load_csv(data).map_err(CliError::Csv)?;
 
-    // Create interpreter and run strategy
+    // Create interpreter and position tracker
     let mut interpreter = Interpreter::new(&typed_program);
+    let mut tracker = PositionTracker::new(initial_capital);
 
     let mut results: Vec<(usize, Signal)> = Vec::new();
     for (i, bar) in bars.iter().enumerate() {
         let signals = interpreter.on_bar(bar);
+
+        // Feed signals through position tracker
+        tracker.process_signals(&signals, bar.close, i);
+
+        // Collect raw signal pairs
         for signal in signals {
             results.push((i, signal));
         }
+
+        // Mark all open positions to market at bar close
+        tracker.mark_to_market(bar.close, &bar.symbol);
     }
 
-    // Print each signal
+    // Print signals
+    println!("--- Signals ---");
     for (idx, sig) in &results {
-        println!("{}", format_signal(*idx, sig));
+        println!("  {}", format_signal(*idx, sig));
     }
 
-    // Print summary
-    println!("{}", format_summary(&results));
+    // Print fills
+    let fills = tracker.fills();
+    if !fills.is_empty() {
+        println!("\n--- Fills ---");
+        for fill in fills {
+            let side_str = match fill.side {
+                FillSide::Open => "BUY",
+                FillSide::Close => "SELL",
+            };
+            println!(
+                "  Bar {:>4} | {:>4} | {} {:>10.2} @ {:>10.2}",
+                fill.bar_index, side_str, fill.symbol, fill.qty, fill.price
+            );
+        }
+    }
+
+    // Print portfolio summary
+    let portfolio = tracker.portfolio_state();
+    println!("\n--- Portfolio Summary ---");
+    println!("  Initial Capital:   {:>12.2}", portfolio.initial_capital);
+    println!("  Final Equity:      {:>12.2}", portfolio.equity);
+    println!("  Realized P&L:      {:>12.2}", portfolio.realized_pnl);
+    println!("  Unrealized P&L:    {:>12.2}", portfolio.unrealized_pnl);
+    println!("  Total Return:      {:>11.2}%", 
+        if portfolio.initial_capital > 0.0 {
+            ((portfolio.equity - portfolio.initial_capital) / portfolio.initial_capital) * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!("  Open Positions:    {:>12}", portfolio.open_position_count);
+    println!("  Gross Exposure:    {:>12.2}", portfolio.gross_exposure);
+    println!("  Net Exposure:      {:>12.2}", portfolio.net_exposure);
+    println!("  Total Fills:       {:>12}", fills.len());
+
+    // Print signal summary
+    println!("\n{}", format_summary(&results));
 
     Ok(())
 }
