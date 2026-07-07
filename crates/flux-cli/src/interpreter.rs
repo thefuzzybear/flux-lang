@@ -934,6 +934,7 @@ mod tests {
         // Build a minimal TypedProgram with params and state
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Test".to_string(),
                 body: vec![
@@ -1022,6 +1023,7 @@ mod tests {
         // A program with no event handler
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Empty".to_string(),
                 body: vec![],
@@ -1789,6 +1791,7 @@ mod tests {
         // Build a program: on bar { if close > open { OPEN(symbol, 100.0) } }
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "TestStrategy".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -1859,6 +1862,7 @@ mod tests {
     fn test_on_bar_no_handler_returns_empty() {
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Empty".to_string(),
                 body: vec![],

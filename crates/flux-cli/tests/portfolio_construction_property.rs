@@ -24,6 +24,7 @@ use flux_runtime::{BarContext, PositionTracker, Signal};
 fn build_empty_strategy() -> TypedProgram {
     TypedProgram {
         imports: vec![],
+        data_block: None,
         strategy: TypedStrategy {
             name: "Empty".to_string(),
             body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {

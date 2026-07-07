@@ -59,6 +59,7 @@ mod tests {
                 names: vec!["sma".to_string()],
                 span: Span::new(0, 30),
             }],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "MomentumStrategy".to_string(),
                 body: vec![
@@ -211,6 +212,7 @@ mod tests {
     fn test_generate_structure_ordering() {
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "OrderTest".to_string(),
                 body: vec![
@@ -274,6 +276,7 @@ mod tests {
     fn test_generate_fn_type_error() {
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "BadStrategy".to_string(),
                 body: vec![
@@ -320,6 +323,7 @@ mod tests {
     fn test_generate_empty_strategy() {
         let program = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "EmptyStrategy".to_string(),
                 body: vec![],

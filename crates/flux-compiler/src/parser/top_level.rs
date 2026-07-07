@@ -4,20 +4,35 @@
 //! params blocks, state blocks, event handlers, and strategy-level properties.
 
 use crate::error::{CompileError, Result};
-use crate::lexer::Token;
+use crate::lexer::{Span, Token};
 
 use super::ast::*;
 use super::parser_state::ParserState;
 
 impl ParserState {
-    /// Parse the entire program: imports then strategy then Eof.
+    /// Parse the entire program: imports, optional data block, then strategy, then Eof.
     pub fn parse_program(&mut self) -> Result<Program> {
         let start_span = self.current_span();
         let mut imports = Vec::new();
+        let mut data_block: Option<DataBlock> = None;
 
-        // Parse imports
-        while self.check(&Token::From) {
-            imports.push(self.parse_import()?);
+        // Parse imports and optional data block (interleaved before strategy)
+        loop {
+            match self.peek().clone() {
+                Token::From => {
+                    imports.push(self.parse_import()?);
+                }
+                Token::Data => {
+                    if data_block.is_some() {
+                        return Err(CompileError::Parser(format!(
+                            "at byte {}: only one data block is permitted per file",
+                            self.current_span().start
+                        )));
+                    }
+                    data_block = Some(self.parse_data_block()?);
+                }
+                _ => break,
+            }
         }
 
         // Parse strategy
@@ -34,6 +49,7 @@ impl ParserState {
         let span = self.span_from(start_span);
         Ok(Program {
             imports,
+            data_block,
             strategy,
             span,
         })
@@ -85,6 +101,94 @@ impl ParserState {
             names,
             span,
         })
+    }
+
+    /// Parse a data block: `data { key = value ... }`
+    ///
+    /// Valid keys: symbols, period, interval, source.
+    /// `symbols` expects a string list `["A", "B"]`; other keys expect a string literal.
+    fn parse_data_block(&mut self) -> Result<DataBlock> {
+        let start_span = self.current_span();
+        self.expect(&Token::Data)?;
+        self.expect(&Token::OpenBrace)?;
+
+        let mut symbols: Option<DataField<Vec<String>>> = None;
+        let mut period: Option<DataField<String>> = None;
+        let mut interval: Option<DataField<String>> = None;
+        let mut source: Option<DataField<String>> = None;
+
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            let key_span = self.current_span();
+            let (key, _) = self.expect_ident()?;
+            self.expect(&Token::Assign)?;
+
+            match key.as_str() {
+                "symbols" => {
+                    let field_start = self.current_span();
+                    let list = self.parse_string_list()?;
+                    let field_end = self.span_from(field_start);
+                    symbols = Some(DataField {
+                        value: list,
+                        span: Span::new(field_start.start, field_end.end),
+                    });
+                }
+                "period" | "interval" | "source" => {
+                    let (value, value_span) = self.expect_string()?;
+                    let field = DataField {
+                        value,
+                        span: value_span,
+                    };
+                    match key.as_str() {
+                        "period" => period = Some(field),
+                        "interval" => interval = Some(field),
+                        "source" => source = Some(field),
+                        _ => unreachable!(),
+                    }
+                }
+                other => {
+                    return Err(CompileError::Parser(format!(
+                        "at byte {}: unrecognized data block key '{}'. \
+                         Valid keys: symbols, period, interval, source",
+                        key_span.start, other
+                    )));
+                }
+            }
+        }
+
+        let end_span = self.current_span();
+        self.expect(&Token::CloseBrace)?;
+
+        Ok(DataBlock {
+            symbols,
+            period,
+            interval,
+            source,
+            span: Span::new(start_span.start, end_span.end),
+        })
+    }
+
+    /// Parse a string list: `["value1", "value2", ...]`
+    fn parse_string_list(&mut self) -> Result<Vec<String>> {
+        self.expect(&Token::OpenBracket)?;
+
+        let mut items = Vec::new();
+
+        if !self.check(&Token::CloseBracket) {
+            let (first, _) = self.expect_string()?;
+            items.push(first);
+
+            while self.check(&Token::Comma) {
+                self.advance(); // consume comma
+                if self.check(&Token::CloseBracket) {
+                    break; // trailing comma
+                }
+                let (item, _) = self.expect_string()?;
+                items.push(item);
+            }
+        }
+
+        self.expect(&Token::CloseBracket)?;
+        Ok(items)
     }
 
     /// Parse strategy declaration: `strategy Name { body }`
@@ -710,5 +814,255 @@ mod tests {
             }
             other => panic!("Expected CompileError::Parser, got: {other:?}"),
         }
+    }
+
+    // ===== 16. Data block: full data block with all fields =====
+
+    #[test]
+    fn data_block_all_fields() {
+        // data { symbols = ["AAPL", "MSFT"]  period = "1y"  interval = "1d"  source = "yahoo" }
+        // strategy X {}
+        let program = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("AAPL".to_string()),
+            Token::Comma,
+            Token::String("MSFT".to_string()),
+            Token::CloseBracket,
+            Token::Ident("period".to_string()),
+            Token::Assign,
+            Token::String("1y".to_string()),
+            Token::Ident("interval".to_string()),
+            Token::Assign,
+            Token::String("1d".to_string()),
+            Token::Ident("source".to_string()),
+            Token::Assign,
+            Token::String("yahoo".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.data_block.is_some());
+        let data = program.data_block.unwrap();
+        assert_eq!(
+            data.symbols.as_ref().unwrap().value,
+            vec!["AAPL".to_string(), "MSFT".to_string()]
+        );
+        assert_eq!(data.period.as_ref().unwrap().value, "1y");
+        assert_eq!(data.interval.as_ref().unwrap().value, "1d");
+        assert_eq!(data.source.as_ref().unwrap().value, "yahoo");
+    }
+
+    // ===== 17. Data block: optional — no data block =====
+
+    #[test]
+    fn data_block_optional_no_block() {
+        // strategy X {}
+        let program = parse_program(vec![
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.data_block.is_none());
+    }
+
+    // ===== 18. Data block: partial fields (only symbols) =====
+
+    #[test]
+    fn data_block_partial_fields() {
+        // data { symbols = ["GOOG"] } strategy X {}
+        let program = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("GOOG".to_string()),
+            Token::CloseBracket,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.data_block.is_some());
+        let data = program.data_block.unwrap();
+        assert_eq!(data.symbols.as_ref().unwrap().value, vec!["GOOG".to_string()]);
+        assert!(data.period.is_none());
+        assert!(data.interval.is_none());
+        assert!(data.source.is_none());
+    }
+
+    // ===== 19. Data block: empty data block (no fields) =====
+
+    #[test]
+    fn data_block_empty() {
+        // data {} strategy X {}
+        let program = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.data_block.is_some());
+        let data = program.data_block.unwrap();
+        assert!(data.symbols.is_none());
+        assert!(data.period.is_none());
+        assert!(data.interval.is_none());
+        assert!(data.source.is_none());
+    }
+
+    // ===== 20. Data block: between imports and strategy =====
+
+    #[test]
+    fn data_block_between_imports_and_strategy() {
+        // from m import {x}  data { period = "6mo" }  strategy X {}
+        let program = parse_program(vec![
+            Token::From,
+            Token::Ident("m".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("x".to_string()),
+            Token::CloseBrace,
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("period".to_string()),
+            Token::Assign,
+            Token::String("6mo".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.imports.len(), 1);
+        assert!(program.data_block.is_some());
+        assert_eq!(program.data_block.unwrap().period.unwrap().value, "6mo");
+    }
+
+    // ===== 21. Error: duplicate data block =====
+
+    #[test]
+    fn error_duplicate_data_block() {
+        // data { period = "1y" }  data { period = "6mo" }  strategy X {}
+        let result = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("period".to_string()),
+            Token::Assign,
+            Token::String("1y".to_string()),
+            Token::CloseBrace,
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("period".to_string()),
+            Token::Assign,
+            Token::String("6mo".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("only one data block is permitted per file"),
+                    "Expected duplicate data block error, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    // ===== 22. Error: unrecognized data block key =====
+
+    #[test]
+    fn error_unrecognized_data_block_key() {
+        // data { unknown = "value" } strategy X {}
+        let result = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("unknown".to_string()),
+            Token::Assign,
+            Token::String("value".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("unrecognized data block key 'unknown'"),
+                    "Expected unrecognized key error, got: {msg}"
+                );
+                assert!(
+                    msg.contains("Valid keys: symbols, period, interval, source"),
+                    "Expected valid keys listing, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    // ===== 23. Data block: symbols with trailing comma =====
+
+    #[test]
+    fn data_block_symbols_trailing_comma() {
+        // data { symbols = ["AAPL", "MSFT",] } strategy X {}
+        let program = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("AAPL".to_string()),
+            Token::Comma,
+            Token::String("MSFT".to_string()),
+            Token::Comma,
+            Token::CloseBracket,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        let data = program.data_block.unwrap();
+        assert_eq!(
+            data.symbols.unwrap().value,
+            vec!["AAPL".to_string(), "MSFT".to_string()]
+        );
     }
 }

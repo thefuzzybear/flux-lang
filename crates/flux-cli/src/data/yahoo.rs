@@ -43,33 +43,62 @@ impl YahooProvider {
     /// Authenticate with Yahoo Finance by obtaining a session cookie and crumb.
     ///
     /// Flow:
-    /// 1. GET `https://finance.yahoo.com` — establishes session cookie
+    /// 1. GET `https://fc.yahoo.com` — sets initial cookies (fast, no HTML)
     /// 2. GET `https://query2.finance.yahoo.com/v1/test/getcrumb` — returns crumb token
+    ///
+    /// If step 2 fails with 401, falls back to:
+    /// 3. GET `https://finance.yahoo.com/quote/SPY` — establishes full session
+    /// 4. Retry crumb request
     fn authenticate(&self) -> Result<&str, FetchError> {
         if let Some(crumb) = self.crumb.get() {
             return Ok(crumb.as_str());
         }
 
-        // Step 1: GET yahoo.com to establish session cookie
-        let resp = self
+        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                  AppleWebKit/537.36 (KHTML, like Gecko) \
+                  Chrome/126.0.0.0 Safari/537.36";
+
+        // Step 1: Hit fc.yahoo.com to establish cookies (lightweight endpoint)
+        let _ = self
             .client
-            .get("https://finance.yahoo.com")
-            .header("User-Agent", "Mozilla/5.0")
-            .send()
-            .map_err(|e| map_reqwest_error(e, "finance.yahoo.com"))?;
+            .get("https://fc.yahoo.com")
+            .header("User-Agent", ua)
+            .send();
 
-        if !resp.status().is_success() {
-            return Err(FetchError::HttpError {
-                status: resp.status().as_u16(),
-                message: "failed to establish Yahoo session".to_string(),
-            });
-        }
+        // Step 2: Request crumb
+        let crumb_result = self.request_crumb(ua);
 
-        // Step 2: GET crumb using the session cookie
+        let crumb_text = match crumb_result {
+            Ok(text) => text,
+            Err(_) => {
+                // Fallback: establish a full session via a quote page
+                let _ = self
+                    .client
+                    .get("https://finance.yahoo.com/quote/SPY")
+                    .header("User-Agent", ua)
+                    .header("Accept", "text/html,application/xhtml+xml")
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .send();
+
+                // Retry crumb after full session
+                self.request_crumb(ua).map_err(|_| FetchError::AuthError {
+                    provider: "yahoo".to_string(),
+                    detail: "crumb request failed after session retry — Yahoo may be blocking automated access".to_string(),
+                })?
+            }
+        };
+
+        // Cache the crumb (OnceLock ensures only one thread wins)
+        let _ = self.crumb.set(crumb_text);
+        Ok(self.crumb.get().unwrap().as_str())
+    }
+
+    /// Request the crumb token from Yahoo Finance.
+    fn request_crumb(&self, user_agent: &str) -> Result<String, FetchError> {
         let crumb_resp = self
             .client
             .get("https://query2.finance.yahoo.com/v1/test/getcrumb")
-            .header("User-Agent", "Mozilla/5.0")
+            .header("User-Agent", user_agent)
             .send()
             .map_err(|e| map_reqwest_error(e, "query2.finance.yahoo.com"))?;
 
@@ -96,9 +125,7 @@ impl YahooProvider {
             });
         }
 
-        // Cache the crumb (OnceLock ensures only one thread wins)
-        let _ = self.crumb.set(crumb_text);
-        Ok(self.crumb.get().unwrap().as_str())
+        Ok(crumb_text)
     }
 
     /// Build the Yahoo Finance download URL for the given request.
@@ -107,7 +134,7 @@ impl YahooProvider {
         let interval_str = request.interval.to_string();
 
         format!(
-            "https://query1.finance.yahoo.com/v7/finance/download/{}?period1={}&period2={}&interval={}&crumb={}",
+            "https://query1.finance.yahoo.com/v8/finance/chart/{}?period1={}&period2={}&interval={}&crumb={}&includeAdjustedClose=true",
             request.symbol, period1, period2, interval_str, crumb
         )
     }
@@ -137,6 +164,110 @@ impl YahooProvider {
         }
     }
 
+    /// Parse Yahoo's v8 chart API JSON response into OHLCV records.
+    ///
+    /// The v8 chart response has the structure:
+    /// ```json
+    /// { "chart": { "result": [{ "timestamp": [...], "indicators": { "quote": [{
+    ///     "open": [...], "high": [...], "low": [...], "close": [...], "volume": [...]
+    /// }]}}]}}
+    /// ```
+    fn parse_chart_json(
+        &self,
+        body: &str,
+        symbol: &str,
+    ) -> Result<Vec<OhlcvRecord>, FetchError> {
+        let json: serde_json::Value = serde_json::from_str(body).map_err(|e| {
+            FetchError::ParseError {
+                provider: "yahoo".to_string(),
+                detail: format!("failed to parse JSON response: {}", e),
+            }
+        })?;
+
+        let result = json
+            .get("chart")
+            .and_then(|c| c.get("result"))
+            .and_then(|r| r.get(0))
+            .ok_or_else(|| FetchError::ParseError {
+                provider: "yahoo".to_string(),
+                detail: "missing chart.result[0] in response".to_string(),
+            })?;
+
+        let timestamps = result
+            .get("timestamp")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| FetchError::ParseError {
+                provider: "yahoo".to_string(),
+                detail: "missing timestamp array in response".to_string(),
+            })?;
+
+        let quote = result
+            .get("indicators")
+            .and_then(|i| i.get("quote"))
+            .and_then(|q| q.get(0))
+            .ok_or_else(|| FetchError::ParseError {
+                provider: "yahoo".to_string(),
+                detail: "missing indicators.quote[0] in response".to_string(),
+            })?;
+
+        let opens = quote.get("open").and_then(|v| v.as_array());
+        let highs = quote.get("high").and_then(|v| v.as_array());
+        let lows = quote.get("low").and_then(|v| v.as_array());
+        let closes = quote.get("close").and_then(|v| v.as_array());
+        let volumes = quote.get("volume").and_then(|v| v.as_array());
+
+        let (opens, highs, lows, closes, volumes) =
+            match (opens, highs, lows, closes, volumes) {
+                (Some(o), Some(h), Some(l), Some(c), Some(v)) => (o, h, l, c, v),
+                _ => {
+                    return Err(FetchError::ParseError {
+                        provider: "yahoo".to_string(),
+                        detail: "missing OHLCV arrays in quote data".to_string(),
+                    });
+                }
+            };
+
+        let mut records = Vec::with_capacity(timestamps.len());
+
+        for i in 0..timestamps.len() {
+            let ts = timestamps[i].as_i64().unwrap_or(0);
+            let open = opens.get(i).and_then(|v| v.as_f64());
+            let high = highs.get(i).and_then(|v| v.as_f64());
+            let low = lows.get(i).and_then(|v| v.as_f64());
+            let close = closes.get(i).and_then(|v| v.as_f64());
+            let volume = volumes.get(i).and_then(|v| v.as_f64()).or_else(|| {
+                volumes.get(i).and_then(|v| v.as_i64()).map(|v| v as f64)
+            });
+
+            // Skip bars with null values
+            let (open, high, low, close, volume) = match (open, high, low, close, volume) {
+                (Some(o), Some(h), Some(l), Some(c), Some(v)) => (o, h, l, c, v),
+                _ => continue,
+            };
+
+            let timestamp = DateTime::from_timestamp(ts, 0)
+                .map(|dt| dt.naive_utc())
+                .unwrap_or_else(|| {
+                    NaiveDate::from_ymd_opt(1970, 1, 1)
+                        .unwrap()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                });
+
+            records.push(OhlcvRecord {
+                timestamp,
+                symbol: symbol.to_string(),
+                open,
+                high,
+                low,
+                close,
+                volume,
+            });
+        }
+
+        Ok(records)
+    }
+
     /// Parse Yahoo's CSV response into OHLCV records.
     ///
     /// Yahoo CSV format: Date,Open,High,Low,Close,Adj Close,Volume
@@ -144,6 +275,7 @@ impl YahooProvider {
     /// - For intraday data: Date is Unix epoch seconds
     /// - Rows with "null" values are skipped
     /// - Uses Close (index 4), not Adj Close (index 5)
+    #[allow(dead_code)]
     fn parse_csv(
         &self,
         body: &str,
@@ -222,14 +354,14 @@ impl DataFetcher for YahooProvider {
         // Authenticate (cached after first call)
         let crumb = self.authenticate()?;
 
-        // Build download URL
+        // Build download URL (v8 chart API, returns JSON)
         let url = self.build_url(request, crumb);
 
-        // Fetch CSV data
+        // Fetch chart data
         let resp = self
             .client
             .get(&url)
-            .header("User-Agent", "Mozilla/5.0")
+            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
             .send()
             .map_err(|e| map_reqwest_error(e, "query1.finance.yahoo.com"))?;
 
@@ -252,8 +384,8 @@ impl DataFetcher for YahooProvider {
             detail: format!("failed to read response body: {}", e),
         })?;
 
-        // Parse CSV response
-        self.parse_csv(&body, &request.symbol, request.interval)
+        // Parse JSON chart response
+        self.parse_chart_json(&body, &request.symbol)
     }
 }
 

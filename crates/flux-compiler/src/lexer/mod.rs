@@ -145,6 +145,7 @@ fn convert_token(
         LogosToken::True => Ok(Token::True),
         LogosToken::False => Ok(Token::False),
         LogosToken::Null => Ok(Token::Null),
+        LogosToken::Data => Ok(Token::Data),
 
         // Operators
         LogosToken::Eq => Ok(Token::Eq),
@@ -1102,10 +1103,42 @@ mod tests {
             "Expected error to mention byte 0, got: {err_msg}"
         );
     }
+
+    // --- Data keyword tests (Task 1.1) ---
+    // Validates: Requirements 1.1, 9.1
+
+    #[test]
+    fn lex_keyword_data() {
+        let tokens = lex("data").unwrap();
+        assert_eq!(tokens, vec![Token::Data, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_data_source_as_ident() {
+        // "data_source" should be a single Ident, not Data + _source
+        let tokens = lex("data_source").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("data_source".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_database_as_ident() {
+        // "database" should be a single Ident, not Data + base
+        let tokens = lex("database").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("database".to_string()), Token::Eof]
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests_property;
+
+#[cfg(test)]
+mod tests_data_keyword_property;
 
 #[cfg(test)]
 mod comments_property;

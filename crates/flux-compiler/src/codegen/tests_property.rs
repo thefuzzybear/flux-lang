@@ -207,6 +207,7 @@ mod tests {
                     names: vec!["sma".to_string()],
                     span: Span::new(0, 20),
                 }],
+                data_block: None,
                 strategy: TypedStrategy {
                     name: "TestStrategy".to_string(),
                     body: vec![
@@ -360,6 +361,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "CoercionTest".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -542,6 +544,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "BinOpTest".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -601,6 +604,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "SignalTest".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -662,6 +666,7 @@ mod tests {
             // Build a minimal TypedProgram with strategy named `name`
             let program = TypedProgram {
                 imports: vec![],
+                data_block: None,
                 strategy: TypedStrategy {
                     name: name.clone(),
                     body: vec![
@@ -770,6 +775,7 @@ mod tests {
 
             let program = TypedProgram {
                 imports: vec![],
+                data_block: None,
                 strategy: TypedStrategy {
                     name: "ConcatTest".to_string(),
                     body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -818,6 +824,7 @@ mod tests {
             // Build a program with a param whose type is FluxType::Fn
             let program = TypedProgram {
                 imports: vec![],
+                data_block: None,
                 strategy: TypedStrategy {
                     name: "ErrTest".to_string(),
                     body: vec![TypedStrategyItem::ParamsBlock(TypedParamsBlock {

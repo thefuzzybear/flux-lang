@@ -96,6 +96,26 @@ enum Commands {
         #[arg(long, short)]
         output: Option<PathBuf>,
     },
+    /// Run a strategy end-to-end: compile, fetch data, and backtest
+    Run {
+        /// Path to the Flux source file
+        file: PathBuf,
+        /// Override symbols (comma-separated)
+        #[arg(long)]
+        symbols: Option<String>,
+        /// Override time period (e.g., 1y, 6mo)
+        #[arg(long)]
+        period: Option<String>,
+        /// Override bar interval (e.g., 1d, 1h)
+        #[arg(long)]
+        interval: Option<String>,
+        /// Data provider (default: from data block or "yahoo")
+        #[arg(long)]
+        source: Option<String>,
+        /// Initial capital for portfolio tracking (default: 10000)
+        #[arg(long, default_value = "10000.0")]
+        capital: f64,
+    },
 }
 
 fn main() {
@@ -189,6 +209,27 @@ fn main() {
                         USAGE_ERROR
                     } else {
                         FAILURE
+                    }
+                }
+            }
+        },
+        Commands::Run { file, symbols, period, interval, source, capital } => {
+            match commands::run::run_run_cmd(
+                &file,
+                symbols.as_deref(),
+                period.as_deref(),
+                interval.as_deref(),
+                source.as_deref(),
+                capital,
+            ) {
+                Ok(()) => SUCCESS,
+                Err(e) => {
+                    match &e {
+                        error::CliError::Usage(_) => {
+                            eprintln!("{}", e);
+                            USAGE_ERROR
+                        }
+                        _ => FAILURE,
                     }
                 }
             }

@@ -38,6 +38,9 @@ pub enum CliError {
 
     #[error("error: {0}")]
     Runtime(String),
+
+    #[error("{0}")]
+    Usage(String),
 }
 
 fn format_compile_errors(errors: &[CompileErrorWithSpan]) -> String {

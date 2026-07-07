@@ -5,7 +5,7 @@
 //! and optionally apply ANSI colorization for terminal display.
 
 use flux_compiler::parser::ast::{
-    Assignment, BinOp, EventHandler, Expr, ExprKind, ExprStmt, ForLoop, IfStmt,
+    Assignment, BinOp, DataBlock, EventHandler, Expr, ExprKind, ExprStmt, ForLoop, IfStmt,
     Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar, Strategy,
     StrategyItem, Stmt, UnaryOp, WhileLoop,
 };
@@ -128,8 +128,16 @@ impl Formatter {
             self.format_import(import);
         }
 
-        // Blank line between imports and strategy (if there were imports)
+        // Blank line between imports and data block or strategy (if there were imports)
         if !program.imports.is_empty() {
+            self.output.push('\n');
+        }
+
+        // Format data block (if present)
+        if let Some(ref data_block) = program.data_block {
+            self.emit_comments_before(data_block.span.start);
+            self.format_data_block(data_block);
+            // Blank line between data block and strategy
             self.output.push('\n');
         }
 
@@ -152,6 +160,39 @@ impl Formatter {
         self.output.push('}');
         self.emit_trailing_comment(import.span.end);
         self.output.push('\n');
+    }
+
+    fn format_data_block(&mut self, block: &DataBlock) {
+        self.push_indent();
+        self.output.push_str("data {\n");
+        self.indent_level += 1;
+
+        if let Some(ref symbols) = block.symbols {
+            self.push_indent();
+            let list = symbols
+                .value
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.output.push_str(&format!("symbols = [{}]\n", list));
+        }
+        if let Some(ref period) = block.period {
+            self.push_indent();
+            self.output.push_str(&format!("period = \"{}\"\n", period.value));
+        }
+        if let Some(ref interval) = block.interval {
+            self.push_indent();
+            self.output.push_str(&format!("interval = \"{}\"\n", interval.value));
+        }
+        if let Some(ref source) = block.source {
+            self.push_indent();
+            self.output.push_str(&format!("source = \"{}\"\n", source.value));
+        }
+
+        self.indent_level -= 1;
+        self.push_indent();
+        self.output.push_str("}\n");
     }
 
     fn format_strategy(&mut self, strategy: &Strategy) {
@@ -842,5 +883,48 @@ mod tests {
         let source = "strategy S {\n    state {\n        x = null\n    }\n\n    on bar {\n        y = 1\n    }\n}\n";
         let result = format_source(source);
         assert!(result.contains("x = null"));
+    }
+
+    #[test]
+    fn format_data_block_all_fields() {
+        let source = r#"data {
+    symbols = ["AAPL", "MSFT"]
+    period = "1y"
+    interval = "1d"
+    source = "yahoo"
+}
+
+strategy S {
+    on bar {
+        x = 1
+    }
+}
+"#;
+        let result = format_source(source);
+        assert_eq!(result, source, "Data block with all fields should be idempotent");
+    }
+
+    #[test]
+    fn format_data_block_symbols_only() {
+        let source = "data {\n    symbols = [\"AAPL\"]\n}\n\nstrategy S {\n    on bar {\n        x = 1\n    }\n}\n";
+        let result = format_source(source);
+        assert!(result.contains("data {\n    symbols = [\"AAPL\"]\n}"), "Data block with symbols only");
+    }
+
+    #[test]
+    fn format_data_block_with_imports() {
+        let source = "from indicators import {sma}\n\ndata {\n    symbols = [\"AAPL\"]\n    period = \"1y\"\n}\n\nstrategy S {\n    on bar {\n        x = sma(close, 20)\n    }\n}\n";
+        let result = format_source(source);
+        // Verify ordering: imports → blank → data → blank → strategy
+        assert!(result.contains("import {sma}\n\ndata {"), "Blank line between imports and data block");
+        assert!(result.contains("}\n\nstrategy S"), "Blank line between data block and strategy");
+    }
+
+    #[test]
+    fn format_data_block_idempotent() {
+        let source = "data {\n    symbols = [\"AAPL\", \"MSFT\"]\n    period = \"6mo\"\n    interval = \"1h\"\n    source = \"yahoo\"\n}\n\nstrategy S {\n    on bar {\n        x = 1\n    }\n}\n";
+        let first = format_source(source);
+        let second = format_source(&first);
+        assert_eq!(first, second, "Data block formatting should be idempotent");
     }
 }

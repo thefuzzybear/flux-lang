@@ -25,9 +25,9 @@ reqwest = { version = "0.12", features = ["blocking", "cookies"] }
 chrono = { version = "0.4", features = ["serde"] }
 flux-compiler = { path = "../flux-compiler" }
 flux-runtime = { path = "../flux-runtime" }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 regex = "1.10"
-serde_json = { workspace = true }
 toml = "0.8"

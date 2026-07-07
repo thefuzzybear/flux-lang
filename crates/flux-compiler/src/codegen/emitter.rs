@@ -740,6 +740,7 @@ mod tests {
     fn minimal_program() -> TypedProgram {
         TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Test".to_string(),
                 body: vec![],
@@ -757,6 +758,7 @@ mod tests {
                 names: vec!["sma".to_string(), "ema".to_string()],
                 span: Span::new(0, 30),
             }],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "MyStrategy".to_string(),
                 body: vec![
@@ -2087,6 +2089,7 @@ mod tests {
         // Build a program with an on_bar handler containing OPEN(symbol, 100)
         let prog = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Sig".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -2149,6 +2152,7 @@ mod tests {
         // Handler with no statements should only have signal decl and return
         let prog = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Empty".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -2183,6 +2187,7 @@ mod tests {
         // Build program with both properties and params, verify ordering
         let prog = TypedProgram {
             imports: vec![],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "Order".to_string(),
                 body: vec![
@@ -2302,6 +2307,7 @@ mod tests {
                 names: vec!["sma".to_string()],
                 span: Span::new(0, 30),
             }],
+            data_block: None,
             strategy: TypedStrategy {
                 name: "MomentumStrategy".to_string(),
                 body: vec![

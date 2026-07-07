@@ -35,13 +35,94 @@ impl TypeChecker {
         // Register imports into global scope
         self.register_imports(&program.imports)?;
 
+        // Validate data block before strategy checking
+        let typed_data_block = match program.data_block {
+            Some(ref db) => Some(self.check_data_block(db)?),
+            None => None,
+        };
+
         // Check strategy
         let typed_strategy = self.check_strategy(program.strategy)?;
 
         Ok(TypedProgram {
             imports: program.imports,
+            data_block: typed_data_block,
             strategy: typed_strategy,
             span: program.span,
+        })
+    }
+
+    /// Validate a data block's field values, producing a TypedDataBlock.
+    ///
+    /// Checks:
+    /// - symbols list is non-empty and contains no empty strings
+    /// - period is in the valid set
+    /// - interval is in the valid set
+    /// - source is a known provider
+    fn check_data_block(&self, data_block: &DataBlock) -> Result<TypedDataBlock> {
+        // Validate symbols list
+        if let Some(ref symbols_field) = data_block.symbols {
+            if symbols_field.value.is_empty() {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: data block 'symbols' must contain at least one symbol",
+                    symbols_field.span.start
+                )));
+            }
+            for (i, sym) in symbols_field.value.iter().enumerate() {
+                if sym.is_empty() {
+                    return Err(CompileError::Type(format!(
+                        "at byte {}: symbol at index {} must be non-empty",
+                        symbols_field.span.start, i
+                    )));
+                }
+            }
+        }
+
+        // Validate period
+        let valid_periods = ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "max"];
+        if let Some(ref period_field) = data_block.period {
+            if !valid_periods.contains(&period_field.value.as_str()) {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: invalid period '{}'. Valid options: {}",
+                    period_field.span.start,
+                    period_field.value,
+                    valid_periods.join(", ")
+                )));
+            }
+        }
+
+        // Validate interval
+        let valid_intervals = ["1m", "5m", "15m", "1h", "1d", "1wk", "1mo"];
+        if let Some(ref interval_field) = data_block.interval {
+            if !valid_intervals.contains(&interval_field.value.as_str()) {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: invalid interval '{}'. Valid options: {}",
+                    interval_field.span.start,
+                    interval_field.value,
+                    valid_intervals.join(", ")
+                )));
+            }
+        }
+
+        // Validate source
+        let valid_sources = ["yahoo"];
+        if let Some(ref source_field) = data_block.source {
+            if !valid_sources.contains(&source_field.value.as_str()) {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: unknown data source '{}'. Available: {}",
+                    source_field.span.start,
+                    source_field.value,
+                    valid_sources.join(", ")
+                )));
+            }
+        }
+
+        Ok(TypedDataBlock {
+            symbols: data_block.symbols.as_ref().map(|f| f.value.clone()),
+            period: data_block.period.as_ref().map(|f| f.value.clone()),
+            interval: data_block.interval.as_ref().map(|f| f.value.clone()),
+            source: data_block.source.as_ref().map(|f| f.value.clone()),
+            span: data_block.span,
         })
     }
 
@@ -1841,6 +1922,7 @@ mod tests {
     fn make_program(imports: Vec<Import>, body: Vec<StrategyItem>) -> Program {
         Program {
             imports,
+            data_block: None,
             strategy: Strategy {
                 name: "Test".to_string(),
                 body,

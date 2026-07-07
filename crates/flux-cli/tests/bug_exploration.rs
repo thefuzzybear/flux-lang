@@ -85,6 +85,7 @@ fn bug1_indicator_state_collision_sma_different_periods() {
 
     let program = TypedProgram {
         imports: vec![],
+        data_block: None,
         strategy: TypedStrategy {
             name: "DualSMA".to_string(),
             body: vec![
@@ -292,6 +293,7 @@ fn bug5_6_position_tracking_prevents_duplicate_opens() {
 
     let program = TypedProgram {
         imports: vec![],
+        data_block: None,
         strategy: TypedStrategy {
             name: "PositionGuard".to_string(),
             body: vec![

@@ -72,6 +72,20 @@ impl ParserState {
         }
     }
 
+    /// Consume a string literal token, returning (value, span).
+    pub fn expect_string(&mut self) -> Result<(String, Span)> {
+        let current = self.peek_spanned().clone();
+        match &current.token {
+            Token::String(value) => {
+                let value = value.clone();
+                let span = current.span;
+                self.advance();
+                Ok((value, span))
+            }
+            _ => Err(self.error_expected("string literal")),
+        }
+    }
+
     /// Check if the current token matches (by discriminant) without consuming.
     pub fn check(&self, expected: &Token) -> bool {
         std::mem::discriminant(self.peek()) == std::mem::discriminant(expected)

@@ -272,6 +272,7 @@ mod tests {
 
                     Program {
                         imports,
+                        data_block: None,
                         strategy,
                         span: prog_span,
                     }
@@ -439,6 +440,7 @@ mod tests {
 
                 Program {
                     imports: vec![],
+                        data_block: None,
                     strategy,
                     span: prog_span,
                 }
@@ -551,6 +553,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -636,6 +639,7 @@ mod tests {
 
             Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -719,6 +723,7 @@ mod tests {
     fn wrap_in_handler(stmt: Stmt, span: Span) -> Program {
         Program {
             imports: vec![],
+            data_block: None,
             strategy: AstStrategy {
                 name: "T".to_string(),
                 body: vec![StrategyItem::EventHandler(EventHandler {
@@ -1284,6 +1289,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1437,6 +1443,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1491,6 +1498,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1557,6 +1565,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1617,6 +1626,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1671,6 +1681,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1740,6 +1751,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -1777,6 +1789,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -1815,6 +1828,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -1885,6 +1899,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -1952,6 +1967,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2019,6 +2035,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2084,6 +2101,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2146,6 +2164,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2220,6 +2239,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2282,6 +2302,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2343,6 +2364,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2419,6 +2441,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![import],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2476,6 +2499,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2542,6 +2566,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2582,6 +2607,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2616,6 +2642,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2662,6 +2689,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -2720,6 +2748,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2800,6 +2829,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2886,6 +2916,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -2956,6 +2987,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -3010,6 +3042,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![StrategyItem::EventHandler(EventHandler {
@@ -3075,6 +3108,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -3160,6 +3194,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![
@@ -3269,6 +3304,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        data_block: None,
                 strategy: AstStrategy {
                     name: "T".to_string(),
                     body: vec![

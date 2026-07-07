@@ -12,6 +12,9 @@ mod builtins;
 #[cfg(test)]
 mod tests_property;
 
+#[cfg(test)]
+mod tests_data_block_validation_property;
+
 pub use types::FluxType;
 pub use typed_ast::*;
 
@@ -211,6 +214,7 @@ mod integration_tests {
 
         Program {
             imports: vec![import],
+            data_block: None,
             strategy,
             span: Span::new(0, 295),
         }
@@ -406,6 +410,7 @@ mod integration_tests {
 
         let program = Program {
             imports: vec![],
+            data_block: None,
             strategy,
             span: Span::new(0, 150),
         };

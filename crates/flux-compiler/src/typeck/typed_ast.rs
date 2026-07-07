@@ -14,7 +14,18 @@ use super::types::FluxType;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedProgram {
     pub imports: Vec<Import>,
+    pub data_block: Option<TypedDataBlock>,
     pub strategy: TypedStrategy,
+    pub span: Span,
+}
+
+/// Typed data block — values have been validated by the typechecker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedDataBlock {
+    pub symbols: Option<Vec<String>>,
+    pub period: Option<String>,
+    pub interval: Option<String>,
+    pub source: Option<String>,
     pub span: Span,
 }
 

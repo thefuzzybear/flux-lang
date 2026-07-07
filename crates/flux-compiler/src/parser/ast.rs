@@ -8,7 +8,34 @@ use crate::lexer::Span;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub imports: Vec<Import>,
+    pub data_block: Option<DataBlock>,
     pub strategy: Strategy,
+    pub span: Span,
+}
+
+/// A data block declaration: `data { key = value ... }`
+///
+/// Declares data acquisition configuration for the strategy.
+/// All fields are optional in the AST — validation of required
+/// fields and value correctness is deferred to the typechecker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataBlock {
+    /// Ticker symbols to fetch: `symbols = ["AAPL", "MSFT"]`
+    pub symbols: Option<DataField<Vec<String>>>,
+    /// Time period: `period = "1y"`
+    pub period: Option<DataField<String>>,
+    /// Bar interval: `interval = "1d"`
+    pub interval: Option<DataField<String>>,
+    /// Data provider: `source = "yahoo"`
+    pub source: Option<DataField<String>>,
+    /// Span of the entire data block (from `data` keyword to closing `}`)
+    pub span: Span,
+}
+
+/// A single field in the data block with its value and source span.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DataField<T> {
+    pub value: T,
     pub span: Span,
 }
 

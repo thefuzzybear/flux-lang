@@ -41,6 +41,8 @@ pub(crate) enum LogosToken {
     False,
     #[token("null")]
     Null,
+    #[token("data")]
+    Data,
 
     // Identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
