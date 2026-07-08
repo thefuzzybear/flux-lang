@@ -25,6 +25,8 @@ pub(crate) enum LogosToken {
     While,
     #[token("return")]
     Return,
+    #[token("fn")]
+    Fn,
     #[token("from")]
     From,
     #[token("import")]

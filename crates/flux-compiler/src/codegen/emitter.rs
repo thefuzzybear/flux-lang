@@ -1,12 +1,13 @@
 //! Code emitter: walks the TypedProgram and produces Rust source code.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{CompileError, Result};
 use crate::parser::ast::{BinOp, UnaryOp};
 use crate::typeck::typed_ast::*;
 use crate::typeck::types::FluxType;
 
+use super::fn_context::{analyze_function_context, FnContext};
 use super::type_map::map_type;
 
 /// Known market data identifiers available through `ctx`.
@@ -35,6 +36,14 @@ pub(crate) struct CodeEmitter<'a> {
     local_vars: HashSet<String>,
     /// Imported function names (accessed as bare names).
     imported_functions: HashSet<String>,
+    /// Context requirements for user-defined functions (ctx and/or signals forwarding).
+    fn_contexts: HashMap<String, FnContext>,
+    /// Whether we are currently emitting a user-defined function body.
+    /// When true, identifiers are resolved without `self.` prefix and
+    /// market data vars resolve to `ctx.X` only if the function receives ctx.
+    in_fn_body: bool,
+    /// Parameter names of the current user function being emitted.
+    fn_params: HashSet<String>,
 }
 
 impl<'a> CodeEmitter<'a> {
@@ -72,6 +81,9 @@ impl<'a> CodeEmitter<'a> {
             }
         }
 
+        // Analyze user-defined function context requirements
+        let fn_contexts = analyze_function_context(&program.functions);
+
         Self {
             program,
             output: String::new(),
@@ -81,6 +93,9 @@ impl<'a> CodeEmitter<'a> {
             properties,
             local_vars: HashSet::new(),
             imported_functions,
+            fn_contexts,
+            in_fn_body: false,
+            fn_params: HashSet::new(),
         }
     }
 
@@ -93,6 +108,7 @@ impl<'a> CodeEmitter<'a> {
         self.local_vars.clear();
         self.output.clear();
         self.emit_preamble();
+        self.emit_user_functions()?;
         self.emit_struct()?;
         self.output.push('\n');
         self.emit_default_impl()?;
@@ -108,6 +124,84 @@ impl<'a> CodeEmitter<'a> {
     /// Emit the preamble: `use flux_runtime::*;\n\n`
     fn emit_preamble(&mut self) {
         self.output.push_str("use flux_runtime::*;\n\n");
+    }
+
+    /// Emit all user-defined functions before the strategy struct.
+    fn emit_user_functions(&mut self) -> Result<()> {
+        let functions = self.program.functions.clone();
+        for fn_def in &functions {
+            let fn_ctx = self.fn_contexts.get(&fn_def.name).cloned().unwrap_or(FnContext {
+                needs_bar_context: false,
+                needs_signals: false,
+            });
+            self.emit_fn_def(fn_def, &fn_ctx)?;
+            self.output.push('\n');
+        }
+        Ok(())
+    }
+
+    /// Emit a single user-defined function as a Rust `fn` definition.
+    ///
+    /// Generates the function signature with typed parameters, optional
+    /// `ctx: &BarContext` and `signals: &mut Vec<Signal>` params based on
+    /// the function's context requirements, and a return type annotation.
+    fn emit_fn_def(&mut self, fn_def: &TypedFnDef, fn_ctx: &FnContext) -> Result<()> {
+        // Set up function body context
+        self.in_fn_body = true;
+        self.fn_params.clear();
+        self.local_vars.clear();
+        for param in &fn_def.params {
+            self.fn_params.insert(param.clone());
+        }
+
+        // Emit signature
+        self.output.push_str(&format!("fn {}(", fn_def.name));
+        for (i, param) in fn_def.params.iter().enumerate() {
+            if i > 0 {
+                self.output.push_str(", ");
+            }
+            self.output.push_str(&format!("{}: f64", param));
+        }
+        if fn_ctx.needs_bar_context {
+            if !fn_def.params.is_empty() {
+                self.output.push_str(", ");
+            }
+            self.output.push_str("ctx: &BarContext");
+        }
+        if fn_ctx.needs_signals {
+            if !fn_def.params.is_empty() || fn_ctx.needs_bar_context {
+                self.output.push_str(", ");
+            }
+            self.output.push_str("signals: &mut Vec<Signal>");
+        }
+        self.output.push(')');
+
+        // Emit return type annotation
+        match &fn_def.return_type {
+            FluxType::Float => self.output.push_str(" -> f64"),
+            FluxType::Int => self.output.push_str(" -> i64"),
+            FluxType::Bool => self.output.push_str(" -> bool"),
+            // Void/Null — no return type annotation
+            _ => {}
+        }
+
+        self.output.push_str(" {\n");
+
+        // Emit body statements
+        self.indent_level = 1;
+        for stmt in &fn_def.body {
+            self.emit_stmt(stmt)?;
+        }
+        self.indent_level = 0;
+
+        self.output.push_str("}\n");
+
+        // Restore context
+        self.in_fn_body = false;
+        self.fn_params.clear();
+        self.local_vars.clear();
+
+        Ok(())
     }
 
     /// Emit the struct definition with property, param, and state fields.
@@ -284,7 +378,7 @@ impl<'a> CodeEmitter<'a> {
                 self.output.push_str(";\n");
             }
             TypedExprKind::Ident(name) => {
-                if self.state_vars.contains(name) {
+                if !self.in_fn_body && self.state_vars.contains(name) {
                     self.output.push_str(&format!("self.{} = ", name));
                     self.emit_expr(&assign.value)?;
                     self.output.push_str(";\n");
@@ -580,9 +674,11 @@ impl<'a> CodeEmitter<'a> {
     /// Emit a function call expression.
     ///
     /// Handles signal functions (OPEN, CLOSE) specially, mapping them to
-    /// the runtime Signal API. Other functions are emitted as direct calls.
+    /// the runtime Signal API. User-defined functions get `ctx` and/or
+    /// `&mut signals` forwarded based on their FnContext. Other functions
+    /// are emitted as direct calls.
     fn emit_function_call(&mut self, function: &TypedExpr, args: &[TypedExpr]) -> Result<()> {
-        // Check if this is a signal function call
+        // Check if this is a signal function call or user-defined function
         if let TypedExprKind::Ident(ref name) = function.kind {
             match name.as_str() {
                 "OPEN" => {
@@ -613,9 +709,41 @@ impl<'a> CodeEmitter<'a> {
                 }
                 _ => {}
             }
+
+            // Check if it's a user-defined function — forward ctx and/or &mut signals
+            if let Some(fn_ctx) = self.fn_contexts.get(name).cloned() {
+                self.output.push_str(name);
+                self.output.push('(');
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.emit_expr(arg)?;
+                }
+                if fn_ctx.needs_bar_context {
+                    if !args.is_empty() {
+                        self.output.push_str(", ");
+                    }
+                    self.output.push_str("ctx");
+                }
+                if fn_ctx.needs_signals {
+                    if !args.is_empty() || fn_ctx.needs_bar_context {
+                        self.output.push_str(", ");
+                    }
+                    // Inside a fn body, `signals` is already `&mut Vec<Signal>`
+                    // In an event handler, `signals` is `Vec<Signal>` so we need `&mut`
+                    if self.in_fn_body {
+                        self.output.push_str("signals");
+                    } else {
+                        self.output.push_str("&mut signals");
+                    }
+                }
+                self.output.push(')');
+                return Ok(());
+            }
         }
 
-        // Regular function call: name(args...)
+        // Regular function call (built-ins, indicators): name(args...)
         self.emit_expr(function)?;
         self.output.push('(');
         for (i, arg) in args.iter().enumerate() {
@@ -673,19 +801,39 @@ impl<'a> CodeEmitter<'a> {
     /// Resolve an identifier to its correct Rust expression form.
     ///
     /// Priority: MARKET_DATA → local_vars → params/state/properties → bare name
+    /// When in a function body: fn_params → MARKET_DATA → local_vars → bare name
     fn resolve_ident(&self, name: &str) -> String {
-        if MARKET_DATA.contains(&name) {
-            format!("ctx.{}", name)
-        } else if self.local_vars.contains(name) {
+        if self.in_fn_body {
+            // Inside a user-defined function body:
+            // Function parameters are bare names
+            if self.fn_params.contains(name) {
+                return name.to_string();
+            }
+            // Market data resolves to ctx.X
+            if MARKET_DATA.contains(&name) {
+                return format!("ctx.{}", name);
+            }
+            // Local variables are bare names
+            if self.local_vars.contains(name) {
+                return name.to_string();
+            }
+            // Everything else is a bare name (imported functions, etc.)
             name.to_string()
-        } else if self.params.contains(name)
-            || self.state_vars.contains(name)
-            || self.properties.contains(name)
-        {
-            format!("self.{}", name)
         } else {
-            // Imported function or unknown — emit bare name
-            name.to_string()
+            // Inside strategy event handler:
+            if MARKET_DATA.contains(&name) {
+                format!("ctx.{}", name)
+            } else if self.local_vars.contains(name) {
+                name.to_string()
+            } else if self.params.contains(name)
+                || self.state_vars.contains(name)
+                || self.properties.contains(name)
+            {
+                format!("self.{}", name)
+            } else {
+                // Imported function or unknown — emit bare name
+                name.to_string()
+            }
         }
     }
 
@@ -714,13 +862,14 @@ impl<'a> CodeEmitter<'a> {
     /// Check if a name is a new local variable (not yet declared).
     ///
     /// Returns true if the name is NOT in params, state_vars, properties,
-    /// or local_vars — i.e., it's being assigned for the first time.
+    /// fn_params, or local_vars — i.e., it's being assigned for the first time.
     #[allow(dead_code)]
     pub(crate) fn is_new_local(&self, name: &str) -> bool {
         !self.params.contains(name)
             && !self.state_vars.contains(name)
             && !self.properties.contains(name)
             && !self.local_vars.contains(name)
+            && !self.fn_params.contains(name)
     }
 
     /// Construct a codegen error with byte offset.
@@ -740,6 +889,7 @@ mod tests {
     fn minimal_program() -> TypedProgram {
         TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -759,6 +909,7 @@ mod tests {
                 names: vec!["sma".to_string(), "ema".to_string()],
                 span: Span::new(0, 30),
             }],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2091,6 +2242,7 @@ mod tests {
         // Build a program with an on_bar handler containing OPEN(symbol, 100)
         let prog = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2155,6 +2307,7 @@ mod tests {
         // Handler with no statements should only have signal decl and return
         let prog = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2191,6 +2344,7 @@ mod tests {
         // Build program with both properties and params, verify ordering
         let prog = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2312,6 +2466,7 @@ mod tests {
                 names: vec!["sma".to_string()],
                 span: Span::new(0, 30),
             }],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

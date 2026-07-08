@@ -399,6 +399,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
     )
         .prop_map(|(imports, name, body)| Program {
             imports,
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: AstStrategy {

@@ -9,11 +9,23 @@ use crate::lexer::Span;
 use crate::parser::ast::{BinOp, Import, UnaryOp};
 use super::types::FluxType;
 
+/// A typed user-defined function declaration.
+/// Mirrors `FnDef` from the parser AST with an inferred `return_type`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedFnDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<TypedStmt>,
+    pub return_type: FluxType,
+    pub span: Span,
+}
+
 /// Root typed AST node representing an entire Flux source file.
 /// Mirrors `Program` from the parser AST.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedProgram {
     pub imports: Vec<Import>,
+    pub functions: Vec<TypedFnDef>,
     pub data_block: Option<TypedDataBlock>,
     pub connector_block: Option<TypedConnectorBlock>,
     pub strategy: TypedStrategy,

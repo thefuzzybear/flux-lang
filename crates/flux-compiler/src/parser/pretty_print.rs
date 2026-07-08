@@ -18,6 +18,12 @@ pub fn format_program(program: &Program) -> String {
         output.push('\n');
     }
 
+    // Format function definitions
+    for fn_def in &program.functions {
+        format_fn_def(&mut output, fn_def);
+        output.push('\n');
+    }
+
     // Format strategy
     format_strategy(&mut output, &program.strategy);
     output
@@ -34,6 +40,23 @@ fn format_import(output: &mut String, import: &Import) {
         output.push_str(name);
     }
     output.push('}');
+}
+
+fn format_fn_def(output: &mut String, fn_def: &FnDef) {
+    output.push_str("fn ");
+    output.push_str(&fn_def.name);
+    output.push('(');
+    for (i, param) in fn_def.params.iter().enumerate() {
+        if i > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(param);
+    }
+    output.push_str(") {\n");
+    for stmt in &fn_def.body {
+        format_stmt(output, stmt, 1);
+    }
+    output.push_str("}\n");
 }
 
 fn format_strategy(output: &mut String, strategy: &Strategy) {
@@ -600,6 +623,7 @@ mod tests {
         // Build a minimal program AST
         let program = Program {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -640,6 +664,7 @@ mod tests {
     fn format_indentation_nested_blocks() {
         let program = Program {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {

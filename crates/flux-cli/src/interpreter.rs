@@ -99,6 +99,15 @@ pub struct Interpreter {
     pub prev_closes: HashMap<String, f64>,
     /// Current bar group's close prices per symbol.
     pub current_closes: HashMap<String, f64>,
+    /// Registry of user-defined functions, keyed by function name.
+    pub functions: HashMap<String, TypedFnDef>,
+    /// Current call stack depth (for detecting stack overflow).
+    pub call_depth: usize,
+    /// Maximum allowed call stack depth (default 64).
+    pub max_call_depth: usize,
+    /// Signals emitted by the most recent user-function call.
+    /// Drained by the caller after each function call expression.
+    pub fn_signals: Vec<Signal>,
 }
 
 impl Interpreter {
@@ -136,6 +145,11 @@ impl Interpreter {
             }
         }
 
+        let mut functions = HashMap::new();
+        for fn_def in &program.functions {
+            functions.insert(fn_def.name.clone(), fn_def.clone());
+        }
+
         Interpreter {
             params,
             state,
@@ -144,6 +158,10 @@ impl Interpreter {
             in_position: false,
             prev_closes: HashMap::new(),
             current_closes: HashMap::new(),
+            functions,
+            call_depth: 0,
+            max_call_depth: 64,
+            fn_signals: Vec::new(),
         }
     }
 
@@ -181,6 +199,19 @@ impl Interpreter {
                             Signal::Open { .. } => self.in_position = true,
                             Signal::Close { .. } => self.in_position = false,
                             Signal::CloseQty { .. } => {} // partial close does not flatten
+                        }
+                    }
+                    signals
+                }
+                Err(msg) if msg.starts_with("__RETURN__:") => {
+                    // A return statement in the event handler — treat as early exit.
+                    // Any signals emitted before the return are in fn_signals.
+                    let signals: Vec<Signal> = self.fn_signals.drain(..).collect();
+                    for signal in &signals {
+                        match signal {
+                            Signal::Open { .. } => self.in_position = true,
+                            Signal::Close { .. } => self.in_position = false,
+                            Signal::CloseQty { .. } => {}
                         }
                     }
                     signals
@@ -544,7 +575,36 @@ impl Interpreter {
                             _ => Ok(Value::Float(0.0)),
                         }
                     }
-                    _ => Err(format!("unknown function: '{}'", func_name)),
+                    _ => {
+                        // Try user-defined functions
+                        if let Some(fn_def) = self.functions.get(&func_name).cloned() {
+                            if self.call_depth >= self.max_call_depth {
+                                return Err(format!(
+                                    "stack overflow: maximum call depth ({}) exceeded",
+                                    self.max_call_depth
+                                ));
+                            }
+                            self.call_depth += 1;
+
+                            // Create new scope with parameter bindings
+                            let mut fn_locals = HashMap::new();
+                            for (param_name, arg_value) in fn_def.params.iter().zip(evaluated_args.iter()) {
+                                fn_locals.insert(param_name.clone(), arg_value.clone());
+                            }
+                            // Inject bar context from caller's locals
+                            for name in &["close", "open", "high", "low", "volume", "symbol", "in_position"] {
+                                if let Some(val) = locals.get(*name) {
+                                    fn_locals.insert(name.to_string(), val.clone());
+                                }
+                            }
+
+                            let result = self.exec_fn_body(&fn_def.body, &mut fn_locals);
+                            self.call_depth -= 1;
+                            result
+                        } else {
+                            Err(format!("unknown function: '{}'", func_name))
+                        }
+                    }
                 }
             }
 
@@ -648,6 +708,10 @@ impl Interpreter {
                 // Evaluate the RHS
                 let value = self.eval_expr(&assignment.value, locals)?;
 
+                // Drain any signals emitted by user-function calls in the RHS
+                let mut signals = Vec::new();
+                signals.append(&mut self.fn_signals);
+
                 // If the name exists in state, update state; otherwise store in locals
                 if self.state.contains_key(&name) {
                     self.state.insert(name, value);
@@ -655,7 +719,7 @@ impl Interpreter {
                     locals.insert(name, value);
                 }
 
-                Ok(vec![])
+                Ok(signals)
             }
 
             TypedStmt::If(if_stmt) => {
@@ -746,16 +810,37 @@ impl Interpreter {
 
             TypedStmt::Expr(expr_stmt) => {
                 let value = self.eval_expr(&expr_stmt.expr, locals)?;
+                let mut signals = Vec::new();
+                // Drain any signals emitted by user-function calls
+                signals.append(&mut self.fn_signals);
+                // Also collect if the expression itself is a signal
                 match value {
-                    Value::Signal(sig) => Ok(vec![sig]),
-                    _ => Ok(vec![]),
+                    Value::Signal(sig) => {
+                        signals.push(sig);
+                    }
+                    _ => {}
                 }
+                Ok(signals)
             }
 
-            TypedStmt::Return(_return_stmt) => {
-                // For MVP, return statements in event handlers aren't common.
-                // Just return empty signals (early exit behavior handled at caller level).
-                Ok(vec![])
+            TypedStmt::Return(return_stmt) => {
+                // Evaluate the return value (if any) and propagate as a special error
+                // so that exec_fn_body can catch it and extract the value.
+                let value = match &return_stmt.value {
+                    Some(expr) => self.eval_expr(expr, locals)?,
+                    None => Value::Null,
+                };
+                // Encode the return value as a sentinel error string.
+                // exec_fn_body will intercept this to extract the value.
+                let encoded = match &value {
+                    Value::Float(f) => format!("__RETURN__:float:{}", f),
+                    Value::Int(i) => format!("__RETURN__:int:{}", i),
+                    Value::Bool(b) => format!("__RETURN__:bool:{}", b),
+                    Value::Str(s) => format!("__RETURN__:str:{}", s),
+                    Value::Null => "__RETURN__:null:".to_string(),
+                    _ => "__RETURN__:null:".to_string(),
+                };
+                Err(encoded)
             }
         }
     }
@@ -772,6 +857,73 @@ impl Interpreter {
             signals.extend(stmt_signals);
         }
         Ok(signals)
+    }
+
+    /// Execute a user-defined function body, handling `return` as early termination.
+    ///
+    /// Signals emitted inside the function body (via OPEN/CLOSE/CLOSE_QTY)
+    /// are propagated to the caller through `self.fn_signals`.
+    /// Returns the function's return value (or Null if no return statement).
+    fn exec_fn_body(
+        &mut self,
+        body: &[TypedStmt],
+        locals: &mut HashMap<String, Value>,
+    ) -> Result<Value, String> {
+        let mut all_signals = Vec::new();
+
+        for stmt in body {
+            match stmt {
+                TypedStmt::Return(return_stmt) => {
+                    let value = match &return_stmt.value {
+                        Some(expr) => {
+                            let val = self.eval_expr(expr, locals)?;
+                            // Drain any signals from evaluating the return expression
+                            all_signals.append(&mut self.fn_signals);
+                            val
+                        }
+                        None => Value::Null,
+                    };
+                    // Flush accumulated signals to the caller's signal list
+                    self.fn_signals.extend(all_signals);
+                    return Ok(value);
+                }
+                _ => {
+                    match self.exec_stmt(stmt, locals) {
+                        Ok(stmt_signals) => {
+                            all_signals.extend(stmt_signals);
+                        }
+                        Err(e) if e.starts_with("__RETURN__:") => {
+                            // A return statement was hit inside a nested block (if/while/for).
+                            // Decode the value from the sentinel error.
+                            let value = Self::decode_return_value(&e);
+                            self.fn_signals.extend(all_signals);
+                            return Ok(value);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+
+        // No explicit return — flush signals and return Null
+        self.fn_signals.extend(all_signals);
+        Ok(Value::Null)
+    }
+
+    /// Decode a return value from the sentinel error string format.
+    fn decode_return_value(encoded: &str) -> Value {
+        let rest = &encoded["__RETURN__:".len()..];
+        if let Some(val_str) = rest.strip_prefix("float:") {
+            Value::Float(val_str.parse::<f64>().unwrap_or(0.0))
+        } else if let Some(val_str) = rest.strip_prefix("int:") {
+            Value::Int(val_str.parse::<i64>().unwrap_or(0))
+        } else if let Some(val_str) = rest.strip_prefix("bool:") {
+            Value::Bool(val_str == "true")
+        } else if let Some(val_str) = rest.strip_prefix("str:") {
+            Value::Str(val_str.to_string())
+        } else {
+            Value::Null
+        }
     }
 }
 
@@ -934,6 +1086,7 @@ mod tests {
         // Build a minimal TypedProgram with params and state
         let program = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1024,6 +1177,7 @@ mod tests {
         // A program with no event handler
         let program = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1064,6 +1218,10 @@ mod tests {
             in_position: false,
             prev_closes: HashMap::new(),
             current_closes: HashMap::new(),
+            functions: HashMap::new(),
+            call_depth: 0,
+            max_call_depth: 64,
+            fn_signals: Vec::new(),
         }
     }
 
@@ -1793,6 +1951,7 @@ mod tests {
         // Build a program: on bar { if close > open { OPEN(symbol, 100.0) } }
         let program = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1865,6 +2024,7 @@ mod tests {
     fn test_on_bar_no_handler_returns_empty() {
         let program = TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

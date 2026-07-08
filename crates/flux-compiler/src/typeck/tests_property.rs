@@ -272,6 +272,7 @@ mod tests {
 
                     Program {
                         imports,
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                         strategy,
@@ -441,6 +442,7 @@ mod tests {
 
                 Program {
                     imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                     strategy,
@@ -555,6 +557,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -642,6 +645,7 @@ mod tests {
 
             Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -727,6 +731,7 @@ mod tests {
     fn wrap_in_handler(stmt: Stmt, span: Span) -> Program {
         Program {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: AstStrategy {
@@ -1294,6 +1299,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1449,6 +1455,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1505,6 +1512,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1573,6 +1581,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1635,6 +1644,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1691,6 +1701,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1762,6 +1773,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1801,6 +1813,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1841,6 +1854,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1913,6 +1927,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1982,6 +1997,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2051,6 +2067,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2118,6 +2135,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2182,6 +2200,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2258,6 +2277,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2322,6 +2342,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2385,6 +2406,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2463,6 +2485,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![import],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2522,6 +2545,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2590,6 +2614,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2632,6 +2657,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2668,6 +2694,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2716,6 +2743,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2776,6 +2804,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2858,6 +2887,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2946,6 +2976,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3018,6 +3049,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3074,6 +3106,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3141,6 +3174,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3228,6 +3262,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3339,6 +3374,7 @@ mod tests {
 
             let program = Program {
                 imports: vec![],
+                        functions: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3365,6 +3401,545 @@ mod tests {
                     prop_assert!(
                         msg.contains("VecFloat index must be Int"),
                         "Error should mention 'VecFloat index must be Int', got: {}", msg
+                    );
+                }
+                other => {
+                    prop_assert!(false, "Expected CompileError::Type, got: {:?}", other);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Property 2: Arity match acceptance (user-defined functions)
+    // ========================================================================
+
+    // Feature: flux-user-functions, Property 2: Arity match acceptance
+    //
+    // **Validates: Requirements 3.1, 3.2**
+    //
+    // For any user-defined function with N parameters and any function call
+    // providing exactly N arguments, the typechecker SHALL accept the call
+    // without error.
+
+    /// Helper: lex → parse → typecheck a Flux source string. Returns the check result.
+    fn check_source(source: &str) -> crate::error::Result<crate::typeck::typed_ast::TypedProgram> {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let tokens = lex_with_spans(source).unwrap_or_else(|e| {
+            panic!("Lexing failed for source:\n{}\nError: {}", source, e);
+        });
+        let program = parse(tokens).unwrap_or_else(|e| {
+            panic!("Parsing failed for source:\n{}\nError: {}", source, e);
+        });
+        super::super::check(program)
+    }
+
+    /// Build a Flux source with a function of `n_params` parameters and a call
+    /// with `n_args` arguments.
+    fn build_arity_source(n_params: usize, n_args: usize) -> String {
+        // Build parameter list: p1, p2, ..., pN
+        let params: Vec<String> = (1..=n_params).map(|i| format!("p{}", i)).collect();
+        let params_str = params.join(", ");
+
+        // Function body: return first param if any, else return 1.0
+        let body = if n_params > 0 {
+            "return p1".to_string()
+        } else {
+            "return 1.0".to_string()
+        };
+
+        // Build argument list: 1.0, 2.0, ..., M times
+        let args: Vec<String> = (1..=n_args).map(|i| format!("{}.0", i)).collect();
+        let args_str = args.join(", ");
+
+        format!(
+            "fn testfn({}) {{\n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        testfn({})\n    }}\n}}\n",
+            params_str, body, args_str
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: When M == N (call args match function params), the typechecker accepts.
+        #[test]
+        fn prop_arity_match_acceptance(n in 0usize..=8) {
+            let source = build_arity_source(n, n);
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_ok(),
+                "Function with {} params called with {} args should be accepted, got error: {:?}\nSource:\n{}",
+                n, n, result.err(), source
+            );
+        }
+    }
+
+    // ========================================================================
+    // Property 3: Arity mismatch rejection (user-defined functions)
+    // ========================================================================
+
+    // Feature: flux-user-functions, Property 3: Arity mismatch rejection
+    //
+    // **Validates: Requirements 3.3, 7.2**
+    //
+    // For any user-defined function with N parameters and any function call
+    // providing M arguments where M ≠ N, the typechecker SHALL produce an
+    // arity mismatch error containing the expected count N and actual count M.
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: When M ≠ N (call args don't match function params), the typechecker
+        /// produces an error containing both the expected and actual counts.
+        #[test]
+        fn prop_arity_mismatch_rejection(n in 0usize..=8, m in 0usize..=10) {
+            // Only test mismatch cases
+            prop_assume!(m != n);
+
+            let source = build_arity_source(n, m);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_err(),
+                "Function with {} params called with {} args should be rejected, but was accepted.\nSource:\n{}",
+                n, m, source
+            );
+
+            let err = result.unwrap_err();
+            match &err {
+                CompileError::Type(msg) => {
+                    // Error should contain the expected count (N) and actual count (M)
+                    let expected_str = format!("{}", n);
+                    let actual_str = format!("{}", m);
+                    prop_assert!(
+                        msg.contains(&expected_str) && msg.contains(&actual_str),
+                        "Arity error should contain expected count {} and actual count {}, got: {}",
+                        n, m, msg
+                    );
+                    // Error should also reference the function name
+                    prop_assert!(
+                        msg.contains("testfn"),
+                        "Arity error should mention function name 'testfn', got: {}", msg
+                    );
+                }
+                other => {
+                    prop_assert!(false, "Expected CompileError::Type, got: {:?}", other);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Property 4: Recursion cycle detection (user-defined functions)
+    // ========================================================================
+
+    // Feature: flux-user-functions, Property 4: Recursion cycle detection
+    //
+    // **Validates: Requirements 4.1, 4.2, 4.3**
+    //
+    // For any set of user-defined functions whose call graph contains a cycle
+    // (including direct self-recursion), the typechecker SHALL reject the program
+    // with a "recursive call detected" error. For any set of functions whose call
+    // graph is acyclic, the typechecker SHALL accept the program.
+
+    /// Generate a list of unique function names (2–6 names).
+    fn arb_fn_names(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("func_{}", i)).collect()
+    }
+
+    /// Build a Flux source from a call graph represented as adjacency list.
+    /// Each function gets a body that calls its neighbors.
+    fn build_call_graph_source(names: &[String], edges: &[(usize, usize)]) -> String {
+        let mut source = String::new();
+
+        for (i, name) in names.iter().enumerate() {
+            // Collect edges outgoing from this function
+            let callees: Vec<&String> = edges
+                .iter()
+                .filter(|(from, _)| *from == i)
+                .map(|(_, to)| &names[*to])
+                .collect();
+
+            source.push_str(&format!("fn {}() {{\n", name));
+            for callee in &callees {
+                source.push_str(&format!("    {}()\n", callee));
+            }
+            // Always include a return so the function has at least one statement
+            source.push_str("    return 1.0\n");
+            source.push_str("}\n\n");
+        }
+
+        // Add a minimal strategy that doesn't call any of the functions
+        // (we only care about inter-function cycles)
+        source.push_str("strategy Test {\n    on bar {\n        x = 1.0\n    }\n}\n");
+        source
+    }
+
+    /// Strategy to generate a call graph WITH a guaranteed cycle.
+    /// Approach: generate 2–6 functions, pick a random subset to form a cycle,
+    /// then add random extra edges.
+    fn arb_cyclic_graph() -> impl Strategy<Value = (Vec<String>, Vec<(usize, usize)>)> {
+        // Number of functions: 2–6
+        (2usize..=6).prop_flat_map(|n| {
+            // Generate a cycle of length 2..=n by picking a permutation of cycle_len nodes
+            let cycle_len_range = 2..=n;
+            (Just(n), cycle_len_range).prop_flat_map(move |(n, cycle_len)| {
+                // Pick cycle_len distinct indices for the cycle
+                let indices_strategy = proptest::sample::subsequence(
+                    (0..n).collect::<Vec<_>>(),
+                    cycle_len,
+                );
+                // Also generate random extra edges (0 to n edges)
+                let extra_edges_strategy = prop::collection::vec(
+                    (0..n, 0..n),
+                    0..=n,
+                );
+                (Just(n), indices_strategy, extra_edges_strategy)
+            })
+        })
+        .prop_map(|(n, cycle_indices, extra_edges)| {
+            let names = arb_fn_names(n);
+            let mut edges: Vec<(usize, usize)> = Vec::new();
+
+            // Add cycle edges: cycle_indices[0] → cycle_indices[1] → ... → cycle_indices[0]
+            for i in 0..cycle_indices.len() {
+                let from = cycle_indices[i];
+                let to = cycle_indices[(i + 1) % cycle_indices.len()];
+                edges.push((from, to));
+            }
+
+            // Add extra random edges (may include duplicates, that's fine)
+            for (from, to) in extra_edges {
+                edges.push((from, to));
+            }
+
+            (names, edges)
+        })
+    }
+
+    /// Strategy to generate an acyclic (DAG) call graph.
+    /// Approach: generate 2–6 functions in topological order, only allow
+    /// edges from lower-indexed to higher-indexed functions (guarantees no cycle).
+    fn arb_acyclic_graph() -> impl Strategy<Value = (Vec<String>, Vec<(usize, usize)>)> {
+        (2usize..=6).prop_flat_map(|n| {
+            // Generate random forward edges (from < to)
+            let edges_strategy = prop::collection::vec(
+                (0..n).prop_flat_map(move |from| {
+                    if from + 1 < n {
+                        (Just(from), (from + 1)..n).boxed()
+                    } else {
+                        // No valid forward edge from last node — generate a dummy
+                        // that we'll filter out
+                        (Just(0usize), Just(0usize)).boxed()
+                    }
+                }),
+                0..=(n * 2),
+            );
+            (Just(n), edges_strategy)
+        })
+        .prop_map(|(n, raw_edges)| {
+            let names = arb_fn_names(n);
+            // Filter to valid forward edges only (from < to)
+            let edges: Vec<(usize, usize)> = raw_edges
+                .into_iter()
+                .filter(|(from, to)| from < to)
+                .collect();
+            (names, edges)
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: Call graphs with cycles are rejected with "recursive call detected".
+        #[test]
+        fn prop_cyclic_graph_rejected((names, edges) in arb_cyclic_graph()) {
+            let source = build_call_graph_source(&names, &edges);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_err(),
+                "Cyclic call graph should be rejected, but was accepted.\nSource:\n{}",
+                source
+            );
+
+            let err = result.unwrap_err();
+            match &err {
+                CompileError::Type(msg) => {
+                    prop_assert!(
+                        msg.contains("recursive call detected"),
+                        "Error should contain 'recursive call detected', got: {}\nSource:\n{}",
+                        msg, source
+                    );
+                }
+                other => {
+                    prop_assert!(
+                        false,
+                        "Expected CompileError::Type, got: {:?}\nSource:\n{}",
+                        other, source
+                    );
+                }
+            }
+        }
+
+        /// Property: Acyclic call graphs (DAGs) are accepted by the typechecker.
+        #[test]
+        fn prop_acyclic_graph_accepted((names, edges) in arb_acyclic_graph()) {
+            let source = build_call_graph_source(&names, &edges);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_ok(),
+                "Acyclic call graph should be accepted, got error: {:?}\nSource:\n{}",
+                result.err(), source
+            );
+        }
+    }
+
+    // ========================================================================
+    // Property 9: State access rejection (user-defined functions)
+    // ========================================================================
+
+    // Feature: flux-user-functions, Property 9: State access rejection
+    //
+    // **Validates: Requirements 3.8, 7.5**
+    //
+    // For any user-defined function that references a state variable name in its
+    // body, the typechecker SHALL reject the program with an error containing
+    // "functions cannot access state variable '<name>'".
+    // For any user-defined function that accesses a parameter or bar context
+    // variable instead, the typechecker SHALL accept the program.
+
+    /// Keywords and bar context names that must not be used as state variable names.
+    const BAR_CONTEXT_NAMES: &[&str] = &[
+        "close", "open", "high", "low", "volume", "symbol", "in_position",
+    ];
+
+    const FLUX_KEYWORDS: &[&str] = &[
+        "strategy", "params", "state", "on", "if", "elif", "else", "for", "while",
+        "return", "fn", "from", "import", "and", "or", "not", "true", "false",
+        "null", "data", "connector",
+    ];
+
+    /// Generate a valid identifier that is NOT a keyword, NOT a bar context name,
+    /// and NOT a common built-in function name.
+    fn arb_state_var_name() -> impl Strategy<Value = String> {
+        "[a-z][a-z_]{2,8}"
+            .prop_filter("not a keyword or bar context name", |name| {
+                !BAR_CONTEXT_NAMES.contains(&name.as_str())
+                    && !FLUX_KEYWORDS.contains(&name.as_str())
+                    && name != "sma"
+                    && name != "ema"
+                    && name != "zscore"
+                    && name != "abs"
+                    && name != "max"
+                    && name != "min"
+                    && name != "sqrt"
+                    && name != "log"
+                    && name != "testfn"
+                    && name != "myfn"
+                    && name != "bar"
+                    && name != "result"
+            })
+    }
+
+    /// Build a Flux source where a function body references a state variable name.
+    /// This should be rejected by the typechecker.
+    fn build_state_access_source(state_var_name: &str) -> String {
+        format!(
+            r#"fn myfn(x) {{
+    val = {} + x
+    return val
+}}
+
+strategy Test {{
+    state {{
+        {} = 0
+    }}
+    on bar {{
+        myfn(1.0)
+    }}
+}}
+"#,
+            state_var_name, state_var_name
+        )
+    }
+
+    /// Build a Flux source where a function body accesses a parameter (not state).
+    /// This should be accepted by the typechecker.
+    fn build_param_access_source(param_name: &str) -> String {
+        format!(
+            r#"fn myfn({}) {{
+    val = {} + 1.0
+    return val
+}}
+
+strategy Test {{
+    state {{
+        unrelated_state_var = 0
+    }}
+    on bar {{
+        myfn(2.0)
+    }}
+}}
+"#,
+            param_name, param_name
+        )
+    }
+
+    /// Build a Flux source where a function body accesses a bar context variable.
+    /// This should be accepted by the typechecker.
+    fn build_bar_context_access_source(ctx_var: &str) -> String {
+        let body = match ctx_var {
+            "symbol" => format!("val = {}\n    return val", ctx_var),
+            "in_position" => format!("val = {}\n    return val", ctx_var),
+            _ => format!("val = {} + 1.0\n    return val", ctx_var),
+        };
+        format!(
+            r#"fn myfn() {{
+    {}
+}}
+
+strategy Test {{
+    state {{
+        unrelated_state_var = 0
+    }}
+    on bar {{
+        myfn()
+    }}
+}}
+"#,
+            body
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: A function that references a state variable is rejected with
+        /// "functions cannot access state variable '<name>'" error.
+        #[test]
+        fn prop_state_access_rejection(state_var in arb_state_var_name()) {
+            let source = build_state_access_source(&state_var);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_err(),
+                "Function accessing state variable '{}' should be rejected, but was accepted.\nSource:\n{}",
+                state_var, source
+            );
+
+            let err = result.unwrap_err();
+            match &err {
+                CompileError::Type(msg) => {
+                    let expected_fragment = format!("functions cannot access state variable '{}'", state_var);
+                    prop_assert!(
+                        msg.contains(&expected_fragment),
+                        "Error should contain '{}', got: {}",
+                        expected_fragment, msg
+                    );
+                }
+                other => {
+                    prop_assert!(false, "Expected CompileError::Type, got: {:?}", other);
+                }
+            }
+        }
+
+        /// Property: A function that accesses a parameter (not a state variable)
+        /// is accepted without error.
+        #[test]
+        fn prop_param_access_acceptance(param_name in arb_state_var_name()) {
+            let source = build_param_access_source(&param_name);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_ok(),
+                "Function accessing parameter '{}' should be accepted, got error: {:?}\nSource:\n{}",
+                param_name, result.err(), source
+            );
+        }
+
+        /// Property: A function that accesses a bar context variable is accepted
+        /// without error.
+        #[test]
+        fn prop_bar_context_access_acceptance(
+            ctx_var in prop::sample::select(vec!["close", "open", "high", "low", "volume"])
+        ) {
+            let source = build_bar_context_access_source(ctx_var);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_ok(),
+                "Function accessing bar context variable '{}' should be accepted, got error: {:?}\nSource:\n{}",
+                ctx_var, result.err(), source
+            );
+        }
+    }
+
+    // ========================================================================
+    // Property 10: Duplicate function detection
+    // ========================================================================
+
+    // Feature: flux-user-functions, Property 10: Duplicate function detection
+    //
+    // **Validates: Requirements 3.5**
+    //
+    // For any program with 2+ functions sharing the same name, the typechecker
+    // SHALL produce a "duplicate function definition" error containing the
+    // function name.
+
+    /// Generate a valid non-keyword identifier for use as a function name.
+    fn arb_valid_fn_name() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9_]{0,9}"
+            .prop_filter("must not be a keyword", |name| {
+                !FLUX_KEYWORDS.contains(&name.as_str())
+            })
+    }
+
+    /// Build a Flux source with two functions having the same name.
+    fn build_duplicate_fn_source(name: &str) -> String {
+        format!(
+            r#"fn {name}() {{
+}}
+
+fn {name}() {{
+}}
+
+strategy Test {{
+    on bar {{
+    }}
+}}
+"#,
+            name = name
+        )
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// Property: Programs with two functions sharing the same name are rejected
+        /// with a "duplicate function definition" error containing the function name.
+        #[test]
+        fn prop_duplicate_function_detection(name in arb_valid_fn_name()) {
+            let source = build_duplicate_fn_source(&name);
+            let result = check_source(&source);
+
+            prop_assert!(
+                result.is_err(),
+                "Program with duplicate function '{}' should be rejected, but was accepted.\nSource:\n{}",
+                name, source
+            );
+
+            let err = result.unwrap_err();
+            match &err {
+                CompileError::Type(msg) => {
+                    let expected_fragment = format!("duplicate function definition '{}'", name);
+                    prop_assert!(
+                        msg.contains(&expected_fragment),
+                        "Error should contain '{}', got: {}",
+                        expected_fragment, msg
                     );
                 }
                 other => {

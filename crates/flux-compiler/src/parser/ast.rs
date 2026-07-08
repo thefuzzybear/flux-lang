@@ -8,9 +8,19 @@ use crate::lexer::Span;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub imports: Vec<Import>,
+    pub functions: Vec<FnDef>,
     pub data_block: Option<DataBlock>,
     pub connector_block: Option<ConnectorBlock>,
     pub strategy: Strategy,
+    pub span: Span,
+}
+
+/// A user-defined function declaration: `fn name(params) { body }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnDef {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
     pub span: Span,
 }
 

@@ -137,6 +137,7 @@ fn convert_token(
         LogosToken::For => Ok(Token::For),
         LogosToken::While => Ok(Token::While),
         LogosToken::Return => Ok(Token::Return),
+        LogosToken::Fn => Ok(Token::Fn),
         LogosToken::From => Ok(Token::From),
         LogosToken::Import => Ok(Token::Import),
         LogosToken::And => Ok(Token::And),
@@ -1132,6 +1133,61 @@ mod tests {
             tokens,
             vec![Token::Ident("database".to_string()), Token::Eof]
         );
+    }
+
+    // --- fn keyword tests (Task 1.2) ---
+    // Validates: Requirements 1.1, 1.2, 1.3
+
+    #[test]
+    fn lex_keyword_fn_alone() {
+        // "fn" alone should produce Token::Fn
+        let tokens = lex("fn").unwrap();
+        assert_eq!(tokens, vec![Token::Fn, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_fn_alone_correct_span() {
+        // "fn" should have span [0, 2)
+        let spanned = lex_with_spans("fn").unwrap();
+        assert_eq!(spanned[0].token, Token::Fn);
+        assert_eq!(spanned[0].span, Span::new(0, 2));
+    }
+
+    #[test]
+    fn lex_fname_produces_ident() {
+        // "fname" should be a single Ident, not Fn + Ident("ame")
+        let tokens = lex("fname").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("fname".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_fn_helper_produces_ident() {
+        // "fn_helper" should be a single Ident, not Fn + Ident("_helper")
+        let tokens = lex("fn_helper").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("fn_helper".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_fn_followed_by_open_paren() {
+        // "fn(" should produce Token::Fn followed by Token::OpenParen
+        let tokens = lex("fn(").unwrap();
+        assert_eq!(tokens, vec![Token::Fn, Token::OpenParen, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_fn_span_exactly_2_bytes() {
+        // Fn token span should be exactly 2 bytes wide regardless of position
+        let spanned = lex_with_spans("  fn").unwrap();
+        let fn_token = &spanned[0];
+        assert_eq!(fn_token.token, Token::Fn);
+        assert_eq!(fn_token.span.len(), 2);
+        assert_eq!(fn_token.span, Span::new(2, 4));
     }
 
     // --- connector keyword tests ---

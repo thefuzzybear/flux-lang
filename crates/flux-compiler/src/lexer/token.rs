@@ -14,6 +14,7 @@ pub enum Token {
     For,
     While,
     Return,
+    Fn,
     From,
     Import,
     And,
@@ -78,6 +79,7 @@ impl Token {
                 | Token::For
                 | Token::While
                 | Token::Return
+                | Token::Fn
                 | Token::From
                 | Token::Import
                 | Token::And

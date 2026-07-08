@@ -8,7 +8,7 @@
 mod tests {
     use crate::lexer::{lex_with_spans, Span};
     use crate::parser::ast::{
-        Assignment, BinOp, EventHandler, Expr, ExprKind, ExprStmt, ForLoop, IfStmt,
+        Assignment, BinOp, EventHandler, Expr, ExprKind, ExprStmt, FnDef, ForLoop, IfStmt,
         Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar,
         Stmt, Strategy as AstStrategy, StrategyItem, UnaryOp, WhileLoop,
     };
@@ -27,8 +27,8 @@ mod tests {
         matches!(
             s,
             "strategy" | "params" | "state" | "on" | "if" | "elif" | "else"
-                | "for" | "while" | "return" | "from" | "import" | "and" | "or"
-                | "not" | "true" | "false" | "null" | "in"
+                | "for" | "while" | "return" | "fn" | "from" | "import" | "and" | "or"
+                | "not" | "true" | "false" | "null" | "in" | "data" | "connector"
         )
     }
 
@@ -336,6 +336,7 @@ mod tests {
         )
             .prop_map(|(imports, name, body)| Program {
                 imports,
+                functions: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: AstStrategy {
@@ -345,6 +346,77 @@ mod tests {
                 },
                 span: dummy_span(),
             })
+    }
+
+    /// Generate a valid function definition with random name, 0–8 params, and random body.
+    /// Used for the FnDef round-trip property test.
+    fn arb_fn_def() -> impl Strategy<Value = FnDef> {
+        (
+            arb_ident(),
+            proptest::collection::vec(arb_ident(), 0..8),
+            arb_fn_body_stmts(),
+        )
+            .prop_map(|(name, params, body)| {
+                // Deduplicate params to avoid invalid duplicate parameter names
+                let mut seen = std::collections::HashSet::new();
+                let unique_params: Vec<String> = params
+                    .into_iter()
+                    .filter(|p| seen.insert(p.clone()))
+                    .collect();
+                FnDef {
+                    name,
+                    params: unique_params,
+                    body,
+                    span: dummy_span(),
+                }
+            })
+    }
+
+    /// Generate simple body statements suitable for functions:
+    /// assignments (x = 1.0), return statements (return x), function calls (foo(x))
+    fn arb_fn_body_stmts() -> impl Strategy<Value = Vec<Stmt>> {
+        proptest::collection::vec(arb_fn_body_stmt(), 1..6)
+    }
+
+    fn arb_fn_body_stmt() -> impl Strategy<Value = Stmt> {
+        prop_oneof![
+            // Assignment: ident = expr
+            (arb_ident(), arb_leaf_expr()).prop_map(|(name, value)| {
+                Stmt::Assignment(Assignment {
+                    target: Expr {
+                        kind: ExprKind::Ident(name),
+                        span: dummy_span(),
+                    },
+                    value,
+                    span: dummy_span(),
+                })
+            }),
+            // Return with value
+            arb_leaf_expr().prop_map(|e| {
+                Stmt::Return(ReturnStmt {
+                    value: Some(e),
+                    span: dummy_span(),
+                })
+            }),
+            // Expression statement (function call)
+            (arb_ident(), proptest::collection::vec(arb_leaf_expr(), 0..3)).prop_map(
+                |(name, args)| {
+                    Stmt::Expr(ExprStmt {
+                        expr: Expr {
+                            kind: ExprKind::FunctionCall {
+                                function: Box::new(Expr {
+                                    kind: ExprKind::Ident(name),
+                                    span: dummy_span(),
+                                }),
+                                args,
+                            },
+                            span: dummy_span(),
+                        },
+                        span: dummy_span(),
+                    })
+                }
+            ),
+        ]
     }
 
     // ========================================================================
@@ -357,6 +429,11 @@ mod tests {
                 .iter()
                 .zip(b.imports.iter())
                 .all(|(ia, ib)| ia.module_path == ib.module_path && ia.names == ib.names)
+            && a.functions.len() == b.functions.len()
+            && a.functions
+                .iter()
+                .zip(b.functions.iter())
+                .all(|(fa, fb)| fn_defs_eq(fa, fb))
             && a.strategy.name == b.strategy.name
             && a.strategy.body.len() == b.strategy.body.len()
             && a.strategy
@@ -364,6 +441,16 @@ mod tests {
                 .iter()
                 .zip(b.strategy.body.iter())
                 .all(|(ia, ib)| items_eq(ia, ib))
+    }
+
+    fn fn_defs_eq(a: &FnDef, b: &FnDef) -> bool {
+        a.name == b.name
+            && a.params == b.params
+            && a.body.len() == b.body.len()
+            && a.body
+                .iter()
+                .zip(b.body.iter())
+                .all(|(sa, sb)| stmts_eq(sa, sb))
     }
 
     fn items_eq(a: &StrategyItem, b: &StrategyItem) -> bool {
@@ -519,6 +606,61 @@ mod tests {
                 programs_eq(&program, &reparsed),
                 "Round-trip failed!\nOriginal AST: {:?}\nPretty-printed:\n{}\nReparsed AST: {:?}",
                 program, source, reparsed
+            );
+        }
+    }
+
+    // ========================================================================
+    // Property: FnDef Round-Trip (parse → print → parse)
+    // ========================================================================
+
+    // Feature: flux-user-functions, Property 1: FnDef round-trip
+    // **Validates: Requirements 2.7, 2.8**
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn prop_fn_def_round_trip(fn_def in arb_fn_def()) {
+            // Build a minimal program containing just this FnDef + a dummy strategy
+            let program = Program {
+                imports: vec![],
+                functions: vec![fn_def.clone()],
+                data_block: None,
+                connector_block: None,
+                strategy: AstStrategy {
+                    name: "T".to_string(),
+                    body: vec![StrategyItem::Property(Property {
+                        name: "v".to_string(),
+                        value: Expr {
+                            kind: ExprKind::IntLiteral(1),
+                            span: dummy_span(),
+                        },
+                        span: dummy_span(),
+                    })],
+                    span: dummy_span(),
+                },
+                span: dummy_span(),
+            };
+
+            let source = pretty_print_program(&program);
+            let tokens = lex_with_spans(&source).expect(
+                &format!("FnDef pretty-print should lex successfully.\nSource:\n{}", source)
+            );
+            let reparsed = parse(tokens).expect(
+                &format!("FnDef pretty-print should parse successfully.\nSource:\n{}", source)
+            );
+
+            // Assert we got exactly one function back
+            prop_assert_eq!(reparsed.functions.len(), 1,
+                "Expected 1 function in reparsed program, got {}\nSource:\n{}",
+                reparsed.functions.len(), source);
+
+            // Assert structural equivalence of the FnDef (ignoring spans)
+            let reparsed_fn = &reparsed.functions[0];
+            prop_assert!(
+                fn_defs_eq(&fn_def, reparsed_fn),
+                "FnDef round-trip failed!\nOriginal: {:?}\nPretty-printed:\n{}\nReparsed: {:?}",
+                fn_def, source, reparsed_fn
             );
         }
     }

@@ -170,6 +170,7 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::For
         | Token::While
         | Token::Return
+        | Token::Fn
         | Token::From
         | Token::Import
         | Token::And

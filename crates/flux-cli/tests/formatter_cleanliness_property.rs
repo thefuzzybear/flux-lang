@@ -359,6 +359,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
                     span: Span::new(0, 0),
                 })
                 .collect(),
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: FluxStrategy {

@@ -8,6 +8,7 @@ pub mod typed_ast;
 mod env;
 mod checker;
 mod builtins;
+pub(crate) mod call_graph;
 
 #[cfg(test)]
 mod tests_property;
@@ -214,6 +215,7 @@ mod integration_tests {
 
         Program {
             imports: vec![import],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy,
@@ -411,6 +413,7 @@ mod integration_tests {
 
         let program = Program {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy,

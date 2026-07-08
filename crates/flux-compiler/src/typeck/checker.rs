@@ -5,6 +5,8 @@
 //! with resolved types on every expression node. It maintains a scoped
 //! environment for identifier resolution and enforces all type rules.
 
+use std::collections::HashSet;
+
 use crate::error::{CompileError, Result};
 use crate::lexer::Span;
 use crate::parser::ast::*;
@@ -19,6 +21,8 @@ use super::types::{FluxType, FnParams};
 pub(crate) struct TypeChecker {
     env: TypeEnvironment,
     in_event_handler: bool,
+    in_function_body: bool,
+    state_var_names: HashSet<String>,
 }
 
 impl TypeChecker {
@@ -27,6 +31,8 @@ impl TypeChecker {
         Self {
             env: TypeEnvironment::new(),
             in_event_handler: false,
+            in_function_body: false,
+            state_var_names: HashSet::new(),
         }
     }
 
@@ -34,6 +40,22 @@ impl TypeChecker {
     pub fn check_program(&mut self, program: Program) -> Result<TypedProgram> {
         // Register imports into global scope
         self.register_imports(&program.imports)?;
+
+        // Register user-defined functions into global scope (before strategy checking)
+        self.register_functions(&program.functions)?;
+
+        // Detect recursion via call graph analysis (before body checking)
+        let call_graph = super::call_graph::build_call_graph(&program.functions);
+        if let Some(cycle) = super::call_graph::detect_cycles(&call_graph) {
+            return Err(self.recursion_error(&program.functions, &cycle));
+        }
+
+        // Pre-scan strategy state block to collect state variable names
+        // (used for producing specific errors when functions try to access state)
+        self.collect_state_var_names(&program.strategy);
+
+        // Check function bodies (after registration so they can call each other)
+        let typed_functions = self.check_fn_defs(program.functions)?;
 
         // Validate data block before strategy checking
         let typed_data_block = match program.data_block {
@@ -52,6 +74,7 @@ impl TypeChecker {
 
         Ok(TypedProgram {
             imports: program.imports,
+            functions: typed_functions,
             data_block: typed_data_block,
             connector_block: typed_connector_block,
             strategy: typed_strategy,
@@ -228,6 +251,166 @@ impl TypeChecker {
         }
         Ok(())
     }
+
+    /// Register user-defined functions in the type environment.
+    ///
+    /// Each function is registered as `FluxType::Fn { params: Fixed(vec![Float; n]), ret: Float }`.
+    /// Detects duplicate function definitions (including collisions with imports).
+    fn register_functions(&mut self, functions: &[FnDef]) -> Result<()> {
+        for fn_def in functions {
+            // Check for duplicate names (collisions with imports or other functions)
+            if self.env.resolve(&fn_def.name).is_some() {
+                return Err(self.type_error(
+                    fn_def.span,
+                    format!("duplicate function definition '{}'", fn_def.name),
+                ));
+            }
+            self.env.insert(
+                fn_def.name.clone(),
+                FluxType::Fn {
+                    params: FnParams::Fixed(vec![FluxType::Float; fn_def.params.len()]),
+                    ret: Box::new(FluxType::Float),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Pre-scan the strategy's state block to collect state variable names.
+    ///
+    /// This is called before checking function bodies so that we can produce
+    /// a specific error ("functions cannot access state variable 'X'") instead
+    /// of a generic "undefined identifier" error when a function references
+    /// a state variable.
+    fn collect_state_var_names(&mut self, strategy: &Strategy) {
+        for item in &strategy.body {
+            if let StrategyItem::StateBlock(sb) = item {
+                for var in &sb.variables {
+                    self.state_var_names.insert(var.name.clone());
+                }
+            }
+        }
+    }
+
+    /// Type-check all user-defined function bodies, producing TypedFnDef nodes.
+    ///
+    /// Called after `register_functions` so that functions can reference each other.
+    /// Each function body is checked in a new scope with parameter bindings,
+    /// bar context, built-in functions, and other user-defined function bindings.
+    fn check_fn_defs(&mut self, functions: Vec<FnDef>) -> Result<Vec<TypedFnDef>> {
+        let mut typed_functions = Vec::new();
+        for fn_def in functions {
+            typed_functions.push(self.check_fn_def(fn_def)?);
+        }
+        Ok(typed_functions)
+    }
+
+    /// Type-check a single user-defined function body.
+    ///
+    /// Pushes a new scope with:
+    /// - Parameter bindings (all typed as Float)
+    /// - Bar context bindings (close, open, high, low, volume, symbol, in_position)
+    /// - Signal function bindings (OPEN, CLOSE)
+    /// - Math/stats/portfolio function bindings
+    /// Then checks all body statements and infers the return type.
+    fn check_fn_def(&mut self, fn_def: FnDef) -> Result<TypedFnDef> {
+        self.env.push_scope();
+        self.in_function_body = true;
+
+        // Bind parameters as Float
+        for param in &fn_def.params {
+            self.env.insert(param.clone(), FluxType::Float);
+        }
+
+        // Inject bar context (same bindings as event handlers)
+        for (name, ty) in builtins::market_data_bindings() {
+            self.env.insert(name.to_string(), ty);
+        }
+
+        // Inject signal function bindings
+        for (name, ty) in builtins::signal_function_bindings() {
+            self.env.insert(name.to_string(), ty);
+        }
+
+        // Inject math/stats/portfolio function bindings
+        for (name, ty) in builtins::math_function_bindings() {
+            self.env.insert(name.to_string(), ty);
+        }
+
+        // Check body statements
+        let mut typed_body = Vec::new();
+        for stmt in fn_def.body {
+            typed_body.push(self.check_stmt(stmt)?);
+        }
+
+        // Infer return type from return statements (or Null if none)
+        let return_type = self.infer_fn_return_type(&typed_body);
+
+        self.in_function_body = false;
+        self.env.pop_scope();
+
+        Ok(TypedFnDef {
+            name: fn_def.name,
+            params: fn_def.params,
+            body: typed_body,
+            return_type,
+            span: fn_def.span,
+        })
+    }
+
+    /// Infer a function's return type by walking its body statements.
+    ///
+    /// If any `return expr` is found, uses the expression's resolved type.
+    /// If no return statement exists, the return type is `FluxType::Null`.
+    fn infer_fn_return_type(&self, body: &[TypedStmt]) -> FluxType {
+        if let Some(ty) = self.find_return_type(body) {
+            ty
+        } else {
+            FluxType::Null
+        }
+    }
+
+    /// Recursively search statements for a return expression's type.
+    fn find_return_type(&self, stmts: &[TypedStmt]) -> Option<FluxType> {
+        for stmt in stmts {
+            match stmt {
+                TypedStmt::Return(ret) => {
+                    return Some(match &ret.value {
+                        Some(expr) => expr.resolved_type.clone(),
+                        None => FluxType::Null,
+                    });
+                }
+                TypedStmt::If(if_stmt) => {
+                    if let Some(ty) = self.find_return_type(&if_stmt.body) {
+                        return Some(ty);
+                    }
+                    for elif in &if_stmt.elif_branches {
+                        if let Some(ty) = self.find_return_type(&elif.body) {
+                            return Some(ty);
+                        }
+                    }
+                    if let Some(else_body) = &if_stmt.else_body {
+                        if let Some(ty) = self.find_return_type(else_body) {
+                            return Some(ty);
+                        }
+                    }
+                }
+                TypedStmt::For(for_loop) => {
+                    if let Some(ty) = self.find_return_type(&for_loop.body) {
+                        return Some(ty);
+                    }
+                }
+                TypedStmt::While(while_loop) => {
+                    if let Some(ty) = self.find_return_type(&while_loop.body) {
+                        return Some(ty);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
 
     fn check_strategy(&mut self, strategy: Strategy) -> Result<TypedStrategy> {
         self.env.push_scope(); // strategy scope
@@ -743,6 +926,13 @@ impl TypeChecker {
                 span,
             })
         } else {
+            // Check if a function body is trying to access a state variable
+            if self.in_function_body && self.state_var_names.contains(name) {
+                return Err(self.type_error(
+                    span,
+                    format!("functions cannot access state variable '{}'", name),
+                ));
+            }
             // Check if it's a market data identifier used outside an event handler
             let market_data_names: Vec<&str> = builtins::market_data_bindings()
                 .iter()
@@ -1338,6 +1528,38 @@ impl TypeChecker {
     /// `"at byte {span.start}: {description}"`
     fn type_error(&self, span: Span, message: String) -> CompileError {
         CompileError::Type(format!("at byte {}: {}", span.start, message))
+    }
+
+    /// Produce a recursion detection error from a cycle path.
+    ///
+    /// For direct recursion (cycle length 2, e.g. ["foo", "foo"]):
+    ///   "at byte N: recursive call detected: 'foo' calls itself"
+    ///
+    /// For mutual recursion (cycle length > 2, e.g. ["foo", "bar", "foo"]):
+    ///   "at byte N: recursive call detected: cycle 'foo' → 'bar' → 'foo'"
+    fn recursion_error(&self, functions: &[FnDef], cycle: &[String]) -> CompileError {
+        // Find the span of the first function in the cycle
+        let first_name = &cycle[0];
+        let span = functions
+            .iter()
+            .find(|f| &f.name == first_name)
+            .map(|f| f.span)
+            .unwrap_or(Span::new(0, 0));
+
+        let message = if cycle.len() == 2 && cycle[0] == cycle[1] {
+            // Direct self-recursion
+            format!("recursive call detected: '{}' calls itself", cycle[0])
+        } else {
+            // Mutual recursion — format the cycle path
+            let path = cycle
+                .iter()
+                .map(|name| format!("'{}'", name))
+                .collect::<Vec<_>>()
+                .join(" → ");
+            format!("recursive call detected: cycle {}", path)
+        };
+
+        self.type_error(span, message)
     }
 }
 
@@ -2004,6 +2226,7 @@ mod tests {
     fn make_program(imports: Vec<Import>, body: Vec<StrategyItem>) -> Program {
         Program {
             imports,
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -2417,6 +2640,7 @@ mod tests {
     fn make_program_with_connector(connector: ConnectorBlock) -> Program {
         Program {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: Some(connector),
             strategy: Strategy {

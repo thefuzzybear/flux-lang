@@ -141,6 +141,7 @@ fn arb_multi_block_program() -> impl Strategy<Value = Program> {
     )
         .prop_map(|(name, body)| Program {
             imports: Vec::new(),
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: FluxStrategy {

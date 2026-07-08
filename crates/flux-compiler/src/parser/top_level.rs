@@ -10,18 +10,22 @@ use super::ast::*;
 use super::parser_state::ParserState;
 
 impl ParserState {
-    /// Parse the entire program: imports, optional data block, optional connector block, then strategy, then Eof.
+    /// Parse the entire program: imports, functions, optional data block, optional connector block, then strategy, then Eof.
     pub fn parse_program(&mut self) -> Result<Program> {
         let start_span = self.current_span();
         let mut imports = Vec::new();
+        let mut functions = Vec::new();
         let mut data_block: Option<DataBlock> = None;
         let mut connector_block: Option<ConnectorBlock> = None;
 
-        // Parse imports, optional data block, and optional connector block (interleaved before strategy)
+        // Parse imports, functions, optional data block, and optional connector block (interleaved before strategy)
         loop {
             match self.peek().clone() {
                 Token::From => {
                     imports.push(self.parse_import()?);
+                }
+                Token::Fn => {
+                    functions.push(self.parse_fn_def()?);
                 }
                 Token::Data => {
                     if data_block.is_some() {
@@ -48,6 +52,16 @@ impl ParserState {
         // Parse strategy
         let strategy = self.parse_strategy()?;
 
+        // Check for function definitions after strategy (also allowed)
+        loop {
+            match self.peek().clone() {
+                Token::Fn => {
+                    functions.push(self.parse_fn_def()?);
+                }
+                _ => break,
+            }
+        }
+
         // Assert Eof
         if !self.at_eof() {
             return Err(CompileError::Parser(format!(
@@ -59,11 +73,52 @@ impl ParserState {
         let span = self.span_from(start_span);
         Ok(Program {
             imports,
+            functions,
             data_block,
             connector_block,
             strategy,
             span,
         })
+    }
+
+    /// Parse a function definition: `fn name(params) { body }`
+    fn parse_fn_def(&mut self) -> Result<FnDef> {
+        let start_span = self.current_span();
+        self.expect(&Token::Fn)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::OpenParen)?;
+
+        let mut params = Vec::new();
+        if !self.check(&Token::CloseParen) {
+            let (first, _) = self.expect_ident()?;
+            params.push(first);
+            while self.check(&Token::Comma) {
+                self.advance(); // consume comma
+                if self.check(&Token::CloseParen) {
+                    break; // trailing comma
+                }
+                let (p, _) = self.expect_ident()?;
+                params.push(p);
+            }
+        }
+        self.expect(&Token::CloseParen)?;
+        self.expect(&Token::OpenBrace)?;
+
+        let mut body = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            // Reject nested function definitions
+            if self.check(&Token::Fn) {
+                return Err(CompileError::Parser(format!(
+                    "at byte {}: function definitions are only allowed at the top level",
+                    self.current_span().start
+                )));
+            }
+            body.push(self.parse_statement()?);
+        }
+        self.expect(&Token::CloseBrace)?;
+
+        let span = self.span_from(start_span);
+        Ok(FnDef { name, params, body, span })
     }
 
     /// Parse an import statement: `from module.path import {name1, name2}`
@@ -320,6 +375,12 @@ impl ParserState {
                     StrategyItem::EventHandler(self.parse_event_handler()?)
                 }
                 Token::Ident(_) => StrategyItem::Property(self.parse_property()?),
+                Token::Fn => {
+                    return Err(CompileError::Parser(format!(
+                        "at byte {}: function definitions are only allowed at the top level",
+                        self.current_span().start
+                    )));
+                }
                 _ => {
                     return Err(
                         self.error_expected("strategy item (params, state, on_event, or property)")

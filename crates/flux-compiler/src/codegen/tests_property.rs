@@ -207,6 +207,7 @@ mod tests {
                     names: vec!["sma".to_string()],
                     span: Span::new(0, 20),
                 }],
+            functions: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -362,6 +363,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -546,6 +548,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -607,6 +610,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            functions: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -670,6 +674,7 @@ mod tests {
             // Build a minimal TypedProgram with strategy named `name`
             let program = TypedProgram {
                 imports: vec![],
+            functions: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -780,6 +785,7 @@ mod tests {
 
             let program = TypedProgram {
                 imports: vec![],
+            functions: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -830,6 +836,7 @@ mod tests {
             // Build a program with a param whose type is FluxType::Fn
             let program = TypedProgram {
                 imports: vec![],
+            functions: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -865,6 +872,430 @@ mod tests {
                 other => {
                     prop_assert!(false, "Expected CompileError::Codegen, got: {:?}", other);
                 }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Feature: flux-user-functions, Property 8: Codegen context threading
+    // ========================================================================
+
+    /// Enumeration of function "flavors" for context threading tests.
+    #[derive(Debug, Clone)]
+    enum FnFlavor {
+        /// Pure function: no market data, no signals
+        Pure,
+        /// References a market data variable (needs ctx)
+        MarketData,
+        /// Emits a signal via OPEN/CLOSE (needs signals + ctx for symbol)
+        Signal,
+        /// Both market data and signal emission
+        Both,
+    }
+
+    /// Generate a random FnFlavor.
+    fn arb_fn_flavor() -> impl Strategy<Value = FnFlavor> {
+        prop_oneof![
+            Just(FnFlavor::Pure),
+            Just(FnFlavor::MarketData),
+            Just(FnFlavor::Signal),
+            Just(FnFlavor::Both),
+        ]
+    }
+
+    /// Build a TypedFnDef body based on its flavor.
+    fn build_fn_body(flavor: &FnFlavor, callee_name: Option<&str>) -> Vec<TypedStmt> {
+        let span = Span::new(0, 1);
+        let mut body = Vec::new();
+
+        match flavor {
+            FnFlavor::Pure => {
+                // return x + 1.0
+                body.push(TypedStmt::Return(TypedReturnStmt {
+                    value: Some(TypedExpr {
+                        kind: TypedExprKind::BinaryOp {
+                            left: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("x".to_string()),
+                                resolved_type: FluxType::Float,
+                                span,
+                            }),
+                            op: BinOp::Add,
+                            right: Box::new(TypedExpr {
+                                kind: TypedExprKind::FloatLiteral(1.0),
+                                resolved_type: FluxType::Float,
+                                span,
+                            }),
+                        },
+                        resolved_type: FluxType::Float,
+                        span,
+                    }),
+                    span,
+                }));
+            }
+            FnFlavor::MarketData => {
+                // return close + x
+                body.push(TypedStmt::Return(TypedReturnStmt {
+                    value: Some(TypedExpr {
+                        kind: TypedExprKind::BinaryOp {
+                            left: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("close".to_string()),
+                                resolved_type: FluxType::Float,
+                                span,
+                            }),
+                            op: BinOp::Add,
+                            right: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("x".to_string()),
+                                resolved_type: FluxType::Float,
+                                span,
+                            }),
+                        },
+                        resolved_type: FluxType::Float,
+                        span,
+                    }),
+                    span,
+                }));
+            }
+            FnFlavor::Signal => {
+                // OPEN(symbol, 100.0)
+                body.push(TypedStmt::Expr(TypedExprStmt {
+                    expr: TypedExpr {
+                        kind: TypedExprKind::FunctionCall {
+                            function: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("OPEN".to_string()),
+                                resolved_type: FluxType::Fn {
+                                    params: FnParams::Fixed(vec![FluxType::String, FluxType::Float]),
+                                    ret: Box::new(FluxType::Signal),
+                                },
+                                span,
+                            }),
+                            args: vec![
+                                TypedExpr {
+                                    kind: TypedExprKind::Ident("symbol".to_string()),
+                                    resolved_type: FluxType::String,
+                                    span,
+                                },
+                                TypedExpr {
+                                    kind: TypedExprKind::FloatLiteral(100.0),
+                                    resolved_type: FluxType::Float,
+                                    span,
+                                },
+                            ],
+                        },
+                        resolved_type: FluxType::Signal,
+                        span,
+                    },
+                    span,
+                }));
+            }
+            FnFlavor::Both => {
+                // result = close + x
+                body.push(TypedStmt::Assignment(TypedAssignment {
+                    target: TypedExpr {
+                        kind: TypedExprKind::Ident("result".to_string()),
+                        resolved_type: FluxType::Float,
+                        span,
+                    },
+                    value: TypedExpr {
+                        kind: TypedExprKind::BinaryOp {
+                            left: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("close".to_string()),
+                                resolved_type: FluxType::Float,
+                                span,
+                            }),
+                            op: BinOp::Add,
+                            right: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("x".to_string()),
+                                resolved_type: FluxType::Float,
+                                span,
+                            }),
+                        },
+                        resolved_type: FluxType::Float,
+                        span,
+                    },
+                    span,
+                }));
+                // CLOSE(symbol)
+                body.push(TypedStmt::Expr(TypedExprStmt {
+                    expr: TypedExpr {
+                        kind: TypedExprKind::FunctionCall {
+                            function: Box::new(TypedExpr {
+                                kind: TypedExprKind::Ident("CLOSE".to_string()),
+                                resolved_type: FluxType::Fn {
+                                    params: FnParams::Fixed(vec![FluxType::String]),
+                                    ret: Box::new(FluxType::Signal),
+                                },
+                                span,
+                            }),
+                            args: vec![TypedExpr {
+                                kind: TypedExprKind::Ident("symbol".to_string()),
+                                resolved_type: FluxType::String,
+                                span,
+                            }],
+                        },
+                        resolved_type: FluxType::Signal,
+                        span,
+                    },
+                    span,
+                }));
+            }
+        }
+
+        // If there's a callee, add a call to it
+        if let Some(callee) = callee_name {
+            body.push(TypedStmt::Expr(TypedExprStmt {
+                expr: TypedExpr {
+                    kind: TypedExprKind::FunctionCall {
+                        function: Box::new(TypedExpr {
+                            kind: TypedExprKind::Ident(callee.to_string()),
+                            resolved_type: FluxType::Fn {
+                                params: FnParams::Fixed(vec![FluxType::Float]),
+                                ret: Box::new(FluxType::Float),
+                            },
+                            span,
+                        }),
+                        args: vec![TypedExpr {
+                            kind: TypedExprKind::FloatLiteral(1.0),
+                            resolved_type: FluxType::Float,
+                            span,
+                        }],
+                    },
+                    resolved_type: FluxType::Float,
+                    span,
+                },
+                span,
+            }));
+        }
+
+        body
+    }
+
+    /// Build a minimal TypedProgram containing user-defined functions with the
+    /// given flavors. The last function calls the previous one (for transitive testing).
+    fn build_context_threading_program(
+        flavors: &[FnFlavor],
+        with_transitive_call: bool,
+    ) -> TypedProgram {
+        let span = Span::new(0, 1);
+        let fn_names: Vec<String> = flavors
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("func_{}", i))
+            .collect();
+
+        let mut functions = Vec::new();
+        for (i, flavor) in flavors.iter().enumerate() {
+            let callee = if with_transitive_call && i > 0 {
+                Some(fn_names[i - 1].as_str())
+            } else {
+                None
+            };
+            let body = build_fn_body(flavor, callee);
+            functions.push(TypedFnDef {
+                name: fn_names[i].clone(),
+                params: vec!["x".to_string()],
+                body,
+                return_type: FluxType::Float,
+                span,
+            });
+        }
+
+        // Build a minimal strategy that calls the last function
+        let last_fn = fn_names.last().unwrap().clone();
+        let handler_body = vec![TypedStmt::Expr(TypedExprStmt {
+            expr: TypedExpr {
+                kind: TypedExprKind::FunctionCall {
+                    function: Box::new(TypedExpr {
+                        kind: TypedExprKind::Ident(last_fn),
+                        resolved_type: FluxType::Fn {
+                            params: FnParams::Fixed(vec![FluxType::Float]),
+                            ret: Box::new(FluxType::Float),
+                        },
+                        span,
+                    }),
+                    args: vec![TypedExpr {
+                        kind: TypedExprKind::FloatLiteral(42.0),
+                        resolved_type: FluxType::Float,
+                        span,
+                    }],
+                },
+                resolved_type: FluxType::Float,
+                span,
+            },
+            span,
+        })];
+
+        TypedProgram {
+            imports: vec![],
+            functions,
+            data_block: None,
+            connector_block: None,
+            strategy: TypedStrategy {
+                name: "CtxTest".to_string(),
+                body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
+                    event_name: "bar".to_string(),
+                    body: handler_body,
+                    span,
+                })],
+                span,
+            },
+            span,
+        }
+    }
+
+    /// Helper: determine expected context needs for a flavor (direct only).
+    fn flavor_needs_ctx(flavor: &FnFlavor) -> bool {
+        matches!(flavor, FnFlavor::MarketData | FnFlavor::Signal | FnFlavor::Both)
+    }
+
+    fn flavor_needs_signals(flavor: &FnFlavor) -> bool {
+        matches!(flavor, FnFlavor::Signal | FnFlavor::Both)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        // Feature: flux-user-functions, Property 8: Codegen context threading
+        /// **Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5**
+        ///
+        /// Sub-property A: Functions that directly access market data or signals
+        /// have the corresponding extra parameters in generated code signatures.
+        #[test]
+        fn prop_codegen_context_threading_direct(flavor in arb_fn_flavor()) {
+            let program = build_context_threading_program(&[flavor.clone()], false);
+            let result = generate(&program);
+            prop_assert!(result.is_ok(), "generate() failed: {:?}", result.err());
+            let output = result.unwrap();
+
+            let fn_name = "func_0";
+            let expects_ctx = flavor_needs_ctx(&flavor);
+            let expects_signals = flavor_needs_signals(&flavor);
+
+            // Find the function signature in output
+            let sig_start = output.find(&format!("fn {}(", fn_name));
+            prop_assert!(sig_start.is_some(),
+                "Expected to find 'fn {}(' in output:\n{}", fn_name, output);
+            let sig_start = sig_start.unwrap();
+            let sig_end = output[sig_start..].find('{').unwrap() + sig_start;
+            let signature = &output[sig_start..sig_end];
+
+            // Assert ctx presence/absence
+            if expects_ctx {
+                prop_assert!(
+                    signature.contains("ctx: &BarContext"),
+                    "Flavor {:?} should have 'ctx: &BarContext' in signature, got: {}",
+                    flavor, signature
+                );
+            } else {
+                prop_assert!(
+                    !signature.contains("ctx: &BarContext"),
+                    "Flavor {:?} (pure) should NOT have 'ctx: &BarContext' in signature, got: {}",
+                    flavor, signature
+                );
+            }
+
+            // Assert signals presence/absence
+            if expects_signals {
+                prop_assert!(
+                    signature.contains("signals: &mut Vec<Signal>"),
+                    "Flavor {:?} should have 'signals: &mut Vec<Signal>' in signature, got: {}",
+                    flavor, signature
+                );
+            } else {
+                prop_assert!(
+                    !signature.contains("signals: &mut Vec<Signal>"),
+                    "Flavor {:?} should NOT have 'signals: &mut Vec<Signal>' in signature, got: {}",
+                    flavor, signature
+                );
+            }
+        }
+
+        // Feature: flux-user-functions, Property 8: Codegen context threading
+        /// **Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5**
+        ///
+        /// Sub-property B: Transitive context propagation — if function A calls
+        /// function B that needs ctx/signals, function A also gets those params.
+        #[test]
+        fn prop_codegen_context_threading_transitive(
+            callee_flavor in arb_fn_flavor(),
+            caller_flavor in Just(FnFlavor::Pure),
+        ) {
+            // Build: func_0 (callee with flavor) and func_1 (pure caller that calls func_0)
+            let program = build_context_threading_program(
+                &[callee_flavor.clone(), caller_flavor],
+                true, // func_1 calls func_0
+            );
+            let result = generate(&program);
+            prop_assert!(result.is_ok(), "generate() failed: {:?}", result.err());
+            let output = result.unwrap();
+
+            let callee_needs_ctx = flavor_needs_ctx(&callee_flavor);
+            let callee_needs_signals = flavor_needs_signals(&callee_flavor);
+
+            // func_1 (the caller) should transitively inherit context requirements
+            let sig_start = output.find("fn func_1(");
+            prop_assert!(sig_start.is_some(),
+                "Expected to find 'fn func_1(' in output:\n{}", output);
+            let sig_start = sig_start.unwrap();
+            let sig_end = output[sig_start..].find('{').unwrap() + sig_start;
+            let caller_sig = &output[sig_start..sig_end];
+
+            if callee_needs_ctx {
+                prop_assert!(
+                    caller_sig.contains("ctx: &BarContext"),
+                    "Caller of {:?}-flavored callee should have 'ctx: &BarContext', got: {}",
+                    callee_flavor, caller_sig
+                );
+            }
+            if callee_needs_signals {
+                prop_assert!(
+                    caller_sig.contains("signals: &mut Vec<Signal>"),
+                    "Caller of {:?}-flavored callee should have 'signals: &mut Vec<Signal>', got: {}",
+                    callee_flavor, caller_sig
+                );
+            }
+        }
+
+        // Feature: flux-user-functions, Property 8: Codegen context threading
+        /// **Validates: Requirements 6.1, 6.2, 6.3, 6.4, 6.5**
+        ///
+        /// Sub-property C: Call sites forward appropriate context parameters.
+        #[test]
+        fn prop_codegen_context_threading_call_sites(callee_flavor in arb_fn_flavor()) {
+            // Build: func_0 (callee with flavor) called from on_bar handler
+            let program = build_context_threading_program(&[callee_flavor.clone()], false);
+            let result = generate(&program);
+            prop_assert!(result.is_ok(), "generate() failed: {:?}", result.err());
+            let output = result.unwrap();
+
+            let callee_needs_ctx = flavor_needs_ctx(&callee_flavor);
+            let callee_needs_signals = flavor_needs_signals(&callee_flavor);
+
+            // Find the call site in the on_bar handler
+            // The handler calls func_0(42.0[, ctx][, &mut signals])
+            if callee_needs_ctx && callee_needs_signals {
+                prop_assert!(
+                    output.contains("func_0(42.0, ctx, &mut signals)"),
+                    "Call site should forward ctx and &mut signals for {:?}, got:\n{}",
+                    callee_flavor, output
+                );
+            } else if callee_needs_ctx {
+                prop_assert!(
+                    output.contains("func_0(42.0, ctx)"),
+                    "Call site should forward ctx for {:?}, got:\n{}",
+                    callee_flavor, output
+                );
+            } else if callee_needs_signals {
+                prop_assert!(
+                    output.contains("func_0(42.0, &mut signals)"),
+                    "Call site should forward &mut signals for {:?}, got:\n{}",
+                    callee_flavor, output
+                );
+            } else {
+                prop_assert!(
+                    output.contains("func_0(42.0)"),
+                    "Pure call site should have no extra params for {:?}, got:\n{}",
+                    callee_flavor, output
+                );
             }
         }
     }
