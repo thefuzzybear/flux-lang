@@ -150,6 +150,7 @@ fn convert_token(
         LogosToken::Connector => Ok(Token::Connector),
 
         // Operators
+        LogosToken::ColonColon => Ok(Token::ColonColon),
         LogosToken::Eq => Ok(Token::Eq),
         LogosToken::Ne => Ok(Token::Ne),
         LogosToken::Le => Ok(Token::Le),
@@ -1218,6 +1219,53 @@ mod tests {
             vec![Token::Ident("connector_type".to_string()), Token::Eof]
         );
     }
+
+    // --- ColonColon token tests ---
+    // Validates: Requirements 1.1, 1.2, 1.3
+
+    #[test]
+    fn lex_colon_colon_produces_single_token() {
+        // `::` should produce a single ColonColon token, not two Colon tokens
+        let tokens = lex("::").unwrap();
+        assert_eq!(tokens, vec![Token::ColonColon, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_single_colon_still_produces_colon() {
+        // A single `:` not followed by another `:` should still produce Colon
+        let tokens = lex(":").unwrap();
+        assert_eq!(tokens, vec![Token::Colon, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_ident_colon_colon_ident() {
+        // `a::b` should produce [Ident("a"), ColonColon, Ident("b")]
+        let tokens = lex("a::b").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::ColonColon,
+                Token::Ident("b".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_ident_colon_ident() {
+        // `a:b` should produce [Ident("a"), Colon, Ident("b")]
+        let tokens = lex("a:b").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".to_string()),
+                Token::Colon,
+                Token::Ident("b".to_string()),
+                Token::Eof,
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1225,6 +1273,9 @@ mod tests_property;
 
 #[cfg(test)]
 mod tests_data_keyword_property;
+
+#[cfg(test)]
+mod tests_colon_colon_property;
 
 #[cfg(test)]
 mod comments_property;

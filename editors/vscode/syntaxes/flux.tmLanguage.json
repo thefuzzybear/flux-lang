@@ -36,7 +36,7 @@
     "keywords-declaration": {
       "patterns": [
         {
-          "match": "\\b(strategy|params|state|on|from|import)\\b",
+          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector)\\b",
           "name": "keyword.other.flux"
         }
       ]

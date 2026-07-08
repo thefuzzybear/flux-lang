@@ -6,6 +6,7 @@ mod csv_loader;
 mod data;
 mod interpreter;
 mod math_builtins;
+mod module_resolver;
 mod stat_indicators;
 mod portfolio_ops;
 mod live;

@@ -7,6 +7,7 @@ use crate::csv_loader;
 use crate::diagnostics;
 use crate::error::{CliError, CompileErrorWithSpan};
 use crate::interpreter::Interpreter;
+use crate::module_resolver;
 
 /// A group of bars sharing the same timestamp.
 ///
@@ -184,6 +185,9 @@ pub fn run_backtest_cmd(file: &Path, data_paths: &[&Path], initial_capital: f64)
             return Err(CliError::Compile(errors));
         }
     };
+
+    // Module resolution
+    let ast = module_resolver::resolve_modules(ast, file.parent().unwrap_or(Path::new(".")))?;
 
     // Type check
     let typed_program = match flux_compiler::typeck::check(ast) {

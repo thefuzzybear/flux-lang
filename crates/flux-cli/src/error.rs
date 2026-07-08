@@ -41,6 +41,15 @@ pub enum CliError {
 
     #[error("{0}")]
     Usage(String),
+
+    #[error("module error: {0}")]
+    ModuleResolution(crate::module_resolver::ModuleError),
+}
+
+impl From<crate::module_resolver::ModuleError> for CliError {
+    fn from(err: crate::module_resolver::ModuleError) -> Self {
+        CliError::ModuleResolution(err)
+    }
 }
 
 fn format_compile_errors(errors: &[CompileErrorWithSpan]) -> String {

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c33c22aac339a3df4a85d193ad39b5f5643924be69108d5957d2c992e9ac5f1d # shrinks to program = Program { imports: [], functions: [], data_block: None, connector_block: None, strategy: Strategy { name: "a", body: [StateBlock(StateBlock { variables: [StateVar { name: "fn", initial_value: Expr { kind: IntLiteral(1), span: Span { start: 0, end: 0 } }, span: Span { start: 0, end: 0 } }], span: Span { start: 0, end: 0 } })], span: Span { start: 0, end: 0 } }, span: Span { start: 0, end: 0 } }

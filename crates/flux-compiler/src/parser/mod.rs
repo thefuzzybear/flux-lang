@@ -18,6 +18,12 @@ mod tests_data_block_property;
 #[cfg(test)]
 mod tests_data_block_keys_property;
 
+#[cfg(test)]
+mod tests_library_file_property;
+
+#[cfg(test)]
+mod tests_import_path_property;
+
 pub use ast::*;
 
 use crate::error::Result;

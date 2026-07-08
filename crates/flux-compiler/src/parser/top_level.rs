@@ -11,6 +11,10 @@ use super::parser_state::ParserState;
 
 impl ParserState {
     /// Parse the entire program: imports, functions, optional data block, optional connector block, then strategy, then Eof.
+    ///
+    /// If the file contains only imports and fn definitions (no strategy), it is treated as a
+    /// library file and a placeholder empty strategy is produced. Library files must not contain
+    /// `data`, `connector`, or `state` blocks.
     pub fn parse_program(&mut self) -> Result<Program> {
         let start_span = self.current_span();
         let mut imports = Vec::new();
@@ -47,6 +51,42 @@ impl ParserState {
                 }
                 _ => break,
             }
+        }
+
+        // If we're at EOF, this is a library file (no strategy block)
+        if self.at_eof() {
+            // Library files must not have data or connector blocks
+            if data_block.is_some() {
+                return Err(CompileError::Parser(
+                    "library files cannot contain a data block".into(),
+                ));
+            }
+            if connector_block.is_some() {
+                return Err(CompileError::Parser(
+                    "library files cannot contain a connector block".into(),
+                ));
+            }
+
+            let span = self.span_from(start_span);
+            return Ok(Program {
+                imports,
+                functions,
+                data_block: None,
+                connector_block: None,
+                strategy: Strategy {
+                    name: String::new(),
+                    body: Vec::new(),
+                    span: Span::new(span.end, span.end),
+                },
+                span,
+            });
+        }
+
+        // If the next token is `state` but no strategy follows, produce a specific error
+        if self.check(&Token::State) {
+            return Err(CompileError::Parser(
+                "library files cannot contain a state block".into(),
+            ));
         }
 
         // Parse strategy
@@ -126,14 +166,23 @@ impl ParserState {
         let start_span = self.current_span();
         self.expect(&Token::From)?; // consume `from`
 
-        // Parse dotted module path
+        // Parse module path (Dot or ColonColon separated)
         let (first_segment, _) = self.expect_ident()?;
         let mut path = first_segment;
-        while self.check(&Token::Dot) {
-            self.advance(); // consume dot
-            let (segment, _) = self.expect_ident()?;
-            path.push('.');
-            path.push_str(&segment);
+        loop {
+            if self.check(&Token::Dot) {
+                self.advance(); // consume dot
+                let (segment, _) = self.expect_ident()?;
+                path.push('.');
+                path.push_str(&segment);
+            } else if self.check(&Token::ColonColon) {
+                self.advance(); // consume ::
+                let (segment, _) = self.expect_ident()?;
+                path.push_str("::");
+                path.push_str(&segment);
+            } else {
+                break;
+            }
         }
 
         self.expect(&Token::Import)?; // consume `import`
@@ -868,21 +917,18 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ===== 12. Error: Eof only (no strategy) =====
+    // ===== 12. Eof only — valid empty library file =====
 
     #[test]
-    fn error_eof_only_no_strategy() {
-        let result = parse_program(vec![Token::Eof]);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            crate::error::CompileError::Parser(msg) => {
-                assert!(
-                    msg.contains("expected strategy declaration"),
-                    "Expected 'expected strategy declaration' in error, got: {msg}"
-                );
-            }
-            other => panic!("Expected CompileError::Parser, got: {other:?}"),
-        }
+    fn eof_only_is_valid_library_file() {
+        // A file with just Eof is a valid (empty) library file
+        let program = parse_program(vec![Token::Eof]).unwrap();
+        assert!(program.imports.is_empty());
+        assert!(program.functions.is_empty());
+        assert!(program.data_block.is_none());
+        assert!(program.connector_block.is_none());
+        assert_eq!(program.strategy.name, "");
+        assert!(program.strategy.body.is_empty());
     }
 
     // ===== 13. Error: extra tokens after strategy =====
@@ -1471,5 +1517,345 @@ strategy MyStrat {
         assert_eq!(conn.interval.as_ref().unwrap().value, "1m");
         assert!(conn.file.is_none());
         assert_eq!(program.strategy.name, "MyStrat");
+    }
+
+    // ===== ColonColon import parsing tests =====
+    // Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5
+
+    #[test]
+    fn import_colon_colon_two_segments() {
+        // from logic::entry import {try_enter} strategy X {}
+        let program = parse_program(vec![
+            Token::From,
+            Token::Ident("logic".to_string()),
+            Token::ColonColon,
+            Token::Ident("entry".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("try_enter".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.imports.len(), 1);
+        assert_eq!(program.imports[0].module_path, "logic::entry");
+        assert_eq!(program.imports[0].names, vec!["try_enter".to_string()]);
+    }
+
+    #[test]
+    fn import_colon_colon_three_segments() {
+        // from a::b::c import {foo} strategy X {}
+        let program = parse_program(vec![
+            Token::From,
+            Token::Ident("a".to_string()),
+            Token::ColonColon,
+            Token::Ident("b".to_string()),
+            Token::ColonColon,
+            Token::Ident("c".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("foo".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.imports.len(), 1);
+        assert_eq!(program.imports[0].module_path, "a::b::c");
+        assert_eq!(program.imports[0].names, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn import_dot_separator_still_works() {
+        // from indicators import {sma} strategy X {}
+        let program = parse_program(vec![
+            Token::From,
+            Token::Ident("indicators".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("sma".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.imports.len(), 1);
+        assert_eq!(program.imports[0].module_path, "indicators");
+        assert_eq!(program.imports[0].names, vec!["sma".to_string()]);
+    }
+
+    #[test]
+    fn import_mixed_separators_in_same_file() {
+        // from logic::entry import {try_enter}
+        // from indicators import {sma}
+        // strategy X {}
+        let program = parse_program(vec![
+            Token::From,
+            Token::Ident("logic".to_string()),
+            Token::ColonColon,
+            Token::Ident("entry".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("try_enter".to_string()),
+            Token::CloseBrace,
+            Token::From,
+            Token::Ident("indicators".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("sma".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.imports.len(), 2);
+        assert_eq!(program.imports[0].module_path, "logic::entry");
+        assert_eq!(program.imports[0].names, vec!["try_enter".to_string()]);
+        assert_eq!(program.imports[1].module_path, "indicators");
+        assert_eq!(program.imports[1].names, vec!["sma".to_string()]);
+    }
+
+    #[test]
+    fn import_empty_braces_produces_error() {
+        // from a::b import {} — should produce error
+        let result = parse_program(vec![
+            Token::From,
+            Token::Ident("a".to_string()),
+            Token::ColonColon,
+            Token::Ident("b".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("expected at least one import name"),
+                    "Error message should mention empty imports, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    // ===== Library file parsing tests =====
+    // Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5
+
+    #[test]
+    fn library_file_only_fn_defs() {
+        // fn add(a, b) { return a + b }
+        // fn sub(a, b) { return a - b }
+        let program = parse_program(vec![
+            Token::Fn,
+            Token::Ident("add".to_string()),
+            Token::OpenParen,
+            Token::Ident("a".to_string()),
+            Token::Comma,
+            Token::Ident("b".to_string()),
+            Token::CloseParen,
+            Token::OpenBrace,
+            Token::Return,
+            Token::Ident("a".to_string()),
+            Token::Plus,
+            Token::Ident("b".to_string()),
+            Token::CloseBrace,
+            Token::Fn,
+            Token::Ident("sub".to_string()),
+            Token::OpenParen,
+            Token::Ident("a".to_string()),
+            Token::Comma,
+            Token::Ident("b".to_string()),
+            Token::CloseParen,
+            Token::OpenBrace,
+            Token::Return,
+            Token::Ident("a".to_string()),
+            Token::Minus,
+            Token::Ident("b".to_string()),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        // Should be a library file with empty strategy placeholder
+        assert_eq!(program.functions.len(), 2);
+        assert_eq!(program.functions[0].name, "add");
+        assert_eq!(program.functions[0].params, vec!["a", "b"]);
+        assert_eq!(program.functions[1].name, "sub");
+        assert_eq!(program.functions[1].params, vec!["a", "b"]);
+        assert!(program.imports.is_empty());
+        assert!(program.data_block.is_none());
+        assert!(program.connector_block.is_none());
+        assert_eq!(program.strategy.name, "");
+        assert!(program.strategy.body.is_empty());
+    }
+
+    #[test]
+    fn library_file_fn_defs_with_imports() {
+        // from logic::helpers import {calculate_z}
+        // fn try_enter(price) { x = calculate_z(price) }
+        let program = parse_program(vec![
+            Token::From,
+            Token::Ident("logic".to_string()),
+            Token::ColonColon,
+            Token::Ident("helpers".to_string()),
+            Token::Import,
+            Token::OpenBrace,
+            Token::Ident("calculate_z".to_string()),
+            Token::CloseBrace,
+            Token::Fn,
+            Token::Ident("try_enter".to_string()),
+            Token::OpenParen,
+            Token::Ident("price".to_string()),
+            Token::CloseParen,
+            Token::OpenBrace,
+            Token::Ident("x".to_string()),
+            Token::Assign,
+            Token::Ident("calculate_z".to_string()),
+            Token::OpenParen,
+            Token::Ident("price".to_string()),
+            Token::CloseParen,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        // Library file with imports and fn defs
+        assert_eq!(program.imports.len(), 1);
+        assert_eq!(program.imports[0].module_path, "logic::helpers");
+        assert_eq!(program.imports[0].names, vec!["calculate_z".to_string()]);
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].name, "try_enter");
+        assert!(program.data_block.is_none());
+        assert!(program.connector_block.is_none());
+        assert_eq!(program.strategy.name, "");
+        assert!(program.strategy.body.is_empty());
+    }
+
+    #[test]
+    fn library_file_with_data_block_produces_error() {
+        // data { symbols = ["AAPL"] }
+        // fn helper() { x = 1 }
+        // (no strategy → library mode → data block is an error)
+        let result = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("AAPL".to_string()),
+            Token::CloseBracket,
+            Token::CloseBrace,
+            Token::Fn,
+            Token::Ident("helper".to_string()),
+            Token::OpenParen,
+            Token::CloseParen,
+            Token::OpenBrace,
+            Token::Ident("x".to_string()),
+            Token::Assign,
+            Token::Int(1),
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("library files cannot contain a data block"),
+                    "Expected 'library files cannot contain a data block' in error, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn library_file_with_connector_block_produces_error() {
+        // connector { type = "websocket" }
+        // fn helper() { x = 1 }
+        // (no strategy → library mode → connector block is an error)
+        let result = parse_program(vec![
+            Token::Connector,
+            Token::OpenBrace,
+            Token::Ident("type".to_string()),
+            Token::Assign,
+            Token::String("websocket".to_string()),
+            Token::CloseBrace,
+            Token::Fn,
+            Token::Ident("helper".to_string()),
+            Token::OpenParen,
+            Token::CloseParen,
+            Token::OpenBrace,
+            Token::Ident("x".to_string()),
+            Token::Assign,
+            Token::Int(1),
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("library files cannot contain a connector block"),
+                    "Expected 'library files cannot contain a connector block' in error, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn library_file_source_level_parse() {
+        // Full source-level test using lex_with_spans + parse
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+from logic::helpers import {calculate_z}
+
+fn try_enter(price, lookback, threshold) {
+    z = calculate_z(price, lookback)
+    if z < 0.0 - threshold and not in_position {
+        OPEN(symbol, 100.0)
+    }
+}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.imports.len(), 1);
+        assert_eq!(program.imports[0].module_path, "logic::helpers");
+        assert_eq!(program.imports[0].names, vec!["calculate_z".to_string()]);
+        assert_eq!(program.functions.len(), 1);
+        assert_eq!(program.functions[0].name, "try_enter");
+        assert_eq!(
+            program.functions[0].params,
+            vec!["price", "lookback", "threshold"]
+        );
+        assert_eq!(program.strategy.name, "");
+        assert!(program.strategy.body.is_empty());
     }
 }

@@ -78,6 +78,16 @@ pub fn run_check(file: &Path) -> Result<(), CliError> {
         }
     };
 
+    // Module resolution
+    let main_dir = file.parent().unwrap_or(Path::new("."));
+    let ast = match crate::module_resolver::resolve_modules(ast, main_dir) {
+        Ok(ast) => ast,
+        Err(err) => {
+            eprintln!("error[module]: {}", err);
+            return Err(CliError::ModuleResolution(err));
+        }
+    };
+
     // Type check
     match flux_compiler::typeck::check(ast) {
         Ok(_typed_program) => {

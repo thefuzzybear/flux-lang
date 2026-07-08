@@ -63,6 +63,8 @@ pub(crate) enum LogosToken {
     StringLiteral,
 
     // Multi-character operators
+    #[token("::")]
+    ColonColon,
     #[token("==")]
     Eq,
     #[token("!=")]

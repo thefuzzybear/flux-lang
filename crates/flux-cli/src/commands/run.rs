@@ -16,6 +16,7 @@ use crate::data::{self, FetchRequest, OhlcvRecord};
 use crate::diagnostics;
 use crate::error::{CliError, CompileErrorWithSpan};
 use crate::interpreter::Interpreter;
+use crate::module_resolver;
 
 /// Resolved data configuration after merging DataBlock values with CLI overrides.
 ///
@@ -200,6 +201,9 @@ pub fn run_run_cmd(
             return Err(CliError::Compile(errors));
         }
     };
+
+    // Module resolution
+    let ast = module_resolver::resolve_modules(ast, file.parent().unwrap_or(Path::new(".")))?;
 
     // Typecheck
     let typed_program = match flux_compiler::typeck::check(ast) {

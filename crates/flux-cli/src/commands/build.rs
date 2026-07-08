@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::diagnostics;
 use crate::error::{CliError, CompileErrorWithSpan};
+use crate::module_resolver;
 
 /// Extract byte offset from a compiler error message.
 ///
@@ -62,6 +63,10 @@ pub fn run_build(file: &Path, output: Option<&Path>) -> Result<(), CliError> {
             return Err(CliError::Compile(compile_errors));
         }
     };
+
+    // Module resolution
+    let main_dir = file.parent().unwrap_or(Path::new("."));
+    let program = module_resolver::resolve_modules(program, main_dir)?;
 
     // Type check
     let typed_program = match flux_compiler::typeck::check(program) {

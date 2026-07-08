@@ -215,7 +215,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::CloseBracket
         | Token::Comma
         | Token::Dot
-        | Token::Colon => TokenCategory::Delimiter,
+        | Token::Colon
+        | Token::ColonColon => TokenCategory::Delimiter,
 
         // Identifiers — check for signal functions
         Token::Ident(name) => match name.as_str() {

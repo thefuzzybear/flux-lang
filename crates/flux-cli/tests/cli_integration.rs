@@ -533,6 +533,111 @@ fn test_check_math_strategy() {
     );
 }
 
+// =============================================================================
+// Module resolution integration tests
+// =============================================================================
+
+/// Validates: Requirements 10.1, 10.2, 10.3
+/// `flux check` on a multi-file project with `::` imports should succeed.
+/// The main file imports `double` from `lib/helpers.flux` via `from lib::helpers import {double}`.
+#[test]
+fn cli_module_check_multifile_project_succeeds() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("modules/main_with_import.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0 for multi-file check, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ok"),
+        "Expected 'ok' in stdout for successful multi-file check, got: {:?}",
+        stdout
+    );
+}
+
+/// Validates: Requirements 10.2, 10.3
+/// `flux check` with a missing import file should exit non-zero and produce
+/// a descriptive error mentioning the missing module path.
+#[test]
+fn cli_module_check_missing_import_produces_error() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("modules/main_missing_import.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "Expected non-zero exit for missing import file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should mention the module path or "not found"
+    assert!(
+        stderr.contains("not found") || stderr.contains("nonexistent"),
+        "Expected descriptive error about missing module, got stderr: {:?}",
+        stderr
+    );
+}
+
+/// Validates: Requirements 10.2, 10.3
+/// `flux check` with circular imports should exit non-zero and produce
+/// an error mentioning circular import.
+#[test]
+fn cli_module_check_circular_imports_produces_error() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("modules/main_circular.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "Expected non-zero exit for circular imports"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Should mention circular import
+    assert!(
+        stderr.contains("circular") || stderr.contains("cycle"),
+        "Expected error about circular imports, got stderr: {:?}",
+        stderr
+    );
+}
+
+/// Validates: Requirements 9.1, 10.1
+/// `flux check` with a built-in import (`from indicators import {sma}`) should pass
+/// through the module resolver and succeed at typechecking (the module resolver
+/// does NOT try to resolve dot-separated built-in imports as files).
+#[test]
+fn cli_module_check_builtin_import_passthrough() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("modules/main_builtin_import.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0 for built-in import passthrough, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ok"),
+        "Expected 'ok' in stdout for built-in import check, got: {:?}",
+        stdout
+    );
+}
+
 /// Validates: Requirements 3.5, 9.6, 15.1, 16.1
 /// `flux backtest` with a strategy using Tier 1 and 2 math/stats functions should
 /// execute without errors and produce output (signals and/or summary).

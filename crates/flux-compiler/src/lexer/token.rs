@@ -58,6 +58,7 @@ pub enum Token {
     Comma,       // ,
     Dot,         // .
     Colon,       // :
+    ColonColon,  // ::
     Assign,      // =
 
     // Special

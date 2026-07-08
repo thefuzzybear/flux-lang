@@ -173,6 +173,9 @@ fn build_connectors_for_args(
             .map_err(|e| format!("lexer error: {}", e))?;
         let ast = flux_compiler::parser::parse(tokens)
             .map_err(|e| format!("parse error: {}", e))?;
+        let main_dir = args.file.parent().unwrap_or(std::path::Path::new("."));
+        let ast = crate::module_resolver::resolve_modules(ast, main_dir)
+            .map_err(|e| format!("module error: {}", e))?;
         let typed_program = flux_compiler::typeck::check(ast)
             .map_err(|e| format!("type error: {}", e))?;
 
