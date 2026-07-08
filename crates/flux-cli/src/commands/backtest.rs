@@ -159,7 +159,7 @@ pub fn format_summary(results: &[(usize, Signal)]) -> String {
     )
 }
 
-pub fn run_backtest_cmd(file: &Path, data: &Path, initial_capital: f64) -> Result<(), CliError> {
+pub fn run_backtest_cmd(file: &Path, data_paths: &[&Path], initial_capital: f64) -> Result<(), CliError> {
     let source = std::fs::read_to_string(file).map_err(CliError::Io)?;
     let file_display = file.display().to_string();
 
@@ -196,8 +196,12 @@ pub fn run_backtest_cmd(file: &Path, data: &Path, initial_capital: f64) -> Resul
         }
     };
 
-    // Load CSV bar data
-    let bars = csv_loader::load_csv(data).map_err(CliError::Csv)?;
+    // Load CSV bar data from all provided data files
+    let mut bars: Vec<BarContext> = Vec::new();
+    for data_path in data_paths {
+        let file_bars = csv_loader::load_csv(data_path).map_err(CliError::Csv)?;
+        bars.extend(file_bars);
+    }
 
     // Create interpreter and position tracker
     let mut interpreter = Interpreter::new(&typed_program);

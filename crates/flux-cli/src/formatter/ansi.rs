@@ -175,7 +175,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::And
         | Token::Or
         | Token::Not
-        | Token::Data => TokenCategory::Keyword,
+        | Token::Data
+        | Token::Connector => TokenCategory::Keyword,
 
         // Boolean/Null literals
         Token::True | Token::False | Token::Null => TokenCategory::BooleanLiteral,

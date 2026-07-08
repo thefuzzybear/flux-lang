@@ -23,6 +23,7 @@ pub enum Token {
     False,
     Null,
     Data,
+    Connector,
 
     // Identifiers and literals
     Ident(String),
@@ -86,6 +87,7 @@ impl Token {
                 | Token::False
                 | Token::Null
                 | Token::Data
+                | Token::Connector
         )
     }
 }

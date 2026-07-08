@@ -337,6 +337,7 @@ mod tests {
             .prop_map(|(imports, name, body)| Program {
                 imports,
                 data_block: None,
+                connector_block: None,
                 strategy: AstStrategy {
                     name,
                     body,

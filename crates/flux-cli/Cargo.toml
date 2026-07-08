@@ -26,8 +26,14 @@ chrono = { version = "0.4", features = ["serde"] }
 flux-compiler = { path = "../flux-compiler" }
 flux-runtime = { path = "../flux-runtime" }
 serde_json = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+async-trait = "0.1"
+toml = "0.8"
+rand = "0.8"
 
 [dev-dependencies]
 proptest = { workspace = true }
 regex = "1.10"
-toml = "0.8"
+tempfile = "3"

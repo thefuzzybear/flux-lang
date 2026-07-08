@@ -9,6 +9,7 @@ use crate::lexer::Span;
 pub struct Program {
     pub imports: Vec<Import>,
     pub data_block: Option<DataBlock>,
+    pub connector_block: Option<ConnectorBlock>,
     pub strategy: Strategy,
     pub span: Span,
 }
@@ -36,6 +37,30 @@ pub struct DataBlock {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataField<T> {
     pub value: T,
+    pub span: Span,
+}
+
+/// A connector block: declares live data source configuration.
+///
+/// connector {
+///     type = "websocket"
+///     url = "wss://stream.example.com/v1"
+///     symbols = ["AAPL", "MSFT"]
+///     interval = "1m"
+/// }
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConnectorBlock {
+    /// Connector type: "websocket", "poll", "replay"
+    pub connector_type: Option<DataField<String>>,
+    /// Endpoint URL (for websocket and poll)
+    pub url: Option<DataField<String>>,
+    /// Symbols to subscribe to
+    pub symbols: Option<DataField<Vec<String>>>,
+    /// Bar aggregation interval
+    pub interval: Option<DataField<String>>,
+    /// File path (for replay connector)
+    pub file: Option<DataField<String>>,
+    /// Span of the entire connector block
     pub span: Span,
 }
 

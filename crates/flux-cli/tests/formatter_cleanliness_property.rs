@@ -360,6 +360,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
                 })
                 .collect(),
             data_block: None,
+            connector_block: None,
             strategy: FluxStrategy {
                 name,
                 body,

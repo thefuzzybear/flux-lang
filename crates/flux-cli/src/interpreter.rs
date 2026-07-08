@@ -935,6 +935,7 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Test".to_string(),
                 body: vec![
@@ -1024,6 +1025,7 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Empty".to_string(),
                 body: vec![],
@@ -1792,6 +1794,7 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "TestStrategy".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -1863,6 +1866,7 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Empty".to_string(),
                 body: vec![],

@@ -10,13 +10,14 @@ use super::ast::*;
 use super::parser_state::ParserState;
 
 impl ParserState {
-    /// Parse the entire program: imports, optional data block, then strategy, then Eof.
+    /// Parse the entire program: imports, optional data block, optional connector block, then strategy, then Eof.
     pub fn parse_program(&mut self) -> Result<Program> {
         let start_span = self.current_span();
         let mut imports = Vec::new();
         let mut data_block: Option<DataBlock> = None;
+        let mut connector_block: Option<ConnectorBlock> = None;
 
-        // Parse imports and optional data block (interleaved before strategy)
+        // Parse imports, optional data block, and optional connector block (interleaved before strategy)
         loop {
             match self.peek().clone() {
                 Token::From => {
@@ -30,6 +31,15 @@ impl ParserState {
                         )));
                     }
                     data_block = Some(self.parse_data_block()?);
+                }
+                Token::Connector => {
+                    if connector_block.is_some() {
+                        return Err(CompileError::Parser(format!(
+                            "at byte {}: only one connector block is permitted per file",
+                            self.current_span().start
+                        )));
+                    }
+                    connector_block = Some(self.parse_connector_block()?);
                 }
                 _ => break,
             }
@@ -50,6 +60,7 @@ impl ParserState {
         Ok(Program {
             imports,
             data_block,
+            connector_block,
             strategy,
             span,
         })
@@ -163,6 +174,87 @@ impl ParserState {
             period,
             interval,
             source,
+            span: Span::new(start_span.start, end_span.end),
+        })
+    }
+
+    /// Parse a connector block: `connector { key = value ... }`
+    ///
+    /// Valid keys: type, url, symbols, interval, file.
+    /// `symbols` expects a string list `["A", "B"]`; other keys expect a string literal.
+    fn parse_connector_block(&mut self) -> Result<ConnectorBlock> {
+        let start_span = self.current_span();
+        self.expect(&Token::Connector)?;
+        self.expect(&Token::OpenBrace)?;
+
+        let mut connector_type: Option<DataField<String>> = None;
+        let mut url: Option<DataField<String>> = None;
+        let mut symbols: Option<DataField<Vec<String>>> = None;
+        let mut interval: Option<DataField<String>> = None;
+        let mut file: Option<DataField<String>> = None;
+
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            let key_span = self.current_span();
+            let (key, _) = self.expect_ident()?;
+            self.expect(&Token::Assign)?;
+
+            match key.as_str() {
+                "type" => {
+                    let (value, value_span) = self.expect_string()?;
+                    connector_type = Some(DataField {
+                        value,
+                        span: value_span,
+                    });
+                }
+                "url" => {
+                    let (value, value_span) = self.expect_string()?;
+                    url = Some(DataField {
+                        value,
+                        span: value_span,
+                    });
+                }
+                "symbols" => {
+                    let field_start = self.current_span();
+                    let list = self.parse_string_list()?;
+                    let field_end = self.span_from(field_start);
+                    symbols = Some(DataField {
+                        value: list,
+                        span: Span::new(field_start.start, field_end.end),
+                    });
+                }
+                "interval" => {
+                    let (value, value_span) = self.expect_string()?;
+                    interval = Some(DataField {
+                        value,
+                        span: value_span,
+                    });
+                }
+                "file" => {
+                    let (value, value_span) = self.expect_string()?;
+                    file = Some(DataField {
+                        value,
+                        span: value_span,
+                    });
+                }
+                other => {
+                    return Err(CompileError::Parser(format!(
+                        "at byte {}: unrecognized connector block key '{}'. \
+                         Valid keys: type, url, symbols, interval, file",
+                        key_span.start, other
+                    )));
+                }
+            }
+        }
+
+        let end_span = self.current_span();
+        self.expect(&Token::CloseBrace)?;
+
+        Ok(ConnectorBlock {
+            connector_type,
+            url,
+            symbols,
+            interval,
+            file,
             span: Span::new(start_span.start, end_span.end),
         })
     }
@@ -1064,5 +1156,259 @@ mod tests {
             data.symbols.unwrap().value,
             vec!["AAPL".to_string(), "MSFT".to_string()]
         );
+    }
+
+    // ===== Connector block tests =====
+
+    #[test]
+    fn connector_block_all_fields() {
+        // connector { type = "websocket" url = "wss://example.com" symbols = ["AAPL", "MSFT"] interval = "1m" file = "data.csv" }
+        // strategy X {}
+        let program = parse_program(vec![
+            Token::Connector,
+            Token::OpenBrace,
+            Token::Ident("type".to_string()),
+            Token::Assign,
+            Token::String("websocket".to_string()),
+            Token::Ident("url".to_string()),
+            Token::Assign,
+            Token::String("wss://stream.example.com/v1".to_string()),
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("AAPL".to_string()),
+            Token::Comma,
+            Token::String("MSFT".to_string()),
+            Token::CloseBracket,
+            Token::Ident("interval".to_string()),
+            Token::Assign,
+            Token::String("1m".to_string()),
+            Token::Ident("file".to_string()),
+            Token::Assign,
+            Token::String("data.csv".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.connector_block.is_some());
+        let conn = program.connector_block.unwrap();
+        assert_eq!(conn.connector_type.as_ref().unwrap().value, "websocket");
+        assert_eq!(conn.url.as_ref().unwrap().value, "wss://stream.example.com/v1");
+        assert_eq!(
+            conn.symbols.as_ref().unwrap().value,
+            vec!["AAPL".to_string(), "MSFT".to_string()]
+        );
+        assert_eq!(conn.interval.as_ref().unwrap().value, "1m");
+        assert_eq!(conn.file.as_ref().unwrap().value, "data.csv");
+    }
+
+    #[test]
+    fn connector_block_partial_fields() {
+        // connector { type = "replay" file = "history.csv" } strategy X {}
+        let program = parse_program(vec![
+            Token::Connector,
+            Token::OpenBrace,
+            Token::Ident("type".to_string()),
+            Token::Assign,
+            Token::String("replay".to_string()),
+            Token::Ident("file".to_string()),
+            Token::Assign,
+            Token::String("history.csv".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.connector_block.is_some());
+        let conn = program.connector_block.unwrap();
+        assert_eq!(conn.connector_type.as_ref().unwrap().value, "replay");
+        assert!(conn.url.is_none());
+        assert!(conn.symbols.is_none());
+        assert!(conn.interval.is_none());
+        assert_eq!(conn.file.as_ref().unwrap().value, "history.csv");
+    }
+
+    #[test]
+    fn connector_block_with_data_block() {
+        // data { symbols = ["AAPL"] } connector { type = "websocket" url = "wss://x.com" } strategy X {}
+        let program = parse_program(vec![
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("AAPL".to_string()),
+            Token::CloseBracket,
+            Token::CloseBrace,
+            Token::Connector,
+            Token::OpenBrace,
+            Token::Ident("type".to_string()),
+            Token::Assign,
+            Token::String("websocket".to_string()),
+            Token::Ident("url".to_string()),
+            Token::Assign,
+            Token::String("wss://x.com".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.data_block.is_some());
+        assert!(program.connector_block.is_some());
+        let conn = program.connector_block.unwrap();
+        assert_eq!(conn.connector_type.as_ref().unwrap().value, "websocket");
+        assert_eq!(conn.url.as_ref().unwrap().value, "wss://x.com");
+    }
+
+    #[test]
+    fn connector_block_before_data_block() {
+        // connector { type = "poll" } data { symbols = ["GOOG"] } strategy X {}
+        let program = parse_program(vec![
+            Token::Connector,
+            Token::OpenBrace,
+            Token::Ident("type".to_string()),
+            Token::Assign,
+            Token::String("poll".to_string()),
+            Token::CloseBrace,
+            Token::Data,
+            Token::OpenBrace,
+            Token::Ident("symbols".to_string()),
+            Token::Assign,
+            Token::OpenBracket,
+            Token::String("GOOG".to_string()),
+            Token::CloseBracket,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.data_block.is_some());
+        assert!(program.connector_block.is_some());
+        let conn = program.connector_block.unwrap();
+        assert_eq!(conn.connector_type.as_ref().unwrap().value, "poll");
+    }
+
+    #[test]
+    fn connector_block_no_block_means_none() {
+        // strategy X {}
+        let program = parse_program(vec![
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert!(program.connector_block.is_none());
+    }
+
+    #[test]
+    fn connector_block_duplicate_is_error() {
+        // connector {} connector {} strategy X {}
+        let result = parse_program(vec![
+            Token::Connector,
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Connector,
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("only one connector block is permitted"),
+                    "Expected 'only one connector block is permitted' in error, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connector_block_unrecognized_key_is_error() {
+        // connector { unknown_key = "value" } strategy X {}
+        let result = parse_program(vec![
+            Token::Connector,
+            Token::OpenBrace,
+            Token::Ident("unknown_key".to_string()),
+            Token::Assign,
+            Token::String("value".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("X".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::CompileError::Parser(msg) => {
+                assert!(
+                    msg.contains("unrecognized connector block key 'unknown_key'"),
+                    "Expected 'unrecognized connector block key' in error, got: {msg}"
+                );
+            }
+            other => panic!("Expected CompileError::Parser, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connector_block_source_level_parse() {
+        // Full source-level test using lex_with_spans + parse
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+connector {
+    type = "websocket"
+    url = "wss://stream.example.com/v1"
+    symbols = ["AAPL", "MSFT"]
+    interval = "1m"
+}
+
+strategy MyStrat {
+    on bar {
+        x = 1
+    }
+}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert!(program.connector_block.is_some());
+        let conn = program.connector_block.unwrap();
+        assert_eq!(conn.connector_type.as_ref().unwrap().value, "websocket");
+        assert_eq!(conn.url.as_ref().unwrap().value, "wss://stream.example.com/v1");
+        assert_eq!(
+            conn.symbols.as_ref().unwrap().value,
+            vec!["AAPL".to_string(), "MSFT".to_string()]
+        );
+        assert_eq!(conn.interval.as_ref().unwrap().value, "1m");
+        assert!(conn.file.is_none());
+        assert_eq!(program.strategy.name, "MyStrat");
     }
 }

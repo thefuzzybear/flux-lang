@@ -432,6 +432,82 @@ fn backtest_missing_data_option_exits_2() {
 // Math strategy integration tests (Tier 1, 2, and 3 functions)
 // =============================================================================
 
+// =============================================================================
+// Connector block backward compatibility (flux-live-harness)
+// =============================================================================
+
+/// Validates: Requirements 8.7, 8.8
+/// `flux backtest` with a strategy that has BOTH `data` and `connector` blocks
+/// should successfully compile and run, using only the data block for CSV config.
+/// The connector block should be silently ignored.
+#[test]
+fn backtest_strategy_with_connector_and_data_blocks_succeeds() {
+    let output = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("connector_and_data_block_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("sample_data.csv"))
+        .arg("--capital")
+        .arg("10000")
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0 for strategy with both data and connector blocks, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should produce normal backtest output with signals and summary
+    assert!(
+        stdout.contains("Summary"),
+        "Expected 'Summary' in backtest output, got: {:?}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Signals"),
+        "Expected 'Signals' section in backtest output, got: {:?}",
+        stdout
+    );
+    // Should produce portfolio summary (proves data block was used for backtest)
+    assert!(
+        stdout.contains("Portfolio Summary"),
+        "Expected 'Portfolio Summary' in output — proves data_block path was used"
+    );
+}
+
+/// Validates: Requirements 8.7, 8.8
+/// `flux check` with a strategy that has BOTH `data` and `connector` blocks
+/// should pass type checking without errors (connector block is valid syntax).
+#[test]
+fn check_strategy_with_connector_and_data_blocks_succeeds() {
+    let output = flux_cmd()
+        .arg("check")
+        .arg(fixture_path("connector_and_data_block_strategy.flux"))
+        .output()
+        .expect("failed to execute");
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "Expected exit 0 for check with both data and connector blocks, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ok"),
+        "Expected 'ok' in check output, got: {:?}",
+        stdout
+    );
+}
+
+// =============================================================================
+// Math strategy integration tests (Tier 1, 2, and 3 functions)
+// =============================================================================
+
 /// Validates: Requirements 3.5, 9.6, 15.1
 /// `flux check` with a strategy using Tier 1 and 2 math/stats functions should
 /// pass type checking without errors.

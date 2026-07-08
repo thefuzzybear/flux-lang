@@ -43,6 +43,8 @@ pub(crate) enum LogosToken {
     Null,
     #[token("data")]
     Data,
+    #[token("connector")]
+    Connector,
 
     // Identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]

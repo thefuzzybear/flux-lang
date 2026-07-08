@@ -41,12 +41,19 @@ impl TypeChecker {
             None => None,
         };
 
+        // Validate connector block if present
+        let typed_connector_block = match program.connector_block {
+            Some(ref cb) => Some(self.check_connector_block(cb)?),
+            None => None,
+        };
+
         // Check strategy
         let typed_strategy = self.check_strategy(program.strategy)?;
 
         Ok(TypedProgram {
             imports: program.imports,
             data_block: typed_data_block,
+            connector_block: typed_connector_block,
             strategy: typed_strategy,
             span: program.span,
         })
@@ -123,6 +130,81 @@ impl TypeChecker {
             interval: data_block.interval.as_ref().map(|f| f.value.clone()),
             source: data_block.source.as_ref().map(|f| f.value.clone()),
             span: data_block.span,
+        })
+    }
+
+    /// Validate a connector block's field values, producing a TypedConnectorBlock.
+    ///
+    /// Checks:
+    /// - `type` (if present) is one of "websocket", "poll", "replay"
+    /// - `url` is required when type is "websocket" or "poll"
+    /// - `file` is required when type is "replay"
+    /// - `symbols` (if present) is a non-empty list of non-empty strings
+    fn check_connector_block(
+        &self,
+        connector_block: &ConnectorBlock,
+    ) -> Result<TypedConnectorBlock> {
+        let valid_types = ["websocket", "poll", "replay"];
+
+        // Validate connector type if present
+        if let Some(ref type_field) = connector_block.connector_type {
+            if !valid_types.contains(&type_field.value.as_str()) {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: invalid connector type '{}'. Valid options: {}",
+                    type_field.span.start,
+                    type_field.value,
+                    valid_types.join(", ")
+                )));
+            }
+
+            // If type is "websocket" or "poll", url must be present
+            if (type_field.value == "websocket" || type_field.value == "poll")
+                && connector_block.url.is_none()
+            {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: connector type '{}' requires a 'url' field",
+                    type_field.span.start,
+                    type_field.value,
+                )));
+            }
+
+            // If type is "replay", file must be present
+            if type_field.value == "replay" && connector_block.file.is_none() {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: connector type 'replay' requires a 'file' field",
+                    type_field.span.start,
+                )));
+            }
+        }
+
+        // Validate symbols list if present
+        if let Some(ref symbols_field) = connector_block.symbols {
+            if symbols_field.value.is_empty() {
+                return Err(CompileError::Type(format!(
+                    "at byte {}: connector 'symbols' must contain at least one symbol",
+                    symbols_field.span.start
+                )));
+            }
+            for (i, sym) in symbols_field.value.iter().enumerate() {
+                if sym.is_empty() {
+                    return Err(CompileError::Type(format!(
+                        "at byte {}: connector symbol at index {} must be non-empty",
+                        symbols_field.span.start, i
+                    )));
+                }
+            }
+        }
+
+        Ok(TypedConnectorBlock {
+            connector_type: connector_block
+                .connector_type
+                .as_ref()
+                .map(|f| f.value.clone()),
+            url: connector_block.url.as_ref().map(|f| f.value.clone()),
+            symbols: connector_block.symbols.as_ref().map(|f| f.value.clone()),
+            interval: connector_block.interval.as_ref().map(|f| f.value.clone()),
+            file: connector_block.file.as_ref().map(|f| f.value.clone()),
+            span: connector_block.span,
         })
     }
 
@@ -1923,6 +2005,7 @@ mod tests {
         Program {
             imports,
             data_block: None,
+            connector_block: None,
             strategy: Strategy {
                 name: "Test".to_string(),
                 body,
@@ -2324,5 +2407,454 @@ mod tests {
         );
         let result = tc.check_program(program);
         assert!(result.is_ok(), "CLOSE(symbol, 50) should be valid: {:?}", result.err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Connector block validation tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a Program with a connector block and minimal strategy.
+    fn make_program_with_connector(connector: ConnectorBlock) -> Program {
+        Program {
+            imports: vec![],
+            data_block: None,
+            connector_block: Some(connector),
+            strategy: Strategy {
+                name: "Test".to_string(),
+                body: vec![StrategyItem::EventHandler(EventHandler {
+                    event_name: "bar".to_string(),
+                    body: vec![],
+                    span: Span::new(100, 120),
+                })],
+                span: Span::new(80, 130),
+            },
+            span: Span::new(0, 130),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_valid_websocket() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "websocket".to_string(),
+                span: Span::new(10, 21),
+            }),
+            url: Some(DataField {
+                value: "wss://example.com".to_string(),
+                span: Span::new(30, 49),
+            }),
+            symbols: Some(DataField {
+                value: vec!["AAPL".to_string(), "MSFT".to_string()],
+                span: Span::new(50, 70),
+            }),
+            interval: None,
+            file: None,
+            span: Span::new(0, 75),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_ok(), "Valid websocket connector should pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_connector_block_valid_poll() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "poll".to_string(),
+                span: Span::new(10, 16),
+            }),
+            url: Some(DataField {
+                value: "https://api.example.com/bars".to_string(),
+                span: Span::new(30, 60),
+            }),
+            symbols: Some(DataField {
+                value: vec!["SPY".to_string()],
+                span: Span::new(65, 75),
+            }),
+            interval: Some(DataField {
+                value: "1m".to_string(),
+                span: Span::new(80, 84),
+            }),
+            file: None,
+            span: Span::new(0, 90),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_ok(), "Valid poll connector should pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_connector_block_valid_replay() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "replay".to_string(),
+                span: Span::new(10, 18),
+            }),
+            url: None,
+            symbols: Some(DataField {
+                value: vec!["AAPL".to_string()],
+                span: Span::new(30, 40),
+            }),
+            interval: None,
+            file: Some(DataField {
+                value: "data/prices.csv".to_string(),
+                span: Span::new(50, 67),
+            }),
+            span: Span::new(0, 70),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_ok(), "Valid replay connector should pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_connector_block_no_type_is_ok() {
+        // If type is missing entirely, that's OK (optional validation)
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: None,
+            url: Some(DataField {
+                value: "wss://example.com".to_string(),
+                span: Span::new(10, 29),
+            }),
+            symbols: Some(DataField {
+                value: vec!["AAPL".to_string()],
+                span: Span::new(30, 40),
+            }),
+            interval: None,
+            file: None,
+            span: Span::new(0, 45),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_ok(), "Connector without type should pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_connector_block_invalid_type() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "grpc".to_string(),
+                span: Span::new(10, 16),
+            }),
+            url: None,
+            symbols: None,
+            interval: None,
+            file: None,
+            span: Span::new(0, 20),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_err(), "Invalid connector type should be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("at byte 10:"), "Expected span-prefixed error, got: {}", msg);
+                assert!(msg.contains("grpc"), "Error should mention the invalid value, got: {}", msg);
+                assert!(msg.contains("websocket"), "Error should list valid options, got: {}", msg);
+                assert!(msg.contains("poll"), "Error should list valid options, got: {}", msg);
+                assert!(msg.contains("replay"), "Error should list valid options, got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_websocket_missing_url() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "websocket".to_string(),
+                span: Span::new(10, 21),
+            }),
+            url: None,
+            symbols: Some(DataField {
+                value: vec!["AAPL".to_string()],
+                span: Span::new(30, 40),
+            }),
+            interval: None,
+            file: None,
+            span: Span::new(0, 45),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_err(), "Websocket without url should be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("at byte 10:"), "Expected span-prefixed error, got: {}", msg);
+                assert!(msg.contains("websocket"), "Error should mention the type, got: {}", msg);
+                assert!(msg.contains("url"), "Error should mention 'url', got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_poll_missing_url() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "poll".to_string(),
+                span: Span::new(10, 16),
+            }),
+            url: None,
+            symbols: None,
+            interval: None,
+            file: None,
+            span: Span::new(0, 20),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_err(), "Poll without url should be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("at byte 10:"), "Expected span-prefixed error, got: {}", msg);
+                assert!(msg.contains("poll"), "Error should mention the type, got: {}", msg);
+                assert!(msg.contains("url"), "Error should mention 'url', got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_replay_missing_file() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "replay".to_string(),
+                span: Span::new(10, 18),
+            }),
+            url: None,
+            symbols: Some(DataField {
+                value: vec!["AAPL".to_string()],
+                span: Span::new(30, 40),
+            }),
+            interval: None,
+            file: None,
+            span: Span::new(0, 45),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_err(), "Replay without file should be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("at byte 10:"), "Expected span-prefixed error, got: {}", msg);
+                assert!(msg.contains("replay"), "Error should mention 'replay', got: {}", msg);
+                assert!(msg.contains("file"), "Error should mention 'file', got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_empty_symbols() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "websocket".to_string(),
+                span: Span::new(10, 21),
+            }),
+            url: Some(DataField {
+                value: "wss://example.com".to_string(),
+                span: Span::new(30, 49),
+            }),
+            symbols: Some(DataField {
+                value: vec![],
+                span: Span::new(50, 60),
+            }),
+            interval: None,
+            file: None,
+            span: Span::new(0, 65),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_err(), "Empty symbols list should be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("at byte 50:"), "Expected span-prefixed error, got: {}", msg);
+                assert!(msg.contains("at least one symbol"), "Error should mention non-empty requirement, got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_empty_string_in_symbols() {
+        let mut tc = TypeChecker::new();
+        let connector = ConnectorBlock {
+            connector_type: Some(DataField {
+                value: "websocket".to_string(),
+                span: Span::new(10, 21),
+            }),
+            url: Some(DataField {
+                value: "wss://example.com".to_string(),
+                span: Span::new(30, 49),
+            }),
+            symbols: Some(DataField {
+                value: vec!["AAPL".to_string(), "".to_string()],
+                span: Span::new(50, 70),
+            }),
+            interval: None,
+            file: None,
+            span: Span::new(0, 75),
+        };
+        let program = make_program_with_connector(connector);
+        let result = tc.check_program(program);
+        assert!(result.is_err(), "Empty string in symbols should be rejected");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("at byte 50:"), "Expected span-prefixed error, got: {}", msg);
+                assert!(msg.contains("index 1"), "Error should mention the position, got: {}", msg);
+                assert!(msg.contains("non-empty"), "Error should mention non-empty, got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_no_connector_block_is_ok() {
+        // Programs without a connector block should still pass
+        let mut tc = TypeChecker::new();
+        let program = make_program(vec![], vec![
+            StrategyItem::EventHandler(EventHandler {
+                event_name: "bar".to_string(),
+                body: vec![],
+                span: Span::new(0, 20),
+            }),
+        ]);
+        let result = tc.check_program(program);
+        assert!(result.is_ok(), "No connector block should pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_connector_block_end_to_end_parse_and_check_valid() {
+        // Full pipeline: lex → parse → check for a valid connector block
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+        use crate::typeck::check;
+
+        let source = r#"connector {
+    type = "websocket"
+    url = "wss://stream.example.com/v1"
+    symbols = ["AAPL", "MSFT"]
+}
+
+strategy Test {
+    on bar {
+    }
+}"#;
+
+        let tokens = lex_with_spans(source).expect("Lexing failed");
+        let program = parse(tokens).expect("Parsing failed");
+        let result = check(program);
+        assert!(result.is_ok(), "Valid connector block should pass end-to-end: {:?}", result.err());
+
+        let typed = result.unwrap();
+        let cb = typed.connector_block.expect("Should have typed connector block");
+        assert_eq!(cb.connector_type, Some("websocket".to_string()));
+        assert_eq!(cb.url, Some("wss://stream.example.com/v1".to_string()));
+        assert_eq!(cb.symbols, Some(vec!["AAPL".to_string(), "MSFT".to_string()]));
+    }
+
+    #[test]
+    fn test_connector_block_end_to_end_invalid_type_error() {
+        // Full pipeline: lex → parse → check for an invalid connector type
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+        use crate::typeck::check;
+
+        let source = r#"connector {
+    type = "grpc"
+    symbols = ["AAPL"]
+}
+
+strategy Test {
+    on bar {
+    }
+}"#;
+
+        let tokens = lex_with_spans(source).expect("Lexing failed");
+        let program = parse(tokens).expect("Parsing failed");
+        let result = check(program);
+        assert!(result.is_err(), "Invalid connector type should fail");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("grpc"), "Error should mention 'grpc', got: {}", msg);
+                assert!(msg.contains("websocket"), "Error should list valid types, got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_end_to_end_missing_url_error() {
+        // Full pipeline: lex → parse → check for websocket missing url
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+        use crate::typeck::check;
+
+        let source = r#"connector {
+    type = "websocket"
+    symbols = ["AAPL"]
+}
+
+strategy Test {
+    on bar {
+    }
+}"#;
+
+        let tokens = lex_with_spans(source).expect("Lexing failed");
+        let program = parse(tokens).expect("Parsing failed");
+        let result = check(program);
+        assert!(result.is_err(), "Websocket without url should fail");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("url"), "Error should mention 'url', got: {}", msg);
+                assert!(msg.contains("websocket"), "Error should mention 'websocket', got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_connector_block_end_to_end_replay_missing_file_error() {
+        // Full pipeline: lex → parse → check for replay missing file
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+        use crate::typeck::check;
+
+        let source = r#"connector {
+    type = "replay"
+    symbols = ["AAPL"]
+}
+
+strategy Test {
+    on bar {
+    }
+}"#;
+
+        let tokens = lex_with_spans(source).expect("Lexing failed");
+        let program = parse(tokens).expect("Parsing failed");
+        let result = check(program);
+        assert!(result.is_err(), "Replay without file should fail");
+        let err = result.unwrap_err();
+        match &err {
+            CompileError::Type(msg) => {
+                assert!(msg.contains("file"), "Error should mention 'file', got: {}", msg);
+                assert!(msg.contains("replay"), "Error should mention 'replay', got: {}", msg);
+            }
+            other => panic!("Expected CompileError::Type, got: {:?}", other),
+        }
     }
 }

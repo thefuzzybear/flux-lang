@@ -8,6 +8,7 @@ mod interpreter;
 mod math_builtins;
 mod stat_indicators;
 mod portfolio_ops;
+mod live;
 mod commands;
 
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use std::process;
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
+use commands::live::LiveArgs;
 use exit_codes::{FAILURE, SUCCESS, USAGE_ERROR};
 
 #[derive(Parser)]
@@ -44,9 +46,9 @@ enum Commands {
     Backtest {
         /// Path to the Flux source file
         file: PathBuf,
-        /// Path to the CSV data file
-        #[arg(long)]
-        data: PathBuf,
+        /// Path to CSV data file(s) — repeat for multiple symbols
+        #[arg(long, required = true)]
+        data: Vec<PathBuf>,
         /// Initial capital for portfolio tracking (default: 10000)
         #[arg(long, default_value = "10000.0")]
         capital: f64,
@@ -116,9 +118,12 @@ enum Commands {
         #[arg(long, default_value = "10000.0")]
         capital: f64,
     },
+    /// Run strategies continuously against live market data
+    Live(LiveArgs),
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
@@ -142,7 +147,8 @@ fn main() {
             }
         }
         Commands::Backtest { file, data, capital } => {
-            match commands::backtest::run_backtest_cmd(&file, &data, capital) {
+            let data_refs: Vec<&std::path::Path> = data.iter().map(|p| p.as_path()).collect();
+            match commands::backtest::run_backtest_cmd(&file, &data_refs, capital) {
                 Ok(()) => SUCCESS,
                 Err(_e) => FAILURE,
             }
@@ -231,6 +237,15 @@ fn main() {
                         }
                         _ => FAILURE,
                     }
+                }
+            }
+        },
+        Commands::Live(args) => {
+            match commands::live::run_live_cmd(args).await {
+                Ok(()) => SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    FAILURE
                 }
             }
         },

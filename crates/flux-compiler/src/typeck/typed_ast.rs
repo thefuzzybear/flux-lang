@@ -15,6 +15,7 @@ use super::types::FluxType;
 pub struct TypedProgram {
     pub imports: Vec<Import>,
     pub data_block: Option<TypedDataBlock>,
+    pub connector_block: Option<TypedConnectorBlock>,
     pub strategy: TypedStrategy,
     pub span: Span,
 }
@@ -26,6 +27,17 @@ pub struct TypedDataBlock {
     pub period: Option<String>,
     pub interval: Option<String>,
     pub source: Option<String>,
+    pub span: Span,
+}
+
+/// Typed connector block — values have been validated by the typechecker.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedConnectorBlock {
+    pub connector_type: Option<String>,
+    pub url: Option<String>,
+    pub symbols: Option<Vec<String>>,
+    pub interval: Option<String>,
+    pub file: Option<String>,
     pub span: Span,
 }
 

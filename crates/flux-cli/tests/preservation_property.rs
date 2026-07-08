@@ -131,6 +131,7 @@ fn build_single_sma_strategy(period: i64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         data_block: None,
+        connector_block: None,
         strategy: TypedStrategy {
             name: "SingleSMA".to_string(),
             body: vec![
@@ -199,6 +200,7 @@ fn build_single_ema_strategy(period: i64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         data_block: None,
+        connector_block: None,
         strategy: TypedStrategy {
             name: "SingleEMA".to_string(),
             body: vec![
@@ -262,6 +264,7 @@ fn build_no_signal_strategy() -> TypedProgram {
     TypedProgram {
         imports: vec![],
         data_block: None,
+        connector_block: None,
         strategy: TypedStrategy {
             name: "NoSignal".to_string(),
             body: vec![

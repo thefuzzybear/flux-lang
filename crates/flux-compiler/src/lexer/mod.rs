@@ -146,6 +146,7 @@ fn convert_token(
         LogosToken::False => Ok(Token::False),
         LogosToken::Null => Ok(Token::Null),
         LogosToken::Data => Ok(Token::Data),
+        LogosToken::Connector => Ok(Token::Connector),
 
         // Operators
         LogosToken::Eq => Ok(Token::Eq),
@@ -1130,6 +1131,35 @@ mod tests {
         assert_eq!(
             tokens,
             vec![Token::Ident("database".to_string()), Token::Eof]
+        );
+    }
+
+    // --- connector keyword tests ---
+    // Validates: Requirements 8.1
+
+    #[test]
+    fn lex_keyword_connector() {
+        let tokens = lex("connector").unwrap();
+        assert_eq!(tokens, vec![Token::Connector, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_connectors_as_ident() {
+        // "connectors" should be a single Ident, not Connector + s
+        let tokens = lex("connectors").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("connectors".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_connector_type_as_ident() {
+        // "connector_type" should be a single Ident, not Connector + _type
+        let tokens = lex("connector_type").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("connector_type".to_string()), Token::Eof]
         );
     }
 }

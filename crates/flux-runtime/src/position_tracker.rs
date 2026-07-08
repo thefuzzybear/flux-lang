@@ -297,6 +297,11 @@ impl PositionTracker {
         self.initial_capital
     }
 
+    /// Last known mark-to-market prices per symbol.
+    pub fn last_prices(&self) -> &HashMap<String, f64> {
+        &self.last_prices
+    }
+
     /// Take a snapshot of the current portfolio state.
     pub fn portfolio_state(&self) -> PortfolioState {
         PortfolioState {

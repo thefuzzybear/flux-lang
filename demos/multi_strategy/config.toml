@@ -1,0 +1,21 @@
+capital = 50000.0
+state_file = "harness_state.json"
+
+[risk]
+max_position_size = 1000.0
+max_exposure = 100000.0
+max_positions = 5
+
+[[strategies]]
+path = "momentum.flux"
+symbols = ["AAPL"]
+
+[[strategies]]
+path = "reversion.flux"
+symbols = ["MSFT"]
+
+[[connectors]]
+kind = "replay"
+file = "sample_data.csv"
+symbols = ["AAPL", "MSFT"]
+playback_rate = 0.0

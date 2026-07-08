@@ -215,6 +215,7 @@ mod integration_tests {
         Program {
             imports: vec![import],
             data_block: None,
+            connector_block: None,
             strategy,
             span: Span::new(0, 295),
         }
@@ -411,6 +412,7 @@ mod integration_tests {
         let program = Program {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy,
             span: Span::new(0, 150),
         };

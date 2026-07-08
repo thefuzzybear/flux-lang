@@ -25,6 +25,7 @@ fn build_empty_strategy() -> TypedProgram {
     TypedProgram {
         imports: vec![],
         data_block: None,
+        connector_block: None,
         strategy: TypedStrategy {
             name: "Empty".to_string(),
             body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {

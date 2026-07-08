@@ -741,6 +741,7 @@ mod tests {
         TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Test".to_string(),
                 body: vec![],
@@ -759,6 +760,7 @@ mod tests {
                 span: Span::new(0, 30),
             }],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "MyStrategy".to_string(),
                 body: vec![
@@ -2090,6 +2092,7 @@ mod tests {
         let prog = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Sig".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -2153,6 +2156,7 @@ mod tests {
         let prog = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Empty".to_string(),
                 body: vec![TypedStrategyItem::EventHandler(TypedEventHandler {
@@ -2188,6 +2192,7 @@ mod tests {
         let prog = TypedProgram {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "Order".to_string(),
                 body: vec![
@@ -2308,6 +2313,7 @@ mod tests {
                 span: Span::new(0, 30),
             }],
             data_block: None,
+            connector_block: None,
             strategy: TypedStrategy {
                 name: "MomentumStrategy".to_string(),
                 body: vec![

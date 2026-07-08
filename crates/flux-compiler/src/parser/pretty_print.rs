@@ -601,6 +601,7 @@ mod tests {
         let program = Program {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: Strategy {
                 name: "Test".to_string(),
                 body: vec![
@@ -640,6 +641,7 @@ mod tests {
         let program = Program {
             imports: vec![],
             data_block: None,
+            connector_block: None,
             strategy: Strategy {
                 name: "MyStrategy".to_string(),
                 body: vec![
