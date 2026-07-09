@@ -15,6 +15,11 @@ fn parse_source(source: &str) -> Result<flux_compiler::parser::Program, CompileE
     parse(tokens)
 }
 
+/// Helper: extract plain parameter names from an `FnDef` for assertions.
+fn param_names(fn_def: &flux_compiler::parser::ast::FnDef) -> Vec<&str> {
+    fn_def.params.iter().map(|p| p.name.as_str()).collect()
+}
+
 /// Minimal strategy block appended to function definitions for valid programs.
 const STRATEGY_SUFFIX: &str = "\nstrategy Test {\n    on bar {\n    }\n}\n";
 
@@ -44,7 +49,7 @@ fn fn_def_with_params_and_return() {
     assert_eq!(program.functions.len(), 1);
     let f = &program.functions[0];
     assert_eq!(f.name, "bar");
-    assert_eq!(f.params, vec!["x", "y", "z"]);
+    assert_eq!(param_names(f), vec!["x", "y", "z"]);
     assert_eq!(f.body.len(), 1);
     assert!(matches!(f.body[0], Stmt::Return(_)));
 }
@@ -58,7 +63,7 @@ fn fn_def_trailing_comma_in_params() {
     assert_eq!(program.functions.len(), 1);
     let f = &program.functions[0];
     assert_eq!(f.name, "f");
-    assert_eq!(f.params, vec!["a", "b"]);
+    assert_eq!(param_names(f), vec!["a", "b"]);
     assert!(f.body.is_empty());
 }
 
@@ -81,7 +86,7 @@ fn fn_def_body_with_multiple_statements() {
     assert_eq!(program.functions.len(), 1);
     let f = &program.functions[0];
     assert_eq!(f.name, "compute");
-    assert_eq!(f.params, vec!["x", "threshold"]);
+    assert_eq!(param_names(f), vec!["x", "threshold"]);
     assert_eq!(f.body.len(), 4);
 
     // Statement 1: assignment
@@ -113,8 +118,8 @@ fn multiple_functions_parsed_in_order() {
 
     // Verify params
     assert!(program.functions[0].params.is_empty());
-    assert_eq!(program.functions[1].params, vec!["x"]);
-    assert_eq!(program.functions[2].params, vec!["a", "b"]);
+    assert_eq!(param_names(&program.functions[1]), vec!["x"]);
+    assert_eq!(param_names(&program.functions[2]), vec!["a", "b"]);
 }
 
 // ============================================================================
@@ -179,4 +184,91 @@ fn fn_missing_close_brace_is_error() {
     let source = format!("fn foo() {{{}", STRATEGY_SUFFIX);
     let result = parse_source(&source);
     assert!(result.is_err(), "missing close brace should be rejected");
+}
+
+// ============================================================================
+// Struct type annotations on function signatures (flux-structs Task 2.6)
+// **Validates: Requirements 5.1, 5.2**
+// ============================================================================
+
+use flux_compiler::parser::ast::TypeAnnotation;
+
+/// `fn calc_spread(q: Quote) -> f64 { ... }` — typed param and return type.
+#[test]
+fn fn_def_with_typed_param_and_return_type() {
+    let source = format!(
+        "fn calc_spread(q: Quote) -> f64 {{ return q.ask - q.bid }}{}",
+        STRATEGY_SUFFIX
+    );
+    let program = parse_source(&source).expect("should parse successfully");
+
+    assert_eq!(program.functions.len(), 1);
+    let f = &program.functions[0];
+    assert_eq!(f.name, "calc_spread");
+    assert_eq!(f.params.len(), 1);
+    assert_eq!(f.params[0].name, "q");
+    assert_eq!(
+        f.params[0].param_type,
+        Some(TypeAnnotation::Named("Quote".to_string()))
+    );
+    assert_eq!(f.return_type, Some(TypeAnnotation::F64));
+}
+
+/// Untyped functions must still parse exactly as before (backward compatibility).
+#[test]
+fn fn_def_untyped_params_have_none_type_and_no_return_type() {
+    let source = format!("fn add(a, b) {{ return a + b }}{}", STRATEGY_SUFFIX);
+    let program = parse_source(&source).expect("should parse successfully");
+
+    assert_eq!(program.functions.len(), 1);
+    let f = &program.functions[0];
+    assert_eq!(param_names(f), vec!["a", "b"]);
+    assert!(f.params.iter().all(|p| p.param_type.is_none()));
+    assert!(f.return_type.is_none());
+}
+
+/// Mixed typed and untyped params in the same parameter list.
+#[test]
+fn fn_def_mixed_typed_and_untyped_params() {
+    let source = format!(
+        "fn mix(a: f64, b, c: int) {{ return a }}{}",
+        STRATEGY_SUFFIX
+    );
+    let program = parse_source(&source).expect("should parse successfully");
+
+    let f = &program.functions[0];
+    assert_eq!(f.params.len(), 3);
+    assert_eq!(f.params[0].name, "a");
+    assert_eq!(f.params[0].param_type, Some(TypeAnnotation::F64));
+    assert_eq!(f.params[1].name, "b");
+    assert_eq!(f.params[1].param_type, None);
+    assert_eq!(f.params[2].name, "c");
+    assert_eq!(f.params[2].param_type, Some(TypeAnnotation::Int));
+}
+
+/// Return type without any typed params: `fn f() -> bool { ... }`.
+#[test]
+fn fn_def_return_type_only() {
+    let source = format!("fn is_ready() -> bool {{ return true }}{}", STRATEGY_SUFFIX);
+    let program = parse_source(&source).expect("should parse successfully");
+
+    let f = &program.functions[0];
+    assert!(f.params.is_empty());
+    assert_eq!(f.return_type, Some(TypeAnnotation::Bool));
+}
+
+/// Struct-typed return type: `fn make_quote() -> Quote { ... }`.
+#[test]
+fn fn_def_struct_named_return_type() {
+    let source = format!(
+        "fn make_quote() -> Quote {{ return q }}{}",
+        STRATEGY_SUFFIX
+    );
+    let program = parse_source(&source).expect("should parse successfully");
+
+    let f = &program.functions[0];
+    assert_eq!(
+        f.return_type,
+        Some(TypeAnnotation::Named("Quote".to_string()))
+    );
 }

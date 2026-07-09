@@ -397,6 +397,11 @@ fn collect_calls_from_expr(expr: &Expr, names: &mut Vec<String>) {
                 collect_calls_from_expr(elem, names);
             }
         }
+        ExprKind::StructLiteral { fields, .. } => {
+            for (_, value) in fields {
+                collect_calls_from_expr(value, names);
+            }
+        }
         // Leaf nodes: no calls to extract
         ExprKind::Ident(_)
         | ExprKind::IntLiteral(_)
@@ -984,13 +989,17 @@ fn isolated() {
                 );
 
                 // Parameters preserved in exact order
+                let found_param_names: Vec<&str> =
+                    found_fn.params.iter().map(|p| p.name.as_str()).collect();
+                let expected_param_names: Vec<&str> =
+                    expected_fn.params.iter().map(|p| p.as_str()).collect();
                 prop_assert_eq!(
-                    &found_fn.params,
-                    &expected_fn.params,
+                    &found_param_names,
+                    &expected_param_names,
                     "Function '{}' params were modified during merge. Expected {:?}, got {:?}",
                     expected_fn.name,
                     expected_fn.params,
-                    found_fn.params
+                    found_param_names
                 );
 
                 // Body structure preserved (should be a return statement)

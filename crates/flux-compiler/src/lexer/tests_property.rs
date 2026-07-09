@@ -507,7 +507,7 @@ mod error_recovery_tests {
         fn error_recovery_continuation(
             tokens_before in prop::collection::vec(valid_flux_token(), 1..5),
             tokens_after in prop::collection::vec(valid_flux_token(), 1..5),
-            invalid_char in prop::sample::select(vec!['@', '$', '~', '`']),
+            invalid_char in prop::sample::select(vec!['$', '~', '`']),
         ) {
             let before = tokens_before.join(" ");
             let after = tokens_after.join(" ");

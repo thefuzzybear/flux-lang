@@ -21,6 +21,12 @@ pub enum FluxType {
     /// Function type: parameter specification and return type.
     /// Used internally for imported functions and built-in signals.
     Fn { params: FnParams, ret: Box<FluxType> },
+    /// A named struct type (e.g., `Quote`, `Tick`). Two struct types are
+    /// considered the same type iff their names match exactly.
+    Struct(String),
+    /// A fixed-size array type `[T; N]`. Two fixed-array types are the same
+    /// type iff their element types match and their sizes match exactly.
+    FixedArray(Box<FluxType>, usize),
 }
 
 /// Function parameter specification.
@@ -50,6 +56,10 @@ impl FluxType {
             (FluxType::Int, FluxType::Float) => true,
             (FluxType::List(inner), FluxType::List(_)) if inner.as_ref() == &FluxType::Null => {
                 true
+            }
+            (FluxType::Struct(a), FluxType::Struct(b)) => a == b,
+            (FluxType::FixedArray(a_elem, a_size), FluxType::FixedArray(b_elem, b_size)) => {
+                a_size == b_size && a_elem.is_assignable_to(b_elem)
             }
             _ => false,
         }
@@ -83,6 +93,8 @@ impl fmt::Display for FluxType {
             FluxType::VecFloat => write!(f, "VecFloat"),
             FluxType::MatFloat => write!(f, "MatFloat"),
             FluxType::Fn { ret, .. } => write!(f, "Fn -> {}", ret),
+            FluxType::Struct(name) => write!(f, "{}", name),
+            FluxType::FixedArray(elem, size) => write!(f, "[{}; {}]", elem, size),
         }
     }
 }
@@ -261,5 +273,82 @@ mod tests {
     #[test]
     fn test_matfloat_not_numeric() {
         assert!(!FluxType::MatFloat.is_numeric());
+    }
+
+    #[test]
+    fn test_struct_same_name_assignable() {
+        let a = FluxType::Struct("Quote".to_string());
+        let b = FluxType::Struct("Quote".to_string());
+        assert!(a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_struct_different_name_not_assignable() {
+        let a = FluxType::Struct("Quote".to_string());
+        let b = FluxType::Struct("Tick".to_string());
+        assert!(!a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_struct_not_assignable_to_non_struct() {
+        let a = FluxType::Struct("Quote".to_string());
+        assert!(!a.is_assignable_to(&FluxType::Int));
+        assert!(!FluxType::Int.is_assignable_to(&a));
+    }
+
+    #[test]
+    fn test_fixed_array_matching_elem_and_size_assignable() {
+        let a = FluxType::FixedArray(Box::new(FluxType::Float), 20);
+        let b = FluxType::FixedArray(Box::new(FluxType::Float), 20);
+        assert!(a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_fixed_array_mismatched_size_not_assignable() {
+        let a = FluxType::FixedArray(Box::new(FluxType::Float), 20);
+        let b = FluxType::FixedArray(Box::new(FluxType::Float), 10);
+        assert!(!a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_fixed_array_mismatched_elem_type_not_assignable() {
+        let a = FluxType::FixedArray(Box::new(FluxType::Float), 20);
+        let b = FluxType::FixedArray(Box::new(FluxType::Int), 20);
+        assert!(!a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_fixed_array_elem_coercion_int_to_float() {
+        // Element assignability follows the same coercion rules (Int -> Float)
+        let a = FluxType::FixedArray(Box::new(FluxType::Int), 5);
+        let b = FluxType::FixedArray(Box::new(FluxType::Float), 5);
+        assert!(a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_fixed_array_of_struct_matching() {
+        let a = FluxType::FixedArray(Box::new(FluxType::Struct("Level".to_string())), 20);
+        let b = FluxType::FixedArray(Box::new(FluxType::Struct("Level".to_string())), 20);
+        assert!(a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_fixed_array_of_struct_mismatched_name() {
+        let a = FluxType::FixedArray(Box::new(FluxType::Struct("Level".to_string())), 20);
+        let b = FluxType::FixedArray(Box::new(FluxType::Struct("Quote".to_string())), 20);
+        assert!(!a.is_assignable_to(&b));
+    }
+
+    #[test]
+    fn test_struct_display() {
+        assert_eq!(FluxType::Struct("Quote".to_string()).to_string(), "Quote");
+    }
+
+    #[test]
+    fn test_fixed_array_display() {
+        assert_eq!(
+            FluxType::FixedArray(Box::new(FluxType::Float), 20).to_string(),
+            "[Float; 20]"
+        );
     }
 }

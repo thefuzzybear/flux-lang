@@ -45,7 +45,7 @@ proptest! {
         let keywords = [
             "strategy", "params", "state", "on", "if", "elif", "else",
             "for", "while", "return", "from", "import", "and", "or",
-            "not", "true", "false", "null", "data", "connector",
+            "not", "true", "false", "null", "data", "connector", "fn", "struct",
         ];
         prop_assume!(!keywords.contains(&ident.as_str()));
         // Skip identifiers that exceed max length

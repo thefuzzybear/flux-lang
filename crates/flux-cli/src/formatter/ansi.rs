@@ -177,7 +177,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::Or
         | Token::Not
         | Token::Data
-        | Token::Connector => TokenCategory::Keyword,
+        | Token::Connector
+        | Token::Struct => TokenCategory::Keyword,
 
         // Boolean/Null literals
         Token::True | Token::False | Token::Null => TokenCategory::BooleanLiteral,
@@ -204,7 +205,9 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::Assign
         | Token::Bang
         | Token::AndAnd
-        | Token::OrOr => TokenCategory::Operator,
+        | Token::OrOr
+        | Token::At
+        | Token::Arrow => TokenCategory::Operator,
 
         // Delimiters
         Token::OpenParen
@@ -216,7 +219,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::Comma
         | Token::Dot
         | Token::Colon
-        | Token::ColonColon => TokenCategory::Delimiter,
+        | Token::ColonColon
+        | Token::Semicolon => TokenCategory::Delimiter,
 
         // Identifiers — check for signal functions
         Token::Ident(name) => match name.as_str() {

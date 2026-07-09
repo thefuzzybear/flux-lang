@@ -60,6 +60,7 @@ mod tests {
                 names: vec!["sma".to_string()],
                 span: Span::new(0, 30),
             }],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -215,6 +216,7 @@ mod tests {
     fn test_generate_structure_ordering() {
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -281,6 +283,7 @@ mod tests {
     fn test_generate_fn_type_error() {
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -330,6 +333,7 @@ mod tests {
     fn test_generate_empty_strategy() {
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,

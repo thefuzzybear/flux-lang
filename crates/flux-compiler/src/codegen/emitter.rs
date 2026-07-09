@@ -108,6 +108,7 @@ impl<'a> CodeEmitter<'a> {
         self.local_vars.clear();
         self.output.clear();
         self.emit_preamble();
+        self.emit_struct_definitions()?;
         self.emit_user_functions()?;
         self.emit_struct()?;
         self.output.push('\n');
@@ -124,6 +125,120 @@ impl<'a> CodeEmitter<'a> {
     /// Emit the preamble: `use flux_runtime::*;\n\n`
     fn emit_preamble(&mut self) {
         self.output.push_str("use flux_runtime::*;\n\n");
+    }
+
+    /// Return struct definitions in dependency order (topological sort).
+    ///
+    /// If struct A contains a field of type B, B appears before A in the
+    /// returned vec. The TypedProgram.structs field is already dependency-sorted
+    /// by the typechecker, but this method also performs its own topological sort
+    /// to ensure correctness regardless of input ordering.
+    fn dependency_sorted_structs(&self) -> Vec<&TypedStructDef> {
+        let structs = &self.program.structs;
+        if structs.is_empty() {
+            return vec![];
+        }
+
+        // Build name → index map
+        let name_to_idx: HashMap<&str, usize> = structs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.name.as_str(), i))
+            .collect();
+
+        // Build dependency edges: deps[i] = indices of structs that i depends on
+        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); structs.len()];
+        for (i, struct_def) in structs.iter().enumerate() {
+            for field in &struct_def.fields {
+                for dep_name in Self::struct_type_refs(&field.resolved_type) {
+                    if let Some(&dep_idx) = name_to_idx.get(dep_name) {
+                        deps[i].push(dep_idx);
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let n = structs.len();
+        let mut rev_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, node_deps) in deps.iter().enumerate() {
+            for &dep in node_deps {
+                rev_adj[dep].push(i);
+            }
+        }
+
+        let mut in_degree: Vec<usize> = deps.iter().map(|d| d.len()).collect();
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 {
+                queue.push_back(i);
+            }
+        }
+
+        let mut order = Vec::with_capacity(n);
+        while let Some(node) = queue.pop_front() {
+            order.push(node);
+            for &dependent in &rev_adj[node] {
+                in_degree[dependent] -= 1;
+                if in_degree[dependent] == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+
+        // If cycle detected (shouldn't happen — typechecker catches this), fall back to input order
+        if order.len() != n {
+            return structs.iter().collect();
+        }
+
+        order.iter().map(|&i| &structs[i]).collect()
+    }
+
+    /// Extract struct name references from a resolved FluxType.
+    fn struct_type_refs(ty: &FluxType) -> Vec<&str> {
+        match ty {
+            FluxType::Struct(name) => vec![name.as_str()],
+            FluxType::FixedArray(elem, _) => Self::struct_type_refs(elem),
+            _ => vec![],
+        }
+    }
+
+    /// Emit all Flux struct definitions in dependency order.
+    /// Each struct gets `#[derive(Clone, Copy)]` and `pub` visibility on all fields.
+    fn emit_struct_definitions(&mut self) -> Result<()> {
+        let sorted_structs = self.dependency_sorted_structs();
+        if sorted_structs.is_empty() {
+            return Ok(());
+        }
+
+        // Collect struct info (names, fields, types) to release the borrow on self
+        let struct_data: Vec<(String, Vec<(String, String)>)> = sorted_structs
+            .iter()
+            .map(|s| {
+                let fields: std::result::Result<Vec<_>, _> = s
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        map_type(&f.resolved_type, f.span.start)
+                            .map(|rust_type| (f.name.clone(), rust_type))
+                    })
+                    .collect();
+                fields.map(|fs| (s.name.clone(), fs))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        for (name, fields) in &struct_data {
+            self.output.push_str("#[derive(Clone, Copy)]\n");
+            self.output
+                .push_str(&format!("pub struct {} {{\n", name));
+            for (field_name, rust_type) in fields {
+                self.output
+                    .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
+            }
+            self.output.push_str("}\n\n");
+        }
+
+        Ok(())
     }
 
     /// Emit all user-defined functions before the strategy struct.
@@ -160,7 +275,12 @@ impl<'a> CodeEmitter<'a> {
             if i > 0 {
                 self.output.push_str(", ");
             }
-            self.output.push_str(&format!("{}: f64", param));
+            let rust_type = if i < fn_def.param_types.len() {
+                map_type(&fn_def.param_types[i], fn_def.span.start)?
+            } else {
+                "f64".to_string()
+            };
+            self.output.push_str(&format!("{}: {}", param, rust_type));
         }
         if fn_ctx.needs_bar_context {
             if !fn_def.params.is_empty() {
@@ -178,11 +298,11 @@ impl<'a> CodeEmitter<'a> {
 
         // Emit return type annotation
         match &fn_def.return_type {
-            FluxType::Float => self.output.push_str(" -> f64"),
-            FluxType::Int => self.output.push_str(" -> i64"),
-            FluxType::Bool => self.output.push_str(" -> bool"),
-            // Void/Null — no return type annotation
-            _ => {}
+            FluxType::Null | FluxType::Void => {}
+            other => {
+                let rust_type = map_type(other, fn_def.span.start)?;
+                self.output.push_str(&format!(" -> {}", rust_type));
+            }
         }
 
         self.output.push_str(" {\n");
@@ -591,6 +711,20 @@ impl<'a> CodeEmitter<'a> {
             TypedExprKind::IndexAccess { object, index } => {
                 self.emit_index_access(object, index)?;
             }
+            TypedExprKind::StructLiteral { struct_name, fields } => {
+                // Struct literal codegen (task 6.3) — emit Rust struct literal syntax
+                self.output.push_str(struct_name);
+                self.output.push_str(" { ");
+                for (i, (field_name, field_expr)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.output.push_str(field_name);
+                    self.output.push_str(": ");
+                    self.emit_expr(field_expr)?;
+                }
+                self.output.push_str(" }");
+            }
         }
         Ok(())
     }
@@ -889,6 +1023,7 @@ mod tests {
     fn minimal_program() -> TypedProgram {
         TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -909,6 +1044,7 @@ mod tests {
                 names: vec!["sma".to_string(), "ema".to_string()],
                 span: Span::new(0, 30),
             }],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -2242,6 +2378,7 @@ mod tests {
         // Build a program with an on_bar handler containing OPEN(symbol, 100)
         let prog = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -2307,6 +2444,7 @@ mod tests {
         // Handler with no statements should only have signal decl and return
         let prog = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -2344,6 +2482,7 @@ mod tests {
         // Build program with both properties and params, verify ordering
         let prog = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -2466,6 +2605,7 @@ mod tests {
                 names: vec!["sma".to_string()],
                 span: Span::new(0, 30),
             }],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,

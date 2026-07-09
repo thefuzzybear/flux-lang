@@ -50,13 +50,44 @@ fn format_fn_def(output: &mut String, fn_def: &FnDef) {
         if i > 0 {
             output.push_str(", ");
         }
-        output.push_str(param);
+        output.push_str(&param.name);
+        if let Some(ty) = &param.param_type {
+            output.push_str(": ");
+            format_type_annotation(output, ty);
+        }
     }
-    output.push_str(") {\n");
+    output.push(')');
+    if let Some(ret) = &fn_def.return_type {
+        output.push_str(" -> ");
+        format_type_annotation(output, ret);
+    }
+    output.push_str(" {\n");
     for stmt in &fn_def.body {
         format_stmt(output, stmt, 1);
     }
     output.push_str("}\n");
+}
+
+fn format_type_annotation(output: &mut String, ty: &TypeAnnotation) {
+    match ty {
+        TypeAnnotation::F64 => output.push_str("f64"),
+        TypeAnnotation::Int => output.push_str("int"),
+        TypeAnnotation::Bool => output.push_str("bool"),
+        TypeAnnotation::Str => output.push_str("str"),
+        TypeAnnotation::Named(name) => output.push_str(name),
+        TypeAnnotation::FixedArray(elem, size) => {
+            output.push('[');
+            format_type_annotation(output, elem);
+            output.push_str("; ");
+            output.push_str(&size.to_string());
+            output.push(']');
+        }
+        TypeAnnotation::BitInt(width) => {
+            output.push_str("int(");
+            output.push_str(&width.to_string());
+            output.push(')');
+        }
+    }
 }
 
 fn format_strategy(output: &mut String, strategy: &Strategy) {
@@ -355,6 +386,19 @@ fn format_expr_inner(output: &mut String, expr: &Expr) {
             format_expr(output, index);
             output.push(']');
         }
+        ExprKind::StructLiteral { struct_name, fields } => {
+            output.push_str(struct_name);
+            output.push_str(" { ");
+            for (i, (name, value)) in fields.iter().enumerate() {
+                if i > 0 {
+                    output.push_str(", ");
+                }
+                output.push_str(name);
+                output.push_str(" = ");
+                format_expr(output, value);
+            }
+            output.push_str(" }");
+        }
     }
 }
 
@@ -622,6 +666,7 @@ mod tests {
 
         // Build a minimal program AST
         let program = Program {
+            structs: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,
@@ -663,6 +708,7 @@ mod tests {
     #[test]
     fn format_indentation_nested_blocks() {
         let program = Program {
+            structs: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,

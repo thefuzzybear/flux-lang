@@ -15,8 +15,26 @@ use super::types::FluxType;
 pub struct TypedFnDef {
     pub name: String,
     pub params: Vec<String>,
+    pub param_types: Vec<FluxType>,
     pub body: Vec<TypedStmt>,
     pub return_type: FluxType,
+    pub span: Span,
+}
+
+/// A typed struct field with its resolved FluxType.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedStructField {
+    pub name: String,
+    pub resolved_type: FluxType,
+    pub span: Span,
+}
+
+/// A typed struct definition. Fields carry resolved types and the vec is ordered
+/// by dependency (structs used as field types appear first in `TypedProgram.structs`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedStructDef {
+    pub name: String,
+    pub fields: Vec<TypedStructField>,
     pub span: Span,
 }
 
@@ -25,6 +43,8 @@ pub struct TypedFnDef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedProgram {
     pub imports: Vec<Import>,
+    /// Struct definitions in dependency-sorted order (referenced structs appear first).
+    pub structs: Vec<TypedStructDef>,
     pub functions: Vec<TypedFnDef>,
     pub data_block: Option<TypedDataBlock>,
     pub connector_block: Option<TypedConnectorBlock>,
@@ -238,5 +258,9 @@ pub enum TypedExprKind {
     IndexAccess {
         object: Box<TypedExpr>,
         index: Box<TypedExpr>,
+    },
+    StructLiteral {
+        struct_name: String,
+        fields: Vec<(String, TypedExpr)>,
     },
 }

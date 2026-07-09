@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use flux_compiler::parser::ast::{BinOp, UnaryOp};
 use flux_compiler::typeck::typed_ast::*;
@@ -20,6 +21,56 @@ pub enum Value {
     /// A two-dimensional matrix of floats stored in row-major order.
     /// Element (i, j) is at index `i * cols + j` in `data`.
     MatFloat { data: Vec<f64>, rows: usize, cols: usize },
+    /// A struct instance with a type name and named fields.
+    Struct { type_name: String, fields: HashMap<String, Value> },
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Int(i) => write!(f, "{}", i),
+            Value::Float(v) => write!(f, "{}", v),
+            Value::Str(s) => write!(f, "{}", s),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Null => write!(f, "null"),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
+            Value::Signal(sig) => write!(f, "{:?}", sig),
+            Value::VecFloat(v) => {
+                write!(f, "[")?;
+                for (i, val) in v.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", val)?;
+                }
+                write!(f, "]")
+            }
+            Value::MatFloat { data, rows, cols } => {
+                write!(f, "Matrix({}x{}, {:?})", rows, cols, data)
+            }
+            Value::Struct { type_name, fields } => {
+                write!(f, "{} {{ ", type_name)?;
+                let mut entries: Vec<_> = fields.iter().collect();
+                entries.sort_by_key(|(k, _)| *k);
+                for (i, (name, value)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", name, value)?;
+                }
+                write!(f, " }}")
+            }
+        }
+    }
 }
 
 /// State entry for interpreter-managed indicator computations.
@@ -108,6 +159,10 @@ pub struct Interpreter {
     /// Signals emitted by the most recent user-function call.
     /// Drained by the caller after each function call expression.
     pub fn_signals: Vec<Signal>,
+    /// Holds the return value from a `return` statement in a nested block.
+    /// Used to propagate struct (and other complex) values through the
+    /// sentinel error mechanism without lossy string encoding.
+    pub pending_return: Option<Value>,
 }
 
 impl Interpreter {
@@ -162,6 +217,7 @@ impl Interpreter {
             call_depth: 0,
             max_call_depth: 64,
             fn_signals: Vec::new(),
+            pending_return: None,
         }
     }
 
@@ -203,9 +259,11 @@ impl Interpreter {
                     }
                     signals
                 }
-                Err(msg) if msg.starts_with("__RETURN__:") => {
+                Err(msg) if msg == "__RETURN__" => {
                     // A return statement in the event handler — treat as early exit.
                     // Any signals emitted before the return are in fn_signals.
+                    // Clear the pending_return since the event handler doesn't use it.
+                    self.pending_return = None;
                     let signals: Vec<Signal> = self.fn_signals.drain(..).collect();
                     for signal in &signals {
                         match signal {
@@ -609,10 +667,16 @@ impl Interpreter {
             }
 
             // --- Member access ---
-            TypedExprKind::MemberAccess { object: _, field: _ } => {
-                // Bar context fields are bound as locals directly in on_bar,
-                // so member access on structs isn't needed for MVP.
-                Err("member access is not supported in the interpreter".to_string())
+            TypedExprKind::MemberAccess { object, field } => {
+                let obj_val = self.eval_expr(object, locals)?;
+                match obj_val {
+                    Value::Struct { fields: ref field_map, .. } => {
+                        field_map.get(field).cloned().ok_or_else(|| {
+                            format!("runtime error: struct has no field '{}'", field)
+                        })
+                    }
+                    _ => Err(format!("member access requires a struct value, got {}", obj_val)),
+                }
             }
 
             // --- Method call ---
@@ -638,15 +702,40 @@ impl Interpreter {
                         }
                     }
                     (Value::List(items), Value::Int(i)) => {
-                        let idx = *i as usize;
-                        if idx < items.len() {
-                            Ok(items[idx].clone())
+                        if *i < 0 {
+                            Err(format!(
+                                "runtime error: index {} out of bounds for array of size {}",
+                                i,
+                                items.len()
+                            ))
                         } else {
-                            Err(format!("index {} out of bounds (length {})", i, items.len()))
+                            let idx = *i as usize;
+                            if idx >= items.len() {
+                                Err(format!(
+                                    "runtime error: index {} out of bounds for array of size {}",
+                                    i,
+                                    items.len()
+                                ))
+                            } else {
+                                Ok(items[idx].clone())
+                            }
                         }
                     }
                     _ => Err("index access requires a list and integer index".to_string()),
                 }
+            }
+
+            // --- Struct literal ---
+            TypedExprKind::StructLiteral { struct_name, fields } => {
+                let mut field_map = HashMap::new();
+                for (field_name, field_expr) in fields {
+                    let val = self.eval_expr(field_expr, locals)?;
+                    field_map.insert(field_name.clone(), val);
+                }
+                Ok(Value::Struct {
+                    type_name: struct_name.clone(),
+                    fields: field_map,
+                })
             }
         }
     }
@@ -830,17 +919,10 @@ impl Interpreter {
                     Some(expr) => self.eval_expr(expr, locals)?,
                     None => Value::Null,
                 };
-                // Encode the return value as a sentinel error string.
-                // exec_fn_body will intercept this to extract the value.
-                let encoded = match &value {
-                    Value::Float(f) => format!("__RETURN__:float:{}", f),
-                    Value::Int(i) => format!("__RETURN__:int:{}", i),
-                    Value::Bool(b) => format!("__RETURN__:bool:{}", b),
-                    Value::Str(s) => format!("__RETURN__:str:{}", s),
-                    Value::Null => "__RETURN__:null:".to_string(),
-                    _ => "__RETURN__:null:".to_string(),
-                };
-                Err(encoded)
+                // Store the return value and propagate a sentinel error string.
+                // exec_fn_body will intercept this to extract the value from pending_return.
+                self.pending_return = Some(value);
+                Err("__RETURN__".to_string())
             }
         }
     }
@@ -892,10 +974,10 @@ impl Interpreter {
                         Ok(stmt_signals) => {
                             all_signals.extend(stmt_signals);
                         }
-                        Err(e) if e.starts_with("__RETURN__:") => {
+                        Err(e) if e == "__RETURN__" => {
                             // A return statement was hit inside a nested block (if/while/for).
-                            // Decode the value from the sentinel error.
-                            let value = Self::decode_return_value(&e);
+                            // Extract the value from pending_return.
+                            let value = self.pending_return.take().unwrap_or(Value::Null);
                             self.fn_signals.extend(all_signals);
                             return Ok(value);
                         }
@@ -911,6 +993,8 @@ impl Interpreter {
     }
 
     /// Decode a return value from the sentinel error string format.
+    /// Kept for backward compatibility with tests that exercise the sentinel path.
+    #[allow(dead_code)]
     fn decode_return_value(encoded: &str) -> Value {
         let rest = &encoded["__RETURN__:".len()..];
         if let Some(val_str) = rest.strip_prefix("float:") {
@@ -1086,6 +1170,7 @@ mod tests {
         // Build a minimal TypedProgram with params and state
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -1177,6 +1262,7 @@ mod tests {
         // A program with no event handler
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -1222,6 +1308,7 @@ mod tests {
             call_depth: 0,
             max_call_depth: 64,
             fn_signals: Vec::new(),
+            pending_return: None,
         }
     }
 
@@ -1951,6 +2038,7 @@ mod tests {
         // Build a program: on bar { if close > open { OPEN(symbol, 100.0) } }
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -2024,6 +2112,7 @@ mod tests {
     fn test_on_bar_no_handler_returns_empty() {
         let program = TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,

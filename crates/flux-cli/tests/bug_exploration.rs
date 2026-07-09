@@ -85,7 +85,8 @@ fn bug1_indicator_state_collision_sma_different_periods() {
 
     let program = TypedProgram {
         imports: vec![],
-            functions: vec![],
+            structs: vec![],
+        functions: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -295,7 +296,8 @@ fn bug5_6_position_tracking_prevents_duplicate_opens() {
 
     let program = TypedProgram {
         imports: vec![],
-            functions: vec![],
+            structs: vec![],
+        functions: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

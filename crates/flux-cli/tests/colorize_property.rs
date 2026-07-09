@@ -81,7 +81,7 @@ fn is_keyword(s: &str) -> bool {
         s,
         "strategy" | "params" | "state" | "on" | "if" | "elif" | "else" | "for" | "while"
             | "return" | "from" | "import" | "and" | "or" | "not" | "true" | "false" | "null"
-            | "in"
+            | "in" | "fn" | "struct" | "data" | "connector"
     )
 }
 
@@ -398,6 +398,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
         proptest::collection::vec(arb_strategy_item(), 1..4),
     )
         .prop_map(|(imports, name, body)| Program {
+            structs: vec![],
             imports,
             functions: vec![],
             data_block: None,

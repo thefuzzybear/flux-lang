@@ -471,8 +471,8 @@ fn value_to_serialized(value: &Value) -> Option<SerializedValue> {
                 v.iter().map(|f| SerializedValue::Float(*f)).collect();
             Some(SerializedValue::List(serialized))
         }
-        // Signals, Null, and MatFloat are not persisted
-        Value::Null | Value::Signal(_) | Value::MatFloat { .. } => None,
+        // Signals, Null, MatFloat, and Struct are not persisted
+        Value::Null | Value::Signal(_) | Value::MatFloat { .. } | Value::Struct { .. } => None,
     }
 }
 

@@ -180,11 +180,49 @@ impl ParserState {
         Ok(Expr { kind, span })
     }
 
-    /// Parse an identifier expression.
+    /// Parse an identifier expression, or a struct literal if the
+    /// identifier is immediately followed by `{` and struct literal
+    /// parsing isn't currently suppressed (see `forbid_struct_literal`).
     fn parse_ident_expr(&mut self) -> Result<Expr> {
         let (name, span) = self.expect_ident()?;
+
+        if self.check(&Token::OpenBrace) && !self.struct_literal_forbidden() {
+            return self.parse_struct_literal(name, span);
+        }
+
         Ok(Expr {
             kind: ExprKind::Ident(name),
+            span,
+        })
+    }
+
+    /// Parse a struct literal: `StructName { field = value, ... }`.
+    /// `struct_name` and `name_span` are the already-consumed leading
+    /// identifier; the cursor is positioned at the `{`.
+    fn parse_struct_literal(&mut self, struct_name: String, name_span: Span) -> Result<Expr> {
+        self.advance(); // consume `{`
+
+        let mut fields = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            let (field_name, _) = self.expect_ident()?;
+            self.expect(&Token::Assign)?;
+            // Field values may themselves contain struct literals (e.g.
+            // nested `Outer { inner = Inner { x = 1 } }`), so allow them
+            // here regardless of the enclosing suppression state.
+            let value = self.with_struct_literal_allowed(|state| state.parse_expr(0))?;
+            fields.push((field_name, value));
+
+            if self.check(&Token::Comma) {
+                self.advance(); // consume comma
+            } else {
+                break;
+            }
+        }
+
+        let end_span = self.expect(&Token::CloseBrace)?;
+        let span = Span::new(name_span.start, end_span.end);
+        Ok(Expr {
+            kind: ExprKind::StructLiteral { struct_name, fields },
             span,
         })
     }
@@ -194,16 +232,21 @@ impl ParserState {
         self.advance(); // consume OpenParen
         let mut args = Vec::new();
 
-        if !self.check(&Token::CloseParen) {
-            args.push(self.parse_expr(0)?);
-            while self.check(&Token::Comma) {
-                self.advance(); // consume comma
-                if self.check(&Token::CloseParen) {
-                    break; // trailing comma
+        // Arguments are enclosed in parens, so a `{` here can no longer be
+        // confused with a statement body — allow struct literals again.
+        self.with_struct_literal_allowed(|state| {
+            if !state.check(&Token::CloseParen) {
+                args.push(state.parse_expr(0)?);
+                while state.check(&Token::Comma) {
+                    state.advance(); // consume comma
+                    if state.check(&Token::CloseParen) {
+                        break; // trailing comma
+                    }
+                    args.push(state.parse_expr(0)?);
                 }
-                args.push(self.parse_expr(0)?);
             }
-        }
+            Ok(())
+        })?;
 
         let end_span = self.expect(&Token::CloseParen)?;
         let span = Span::new(function.span.start, end_span.end);
@@ -227,16 +270,22 @@ impl ParserState {
             self.advance(); // consume OpenParen
             let mut args = Vec::new();
 
-            if !self.check(&Token::CloseParen) {
-                args.push(self.parse_expr(0)?);
-                while self.check(&Token::Comma) {
-                    self.advance();
-                    if self.check(&Token::CloseParen) {
-                        break; // trailing comma
+            // Arguments are enclosed in parens, so a `{` here can no
+            // longer be confused with a statement body — allow struct
+            // literals again.
+            self.with_struct_literal_allowed(|state| {
+                if !state.check(&Token::CloseParen) {
+                    args.push(state.parse_expr(0)?);
+                    while state.check(&Token::Comma) {
+                        state.advance();
+                        if state.check(&Token::CloseParen) {
+                            break; // trailing comma
+                        }
+                        args.push(state.parse_expr(0)?);
                     }
-                    args.push(self.parse_expr(0)?);
                 }
-            }
+                Ok(())
+            })?;
 
             let end_span = self.expect(&Token::CloseParen)?;
             let span = Span::new(lhs.span.start, end_span.end);
@@ -264,7 +313,9 @@ impl ParserState {
     /// Parse an index access expression: `lhs[index]`
     fn parse_index_expr(&mut self, lhs: Expr) -> Result<Expr> {
         self.advance(); // consume OpenBracket
-        let index = self.parse_expr(0)?;
+        // Enclosed in brackets, so a `{` here can no longer be confused
+        // with a statement body — allow struct literals again.
+        let index = self.with_struct_literal_allowed(|state| state.parse_expr(0))?;
         let end_span = self.expect(&Token::CloseBracket)?;
         let span = Span::new(lhs.span.start, end_span.end);
         Ok(Expr {
@@ -282,7 +333,9 @@ impl ParserState {
         if self.check(&Token::CloseParen) {
             return Err(self.error_expected("expression"));
         }
-        let expr = self.parse_expr(0)?;
+        // Enclosed in parens, so a `{` here can no longer be confused with
+        // a statement body — allow struct literals again.
+        let expr = self.with_struct_literal_allowed(|state| state.parse_expr(0))?;
         self.expect(&Token::CloseParen)?;
         Ok(expr)
     }
@@ -293,16 +346,21 @@ impl ParserState {
         self.advance(); // consume OpenBracket
         let mut elements = Vec::new();
 
-        if !self.check(&Token::CloseBracket) {
-            elements.push(self.parse_expr(0)?);
-            while self.check(&Token::Comma) {
-                self.advance();
-                if self.check(&Token::CloseBracket) {
-                    break; // trailing comma
+        // Enclosed in brackets, so a `{` here can no longer be confused
+        // with a statement body — allow struct literals again.
+        self.with_struct_literal_allowed(|state| {
+            if !state.check(&Token::CloseBracket) {
+                elements.push(state.parse_expr(0)?);
+                while state.check(&Token::Comma) {
+                    state.advance();
+                    if state.check(&Token::CloseBracket) {
+                        break; // trailing comma
+                    }
+                    elements.push(state.parse_expr(0)?);
                 }
-                elements.push(self.parse_expr(0)?);
             }
-        }
+            Ok(())
+        })?;
 
         let end_span = self.expect(&Token::CloseBracket)?;
         let span = Span::new(start_span.start, end_span.end);
@@ -971,6 +1029,181 @@ mod tests {
         let result = parse_expr(vec![
             Token::OpenParen,
             Token::CloseParen,
+            Token::Eof,
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    // ===== 13. Struct literal parsing =====
+
+    #[test]
+    fn struct_literal_empty() {
+        // Quote {}
+        let expr = parse_expr(vec![
+            Token::Ident("Quote".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::StructLiteral { struct_name, fields } => {
+                assert_eq!(struct_name, "Quote");
+                assert!(fields.is_empty());
+            }
+            _ => panic!("Expected StructLiteral, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn struct_literal_single_field() {
+        // Tick { price = 100 }
+        let expr = parse_expr(vec![
+            Token::Ident("Tick".to_string()),
+            Token::OpenBrace,
+            Token::Ident("price".to_string()),
+            Token::Assign,
+            Token::Int(100),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::StructLiteral { struct_name, fields } => {
+                assert_eq!(struct_name, "Tick");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "price");
+                assert_eq!(fields[0].1.kind, ExprKind::IntLiteral(100));
+            }
+            _ => panic!("Expected StructLiteral, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn struct_literal_multi_field() {
+        // Quote { bid = 100.0, ask = 101.0, size = 5 }
+        let expr = parse_expr(vec![
+            Token::Ident("Quote".to_string()),
+            Token::OpenBrace,
+            Token::Ident("bid".to_string()),
+            Token::Assign,
+            Token::Float(100.0),
+            Token::Comma,
+            Token::Ident("ask".to_string()),
+            Token::Assign,
+            Token::Float(101.0),
+            Token::Comma,
+            Token::Ident("size".to_string()),
+            Token::Assign,
+            Token::Int(5),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::StructLiteral { struct_name, fields } => {
+                assert_eq!(struct_name, "Quote");
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0], ("bid".to_string(), Expr {
+                    kind: ExprKind::FloatLiteral(100.0),
+                    span: fields[0].1.span,
+                }));
+                assert_eq!(fields[1].0, "ask");
+                assert_eq!(fields[1].1.kind, ExprKind::FloatLiteral(101.0));
+                assert_eq!(fields[2].0, "size");
+                assert_eq!(fields[2].1.kind, ExprKind::IntLiteral(5));
+            }
+            _ => panic!("Expected StructLiteral, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn struct_literal_trailing_comma() {
+        // Tick { price = 100, }
+        let expr = parse_expr(vec![
+            Token::Ident("Tick".to_string()),
+            Token::OpenBrace,
+            Token::Ident("price".to_string()),
+            Token::Assign,
+            Token::Int(100),
+            Token::Comma,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::StructLiteral { struct_name, fields } => {
+                assert_eq!(struct_name, "Tick");
+                assert_eq!(fields.len(), 1);
+            }
+            _ => panic!("Expected StructLiteral, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn struct_literal_nested() {
+        // Outer { inner = Inner { x = 1 } }
+        let expr = parse_expr(vec![
+            Token::Ident("Outer".to_string()),
+            Token::OpenBrace,
+            Token::Ident("inner".to_string()),
+            Token::Assign,
+            Token::Ident("Inner".to_string()),
+            Token::OpenBrace,
+            Token::Ident("x".to_string()),
+            Token::Assign,
+            Token::Int(1),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::StructLiteral { struct_name, fields } => {
+                assert_eq!(struct_name, "Outer");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "inner");
+                match &fields[0].1.kind {
+                    ExprKind::StructLiteral { struct_name, fields } => {
+                        assert_eq!(struct_name, "Inner");
+                        assert_eq!(fields.len(), 1);
+                        assert_eq!(fields[0].0, "x");
+                        assert_eq!(fields[0].1.kind, ExprKind::IntLiteral(1));
+                    }
+                    other => panic!("Expected nested StructLiteral, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected StructLiteral, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn struct_literal_field_access_disambiguated_from_bare_ident() {
+        // A bare identifier not followed by `{` should still parse as Ident.
+        let expr = parse_expr(vec![
+            Token::Ident("close".to_string()),
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(expr.kind, ExprKind::Ident("close".to_string()));
+    }
+
+    #[test]
+    fn error_missing_close_brace_in_struct_literal() {
+        // Tick { price = 100  — missing closing brace
+        let result = parse_expr(vec![
+            Token::Ident("Tick".to_string()),
+            Token::OpenBrace,
+            Token::Ident("price".to_string()),
+            Token::Assign,
+            Token::Int(100),
             Token::Eof,
         ]);
 

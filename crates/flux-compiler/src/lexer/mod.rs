@@ -148,6 +148,7 @@ fn convert_token(
         LogosToken::Null => Ok(Token::Null),
         LogosToken::Data => Ok(Token::Data),
         LogosToken::Connector => Ok(Token::Connector),
+        LogosToken::Struct => Ok(Token::Struct),
 
         // Operators
         LogosToken::ColonColon => Ok(Token::ColonColon),
@@ -157,6 +158,7 @@ fn convert_token(
         LogosToken::Ge => Ok(Token::Ge),
         LogosToken::AndAnd => Ok(Token::AndAnd),
         LogosToken::OrOr => Ok(Token::OrOr),
+        LogosToken::Arrow => Ok(Token::Arrow),
         LogosToken::Plus => Ok(Token::Plus),
         LogosToken::Minus => Ok(Token::Minus),
         LogosToken::Star => Ok(Token::Star),
@@ -166,6 +168,7 @@ fn convert_token(
         LogosToken::Gt => Ok(Token::Gt),
         LogosToken::Bang => Ok(Token::Bang),
         LogosToken::Assign => Ok(Token::Assign),
+        LogosToken::At => Ok(Token::At),
 
         // Delimiters
         LogosToken::OpenParen => Ok(Token::OpenParen),
@@ -177,6 +180,7 @@ fn convert_token(
         LogosToken::Comma => Ok(Token::Comma),
         LogosToken::Dot => Ok(Token::Dot),
         LogosToken::Colon => Ok(Token::Colon),
+        LogosToken::Semicolon => Ok(Token::Semicolon),
 
         // Identifiers
         LogosToken::Ident => {
@@ -1043,12 +1047,12 @@ mod tests {
     #[test]
     fn error_multiple_invalid_chars_each_produce_errors() {
         // Multiple invalid characters should each produce their own error
-        let result = lex("@ $");
+        let result = lex("~ $");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("byte 0: unexpected character '@'"),
-            "Expected '@' error at byte 0, got: {err_msg}"
+            err_msg.contains("byte 0: unexpected character '~'"),
+            "Expected '~' error at byte 0, got: {err_msg}"
         );
         assert!(
             err_msg.contains("byte 2: unexpected character '$'"),
@@ -1058,9 +1062,9 @@ mod tests {
 
     #[test]
     fn error_recovery_continues_scanning_after_invalid_chars() {
-        // The lexer should report the error at byte 6 (position of @)
+        // The lexer should report the error at byte 6 (position of ~)
         // even though valid tokens surround it
-        let result = lex("valid @ identifier");
+        let result = lex("valid ~ identifier");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -1071,8 +1075,8 @@ mod tests {
 
     #[test]
     fn error_count_capped_at_100() {
-        // Create input with 101 invalid '@' characters
-        let input = "@".repeat(101);
+        // Create input with 101 invalid '~' characters
+        let input = "~".repeat(101);
         let result = lex(&input);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1266,6 +1270,72 @@ mod tests {
             ]
         );
     }
+
+    // --- Struct/decorator token tests (flux-structs Task 1.2) ---
+    // Validates: Requirements 1.1, 21.1, 21.3, 21.4, 33.4
+
+    #[test]
+    fn lex_struct_definition() {
+        // `struct Foo { x: f64 }` should produce
+        // [Struct, Ident("Foo"), OpenBrace, Ident("x"), Colon, Ident("f64"), CloseBrace]
+        let tokens = lex("struct Foo { x: f64 }").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Struct,
+                Token::Ident("Foo".to_string()),
+                Token::OpenBrace,
+                Token::Ident("x".to_string()),
+                Token::Colon,
+                Token::Ident("f64".to_string()),
+                Token::CloseBrace,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_decorator_with_int_arg() {
+        // `@aligned(64)` should produce [At, Ident("aligned"), OpenParen, Int(64), CloseParen]
+        let tokens = lex("@aligned(64)").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::At,
+                Token::Ident("aligned".to_string()),
+                Token::OpenParen,
+                Token::Int(64),
+                Token::CloseParen,
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_decorator_without_args() {
+        // `@packed` should produce [At, Ident("packed")]
+        let tokens = lex("@packed").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::At, Token::Ident("packed".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_bitint_type_call_syntax() {
+        // `int(8)` should produce [Ident("int"), OpenParen, Int(8), CloseParen]
+        let tokens = lex("int(8)").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("int".to_string()),
+                Token::OpenParen,
+                Token::Int(8),
+                Token::CloseParen,
+                Token::Eof,
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1279,3 +1349,4 @@ mod tests_colon_colon_property;
 
 #[cfg(test)]
 mod comments_property;
+

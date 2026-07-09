@@ -112,7 +112,7 @@ proptest! {
             resolved_fn.params.len()
         );
         prop_assert_eq!(
-            &resolved_fn.params[0], &param_name,
+            &resolved_fn.params[0].name, &param_name,
             "Parameter name mismatch"
         );
     }
@@ -193,7 +193,7 @@ proptest! {
                     f.name, f.params.len()
                 );
                 prop_assert_eq!(
-                    &f.params[0], &param,
+                    &f.params[0].name, &param,
                     "Parameter mismatch for function '{}'",
                     f.name
                 );

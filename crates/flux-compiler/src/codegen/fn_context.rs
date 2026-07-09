@@ -170,6 +170,9 @@ fn expr_references_market_data(expr: &TypedExpr, param_names: &HashSet<&str>) ->
         | TypedExprKind::StringLiteral(_)
         | TypedExprKind::BoolLiteral(_)
         | TypedExprKind::NullLiteral => false,
+        TypedExprKind::StructLiteral { fields, .. } => {
+            fields.iter().any(|(_, expr)| expr_references_market_data(expr, param_names))
+        }
     }
 }
 
@@ -263,6 +266,9 @@ fn expr_emits_signals(expr: &TypedExpr) -> bool {
         | TypedExprKind::StringLiteral(_)
         | TypedExprKind::BoolLiteral(_)
         | TypedExprKind::NullLiteral => false,
+        TypedExprKind::StructLiteral { fields, .. } => {
+            fields.iter().any(|(_, expr)| expr_emits_signals(expr))
+        }
     }
 }
 
@@ -379,6 +385,11 @@ fn extract_calls_from_expr(
         | TypedExprKind::StringLiteral(_)
         | TypedExprKind::BoolLiteral(_)
         | TypedExprKind::NullLiteral => {}
+        TypedExprKind::StructLiteral { fields, .. } => {
+            for (_, field_expr) in fields {
+                extract_calls_from_expr(field_expr, fn_names, calls);
+            }
+        }
     }
 }
 
@@ -410,6 +421,7 @@ mod tests {
         TypedFnDef {
             name: name.to_string(),
             params: params.iter().map(|s| s.to_string()).collect(),
+            param_types: params.iter().map(|_| FluxType::Float).collect(),
             body,
             return_type: FluxType::Float,
             span: Span::new(0, 1),

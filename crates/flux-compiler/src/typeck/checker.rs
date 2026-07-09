@@ -5,7 +5,7 @@
 //! with resolved types on every expression node. It maintains a scoped
 //! environment for identifier resolution and enforces all type rules.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{CompileError, Result};
 use crate::lexer::Span;
@@ -16,6 +16,13 @@ use super::env::TypeEnvironment;
 use super::typed_ast::*;
 use super::types::{FluxType, FnParams};
 
+/// Information about a registered struct definition, stored in the struct registry.
+#[derive(Debug, Clone)]
+pub(crate) struct StructDefInfo {
+    pub name: String,
+    pub fields: Vec<(String, FluxType)>,
+}
+
 /// The core type checker. Walks the untyped AST, resolves identifiers,
 /// validates type compatibility, and produces an annotated typed AST.
 pub(crate) struct TypeChecker {
@@ -23,6 +30,10 @@ pub(crate) struct TypeChecker {
     in_event_handler: bool,
     in_function_body: bool,
     state_var_names: HashSet<String>,
+    /// Registry of struct definitions, populated in dependency order.
+    struct_registry: HashMap<String, StructDefInfo>,
+    /// The declared return type of the function currently being checked (if any).
+    current_fn_return_type: Option<FluxType>,
 }
 
 impl TypeChecker {
@@ -33,6 +44,8 @@ impl TypeChecker {
             in_event_handler: false,
             in_function_body: false,
             state_var_names: HashSet::new(),
+            struct_registry: HashMap::new(),
+            current_fn_return_type: None,
         }
     }
 
@@ -40,6 +53,9 @@ impl TypeChecker {
     pub fn check_program(&mut self, program: Program) -> Result<TypedProgram> {
         // Register imports into global scope
         self.register_imports(&program.imports)?;
+
+        // Register struct definitions (validates fields, resolves types, topological order)
+        let typed_structs = self.register_structs(&program.structs)?;
 
         // Register user-defined functions into global scope (before strategy checking)
         self.register_functions(&program.functions)?;
@@ -74,6 +90,7 @@ impl TypeChecker {
 
         Ok(TypedProgram {
             imports: program.imports,
+            structs: typed_structs,
             functions: typed_functions,
             data_block: typed_data_block,
             connector_block: typed_connector_block,
@@ -252,6 +269,267 @@ impl TypeChecker {
         Ok(())
     }
 
+    /// Register struct definitions in the struct registry.
+    ///
+    /// Structs are registered in topological order by field-type dependencies:
+    /// if struct A has a field of type B, B must be registered before A.
+    /// Reports errors for:
+    /// - Duplicate field names within a struct
+    /// - Field types referencing undefined struct names
+    ///
+    /// Returns typed struct definitions in dependency-sorted order for inclusion
+    /// in the TypedProgram (used by codegen for ordered emission).
+    fn register_structs(&mut self, structs: &[StructDef]) -> Result<Vec<TypedStructDef>> {
+        // Topologically sort structs by field-type dependencies
+        let sorted = self.topological_sort_structs(structs)?;
+
+        let mut typed_structs = Vec::with_capacity(sorted.len());
+        for idx in sorted {
+            let struct_def = &structs[idx];
+            self.register_single_struct(struct_def)?;
+
+            // Build the typed struct def from the now-registered info
+            let info = &self.struct_registry[&struct_def.name];
+            let typed_fields = info
+                .fields
+                .iter()
+                .zip(struct_def.fields.iter())
+                .map(|((name, resolved_type), field)| TypedStructField {
+                    name: name.clone(),
+                    resolved_type: resolved_type.clone(),
+                    span: field.span,
+                })
+                .collect();
+
+            typed_structs.push(TypedStructDef {
+                name: struct_def.name.clone(),
+                fields: typed_fields,
+                span: struct_def.span,
+            });
+        }
+        Ok(typed_structs)
+    }
+
+    /// Topologically sort struct definitions by field-type dependencies.
+    ///
+    /// Returns indices into the original slice in dependency order.
+    /// If struct A contains a field of type B, B's index will appear before A's.
+    fn topological_sort_structs(&self, structs: &[StructDef]) -> Result<Vec<usize>> {
+        // Build a name → index map
+        let name_to_idx: HashMap<&str, usize> = structs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.name.as_str(), i))
+            .collect();
+
+        // Build adjacency list: edges[i] contains the indices that i depends on
+        let mut deps: Vec<Vec<usize>> = vec![Vec::new(); structs.len()];
+        for (i, struct_def) in structs.iter().enumerate() {
+            for field in &struct_def.fields {
+                for dep_name in Self::field_type_struct_refs(&field.field_type) {
+                    if let Some(&dep_idx) = name_to_idx.get(dep_name.as_str()) {
+                        deps[i].push(dep_idx);
+                    }
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        let n = structs.len();
+
+        // Build reverse adjacency: rev_adj[dep] = list of nodes that depend on dep
+        let mut rev_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, node_deps) in deps.iter().enumerate() {
+            for &dep in node_deps {
+                rev_adj[dep].push(i);
+            }
+        }
+
+        // in_degree[i] = number of structs that i depends on
+        let mut in_degree: Vec<usize> = deps.iter().map(|d| d.len()).collect();
+
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 {
+                queue.push_back(i);
+            }
+        }
+
+        let mut order = Vec::with_capacity(n);
+        while let Some(node) = queue.pop_front() {
+            order.push(node);
+            // For every struct that depends on `node`, decrement its in-degree
+            for &dependent in &rev_adj[node] {
+                in_degree[dependent] -= 1;
+                if in_degree[dependent] == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+
+        if order.len() != n {
+            // Cycle detected — find a struct involved in the cycle for the error
+            // Pick the first struct not in the order
+            let in_cycle = (0..n).find(|i| !order.contains(i)).unwrap_or(0);
+            return Err(self.type_error(
+                structs[in_cycle].span,
+                format!(
+                    "circular dependency detected involving struct '{}'",
+                    structs[in_cycle].name
+                ),
+            ));
+        }
+
+        Ok(order)
+    }
+
+    /// Extract struct name references from a type annotation.
+    fn field_type_struct_refs(ty: &TypeAnnotation) -> Vec<String> {
+        match ty {
+            TypeAnnotation::Named(name) => vec![name.clone()],
+            TypeAnnotation::FixedArray(elem, _) => Self::field_type_struct_refs(elem),
+            _ => vec![],
+        }
+    }
+
+    /// Register a single struct definition: validate fields, resolve types, insert into registry.
+    fn register_single_struct(&mut self, struct_def: &StructDef) -> Result<()> {
+        let mut seen_fields: HashSet<String> = HashSet::new();
+        let mut resolved_fields: Vec<(String, FluxType)> = Vec::new();
+
+        for field in &struct_def.fields {
+            // Check for duplicate field names
+            if !seen_fields.insert(field.name.clone()) {
+                return Err(self.type_error(
+                    field.span,
+                    format!(
+                        "duplicate field '{}' in struct '{}'",
+                        field.name, struct_def.name
+                    ),
+                ));
+            }
+
+            // Resolve the field type
+            let resolved_type = self.resolve_type_annotation(
+                &field.field_type,
+                &struct_def.name,
+                &field.name,
+                field.span,
+            )?;
+            resolved_fields.push((field.name.clone(), resolved_type));
+        }
+
+        // Insert into the struct registry
+        self.struct_registry.insert(
+            struct_def.name.clone(),
+            StructDefInfo {
+                name: struct_def.name.clone(),
+                fields: resolved_fields,
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Resolve a TypeAnnotation to a FluxType, checking that Named references
+    /// exist in the struct registry.
+    fn resolve_type_annotation(
+        &self,
+        annotation: &TypeAnnotation,
+        struct_name: &str,
+        field_name: &str,
+        span: Span,
+    ) -> Result<FluxType> {
+        match annotation {
+            TypeAnnotation::F64 => Ok(FluxType::Float),
+            TypeAnnotation::Int => Ok(FluxType::Int),
+            TypeAnnotation::Bool => Ok(FluxType::Bool),
+            TypeAnnotation::Str => Ok(FluxType::String),
+            TypeAnnotation::Named(name) => {
+                if self.struct_registry.contains_key(name) {
+                    Ok(FluxType::Struct(name.clone()))
+                } else {
+                    Err(self.type_error(
+                        span,
+                        format!(
+                            "unknown type '{}' in struct '{}' field '{}'",
+                            name, struct_name, field_name
+                        ),
+                    ))
+                }
+            }
+            TypeAnnotation::FixedArray(elem_type, size) => {
+                if *size == 0 {
+                    return Err(self.type_error(
+                        span,
+                        "array size must be positive, got 0".to_string(),
+                    ));
+                }
+                let resolved_elem = self.resolve_type_annotation(
+                    elem_type,
+                    struct_name,
+                    field_name,
+                    span,
+                )?;
+                Ok(FluxType::FixedArray(Box::new(resolved_elem), *size))
+            }
+            TypeAnnotation::BitInt(_) => {
+                // BitInt is used in @bitfield structs, resolve as Int for now
+                Ok(FluxType::Int)
+            }
+        }
+    }
+
+    /// Resolve a type annotation in a function context (parameter or return type).
+    ///
+    /// Unlike `resolve_type_annotation` which formats errors for struct fields,
+    /// this variant produces errors appropriate for function signatures.
+    fn resolve_fn_type_annotation(
+        &self,
+        annotation: &TypeAnnotation,
+        fn_name: &str,
+        context: &str,
+        span: Span,
+    ) -> Result<FluxType> {
+        match annotation {
+            TypeAnnotation::F64 => Ok(FluxType::Float),
+            TypeAnnotation::Int => Ok(FluxType::Int),
+            TypeAnnotation::Bool => Ok(FluxType::Bool),
+            TypeAnnotation::Str => Ok(FluxType::String),
+            TypeAnnotation::Named(name) => {
+                if self.struct_registry.contains_key(name) {
+                    Ok(FluxType::Struct(name.clone()))
+                } else {
+                    Err(self.type_error(
+                        span,
+                        format!(
+                            "unknown type '{}' in function '{}' {}",
+                            name, fn_name, context
+                        ),
+                    ))
+                }
+            }
+            TypeAnnotation::FixedArray(elem_type, size) => {
+                if *size == 0 {
+                    return Err(self.type_error(
+                        span,
+                        "array size must be positive, got 0".to_string(),
+                    ));
+                }
+                let resolved_elem = self.resolve_fn_type_annotation(
+                    elem_type,
+                    fn_name,
+                    context,
+                    span,
+                )?;
+                Ok(FluxType::FixedArray(Box::new(resolved_elem), *size))
+            }
+            TypeAnnotation::BitInt(_) => {
+                Ok(FluxType::Int)
+            }
+        }
+    }
+
     /// Register user-defined functions in the type environment.
     ///
     /// Each function is registered as `FluxType::Fn { params: Fixed(vec![Float; n]), ret: Float }`.
@@ -265,11 +543,40 @@ impl TypeChecker {
                     format!("duplicate function definition '{}'", fn_def.name),
                 ));
             }
+
+            // Resolve parameter types: use annotation if present, default to Float
+            let mut param_types = Vec::new();
+            for param in &fn_def.params {
+                let param_ty = if let Some(ref annotation) = param.param_type {
+                    self.resolve_fn_type_annotation(
+                        annotation,
+                        &fn_def.name,
+                        &format!("parameter '{}'", param.name),
+                        param.span,
+                    )?
+                } else {
+                    FluxType::Float
+                };
+                param_types.push(param_ty);
+            }
+
+            // Resolve return type: use annotation if present, default to Float
+            let ret_type = if let Some(ref annotation) = fn_def.return_type {
+                self.resolve_fn_type_annotation(
+                    annotation,
+                    &fn_def.name,
+                    "return type",
+                    fn_def.span,
+                )?
+            } else {
+                FluxType::Float
+            };
+
             self.env.insert(
                 fn_def.name.clone(),
                 FluxType::Fn {
-                    params: FnParams::Fixed(vec![FluxType::Float; fn_def.params.len()]),
-                    ret: Box::new(FluxType::Float),
+                    params: FnParams::Fixed(param_types),
+                    ret: Box::new(ret_type),
                 },
             );
         }
@@ -308,18 +615,46 @@ impl TypeChecker {
     /// Type-check a single user-defined function body.
     ///
     /// Pushes a new scope with:
-    /// - Parameter bindings (all typed as Float)
+    /// - Parameter bindings (typed according to annotations, or Float if untyped)
     /// - Bar context bindings (close, open, high, low, volume, symbol, in_position)
     /// - Signal function bindings (OPEN, CLOSE)
     /// - Math/stats/portfolio function bindings
-    /// Then checks all body statements and infers the return type.
+    /// Then checks all body statements and validates the return type.
     fn check_fn_def(&mut self, fn_def: FnDef) -> Result<TypedFnDef> {
         self.env.push_scope();
         self.in_function_body = true;
 
-        // Bind parameters as Float
+        // Resolve declared return type if present
+        let declared_return_type = if let Some(ref annotation) = fn_def.return_type {
+            Some(self.resolve_fn_type_annotation(
+                annotation,
+                &fn_def.name,
+                "return type",
+                fn_def.span,
+            )?)
+        } else {
+            None
+        };
+
+        // Store the declared return type for return-statement validation
+        let prev_fn_return_type = self.current_fn_return_type.take();
+        self.current_fn_return_type = declared_return_type.clone();
+
+        // Bind parameters with resolved types
+        let mut param_types = Vec::new();
         for param in &fn_def.params {
-            self.env.insert(param.clone(), FluxType::Float);
+            let param_ty = if let Some(ref annotation) = param.param_type {
+                self.resolve_fn_type_annotation(
+                    annotation,
+                    &fn_def.name,
+                    &format!("parameter '{}'", param.name),
+                    param.span,
+                )?
+            } else {
+                FluxType::Float
+            };
+            self.env.insert(param.name.clone(), param_ty.clone());
+            param_types.push(param_ty);
         }
 
         // Inject bar context (same bindings as event handlers)
@@ -344,14 +679,20 @@ impl TypeChecker {
         }
 
         // Infer return type from return statements (or Null if none)
-        let return_type = self.infer_fn_return_type(&typed_body);
+        let return_type = if let Some(ref declared) = declared_return_type {
+            declared.clone()
+        } else {
+            self.infer_fn_return_type(&typed_body)
+        };
 
+        self.current_fn_return_type = prev_fn_return_type;
         self.in_function_body = false;
         self.env.pop_scope();
 
         Ok(TypedFnDef {
             name: fn_def.name,
-            params: fn_def.params,
+            params: fn_def.params.into_iter().map(|p| p.name).collect(),
+            param_types,
             body: typed_body,
             return_type,
             span: fn_def.span,
@@ -843,8 +1184,44 @@ impl TypeChecker {
 
     fn check_return(&mut self, ret: ReturnStmt) -> Result<TypedStmt> {
         let typed_value = if let Some(val) = ret.value {
-            Some(self.check_expr(val)?)
+            let typed_expr = self.check_expr(val)?;
+
+            // Validate return expression type against declared return type
+            if let Some(ref declared_ret) = self.current_fn_return_type {
+                if !typed_expr.resolved_type.is_assignable_to(declared_ret) {
+                    // Use struct-specific error format when both types are structs
+                    let msg = match (&typed_expr.resolved_type, declared_ret) {
+                        (FluxType::Struct(actual), FluxType::Struct(expected)) => {
+                            format!(
+                                "expected struct '{}', got struct '{}'",
+                                expected, actual
+                            )
+                        }
+                        _ => {
+                            format!(
+                                "expected return type {}, got {}",
+                                declared_ret, typed_expr.resolved_type
+                            )
+                        }
+                    };
+                    return Err(self.type_error(typed_expr.span, msg));
+                }
+            }
+
+            Some(typed_expr)
         } else {
+            // Return with no value — check that declared return type is Null/Void (or absent)
+            if let Some(ref declared_ret) = self.current_fn_return_type {
+                if *declared_ret != FluxType::Null && *declared_ret != FluxType::Void {
+                    return Err(self.type_error(
+                        ret.span,
+                        format!(
+                            "expected return type {}, got Null",
+                            declared_ret
+                        ),
+                    ));
+                }
+            }
             None
         };
         Ok(TypedStmt::Return(TypedReturnStmt {
@@ -914,6 +1291,10 @@ impl TypeChecker {
             ExprKind::MemberAccess { object, field } => {
                 self.check_member_access(*object, &field, span)
             }
+            ExprKind::StructLiteral {
+                struct_name,
+                fields,
+            } => self.check_struct_literal(&struct_name, fields, span),
         }
     }
 
@@ -1178,16 +1559,25 @@ impl TypeChecker {
                 {
                     let typed_arg = self.check_expr(arg)?;
                     if !typed_arg.resolved_type.is_assignable_to(expected_ty) {
-                        return Err(self.type_error(
-                            typed_arg.span,
-                            format!(
-                                "'{}' argument {} must be {}, found {}",
-                                fn_name,
-                                i + 1,
-                                expected_ty,
-                                typed_arg.resolved_type
-                            ),
-                        ));
+                        // Use struct-specific error format when both types are structs
+                        let msg = match (&typed_arg.resolved_type, expected_ty) {
+                            (FluxType::Struct(actual), FluxType::Struct(expected)) => {
+                                format!(
+                                    "expected struct '{}', got struct '{}'",
+                                    expected, actual
+                                )
+                            }
+                            _ => {
+                                format!(
+                                    "'{}' argument {} must be {}, found {}",
+                                    fn_name,
+                                    i + 1,
+                                    expected_ty,
+                                    typed_arg.resolved_type
+                                )
+                            }
+                        };
+                        return Err(self.type_error(typed_arg.span, msg));
                     }
                     typed_args.push(typed_arg);
                 }
@@ -1401,6 +1791,19 @@ impl TypeChecker {
                 }
                 t.as_ref().clone()
             }
+            FluxType::FixedArray(elem_type, _size) => {
+                // FixedArray index must be Int
+                if typed_index.resolved_type != FluxType::Int {
+                    return Err(self.type_error(
+                        typed_index.span,
+                        format!(
+                            "index must be Int, found {}",
+                            typed_index.resolved_type
+                        ),
+                    ));
+                }
+                elem_type.as_ref().clone()
+            }
             other => {
                 return Err(self.type_error(
                     span,
@@ -1510,7 +1913,43 @@ impl TypeChecker {
         span: Span,
     ) -> Result<TypedExpr> {
         let typed_object = self.check_expr(object)?;
-        // Currently no types in Flux support member access (no structs/objects)
+
+        // Handle struct field access
+        if let FluxType::Struct(ref struct_name) = typed_object.resolved_type {
+            if let Some(struct_info) = self.struct_registry.get(struct_name).cloned() {
+                // Look up the field by name
+                if let Some((_field_name, field_type)) =
+                    struct_info.fields.iter().find(|(name, _)| name == field)
+                {
+                    return Ok(TypedExpr {
+                        kind: TypedExprKind::MemberAccess {
+                            object: Box::new(typed_object),
+                            field: field.to_string(),
+                        },
+                        resolved_type: field_type.clone(),
+                        span,
+                    });
+                } else {
+                    // Field doesn't exist — report error with available fields
+                    let available: Vec<&str> = struct_info
+                        .fields
+                        .iter()
+                        .map(|(name, _)| name.as_str())
+                        .collect();
+                    return Err(self.type_error(
+                        span,
+                        format!(
+                            "struct '{}' has no field '{}'. Available: {}",
+                            struct_name,
+                            field,
+                            available.join(", ")
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Non-struct types don't support member access
         Err(self.type_error(
             span,
             format!(
@@ -1518,6 +1957,97 @@ impl TypeChecker {
                 typed_object.resolved_type, field
             ),
         ))
+    }
+
+    /// Type-check a struct literal expression.
+    ///
+    /// Validates:
+    /// 1. The struct name is defined in the struct registry
+    /// 2. No unknown fields are provided
+    /// 3. All declared fields are provided (no missing fields)
+    /// 4. Each field value type matches the declared field type
+    fn check_struct_literal(
+        &mut self,
+        struct_name: &str,
+        fields: Vec<(String, Expr)>,
+        span: Span,
+    ) -> Result<TypedExpr> {
+        // 1. Look up struct in registry
+        let struct_info = match self.struct_registry.get(struct_name) {
+            Some(info) => info.clone(),
+            None => {
+                return Err(self.type_error(
+                    span,
+                    format!("unknown struct type '{}'", struct_name),
+                ));
+            }
+        };
+
+        // Build a lookup from declared field names to their types
+        let declared_fields: HashMap<&str, &FluxType> = struct_info
+            .fields
+            .iter()
+            .map(|(name, ty)| (name.as_str(), ty))
+            .collect();
+
+        // 2. Check for unknown fields (provided but not in definition)
+        for (field_name, _) in &fields {
+            if !declared_fields.contains_key(field_name.as_str()) {
+                return Err(self.type_error(
+                    span,
+                    format!("struct '{}' has no field '{}'", struct_name, field_name),
+                ));
+            }
+        }
+
+        // 3. Check for missing fields (defined but not provided)
+        let provided_names: HashSet<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        let missing: Vec<&str> = struct_info
+            .fields
+            .iter()
+            .filter(|(name, _)| !provided_names.contains(name.as_str()))
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        if !missing.is_empty() {
+            return Err(self.type_error(
+                span,
+                format!(
+                    "struct literal '{}' missing fields: {}",
+                    struct_name,
+                    missing.join(", ")
+                ),
+            ));
+        }
+
+        // 4. Type-check each provided field value
+        let mut typed_fields = Vec::new();
+        for (field_name, value_expr) in fields {
+            let typed_value = self.check_expr(value_expr)?;
+            let expected_type = declared_fields[field_name.as_str()];
+
+            if !typed_value.resolved_type.is_assignable_to(expected_type) {
+                return Err(self.type_error(
+                    span,
+                    format!(
+                        "field '{}' expects {}, got {}",
+                        field_name, expected_type, typed_value.resolved_type
+                    ),
+                ));
+            }
+
+            typed_fields.push((field_name, typed_value));
+        }
+
+        // Return the struct type
+        Ok(TypedExpr {
+            kind: TypedExprKind::StructLiteral {
+                struct_name: struct_name.to_string(),
+                fields: typed_fields,
+            },
+            resolved_type: FluxType::Struct(struct_name.to_string()),
+            span,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -2225,6 +2755,7 @@ mod tests {
 
     fn make_program(imports: Vec<Import>, body: Vec<StrategyItem>) -> Program {
         Program {
+            structs: vec![],
             imports,
             functions: vec![],
             data_block: None,
@@ -2639,6 +3170,7 @@ mod tests {
     /// Helper: build a Program with a connector block and minimal strategy.
     fn make_program_with_connector(connector: ConnectorBlock) -> Program {
         Program {
+            structs: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,
@@ -3080,5 +3612,205 @@ strategy Test {
             }
             other => panic!("Expected CompileError::Type, got: {:?}", other),
         }
+    }
+
+    // ===== Task 4.2: Struct registry tests =====
+
+    /// Helper: build a StructDef from name, fields, and decorators.
+    fn make_struct_def(name: &str, fields: Vec<(&str, TypeAnnotation)>) -> StructDef {
+        StructDef {
+            name: name.to_string(),
+            fields: fields
+                .into_iter()
+                .enumerate()
+                .map(|(i, (fname, ftype))| StructField {
+                    name: fname.to_string(),
+                    field_type: ftype,
+                    field_decorators: vec![],
+                    span: Span::new(10 + i * 10, 15 + i * 10),
+                })
+                .collect(),
+            decorators: vec![],
+            span: Span::new(0, 50),
+        }
+    }
+
+    #[test]
+    fn test_struct_registry_simple_struct() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![make_struct_def("Point", vec![
+            ("x", TypeAnnotation::F64),
+            ("y", TypeAnnotation::F64),
+        ])];
+        tc.register_structs(&structs).unwrap();
+
+        assert!(tc.struct_registry.contains_key("Point"));
+        let info = &tc.struct_registry["Point"];
+        assert_eq!(info.name, "Point");
+        assert_eq!(info.fields.len(), 2);
+        assert_eq!(info.fields[0], ("x".to_string(), FluxType::Float));
+        assert_eq!(info.fields[1], ("y".to_string(), FluxType::Float));
+    }
+
+    #[test]
+    fn test_struct_registry_all_scalar_types() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![make_struct_def("AllTypes", vec![
+            ("a", TypeAnnotation::F64),
+            ("b", TypeAnnotation::Int),
+            ("c", TypeAnnotation::Bool),
+            ("d", TypeAnnotation::Str),
+        ])];
+        tc.register_structs(&structs).unwrap();
+
+        let info = &tc.struct_registry["AllTypes"];
+        assert_eq!(info.fields[0].1, FluxType::Float);
+        assert_eq!(info.fields[1].1, FluxType::Int);
+        assert_eq!(info.fields[2].1, FluxType::Bool);
+        assert_eq!(info.fields[3].1, FluxType::String);
+    }
+
+    #[test]
+    fn test_struct_registry_duplicate_field_error() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![make_struct_def("Bad", vec![
+            ("price", TypeAnnotation::F64),
+            ("size", TypeAnnotation::F64),
+            ("price", TypeAnnotation::F64),
+        ])];
+        let err = tc.register_structs(&structs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("duplicate field 'price' in struct 'Bad'"),
+            "Expected duplicate field error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_struct_registry_undefined_type_error() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![make_struct_def("Container", vec![
+            ("data", TypeAnnotation::Named("Unknown".to_string())),
+        ])];
+        let err = tc.register_structs(&structs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown type 'Unknown' in struct 'Container' field 'data'"),
+            "Expected undefined type error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_struct_registry_dependency_order() {
+        // Quote should be registered before MarketSnapshot since
+        // MarketSnapshot has a field of type Quote.
+        let mut tc = TypeChecker::new();
+        let structs = vec![
+            make_struct_def("MarketSnapshot", vec![
+                ("quote", TypeAnnotation::Named("Quote".to_string())),
+                ("mid", TypeAnnotation::F64),
+            ]),
+            make_struct_def("Quote", vec![
+                ("bid", TypeAnnotation::F64),
+                ("ask", TypeAnnotation::F64),
+            ]),
+        ];
+        tc.register_structs(&structs).unwrap();
+
+        // Both should be registered
+        assert!(tc.struct_registry.contains_key("Quote"));
+        assert!(tc.struct_registry.contains_key("MarketSnapshot"));
+
+        // MarketSnapshot's quote field should resolve to Struct("Quote")
+        let info = &tc.struct_registry["MarketSnapshot"];
+        assert_eq!(info.fields[0], ("quote".to_string(), FluxType::Struct("Quote".to_string())));
+    }
+
+    #[test]
+    fn test_struct_registry_fixed_array_field() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![
+            make_struct_def("Level", vec![
+                ("price", TypeAnnotation::F64),
+                ("size", TypeAnnotation::F64),
+            ]),
+            make_struct_def("Book", vec![
+                ("bids", TypeAnnotation::FixedArray(Box::new(TypeAnnotation::Named("Level".to_string())), 20)),
+                ("asks", TypeAnnotation::FixedArray(Box::new(TypeAnnotation::Named("Level".to_string())), 20)),
+            ]),
+        ];
+        tc.register_structs(&structs).unwrap();
+
+        let info = &tc.struct_registry["Book"];
+        assert_eq!(
+            info.fields[0].1,
+            FluxType::FixedArray(Box::new(FluxType::Struct("Level".to_string())), 20)
+        );
+    }
+
+    #[test]
+    fn test_struct_registry_undefined_type_in_array() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![make_struct_def("Book", vec![
+            ("bids", TypeAnnotation::FixedArray(Box::new(TypeAnnotation::Named("Level".to_string())), 20)),
+        ])];
+        let err = tc.register_structs(&structs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown type 'Level' in struct 'Book' field 'bids'"),
+            "Expected undefined type error, got: {}", msg);
+    }
+
+    #[test]
+    fn test_struct_registry_multiple_independent_structs() {
+        let mut tc = TypeChecker::new();
+        let structs = vec![
+            make_struct_def("Tick", vec![
+                ("price", TypeAnnotation::F64),
+                ("size", TypeAnnotation::F64),
+            ]),
+            make_struct_def("Bar", vec![
+                ("open", TypeAnnotation::F64),
+                ("close", TypeAnnotation::F64),
+            ]),
+        ];
+        tc.register_structs(&structs).unwrap();
+        assert!(tc.struct_registry.contains_key("Tick"));
+        assert!(tc.struct_registry.contains_key("Bar"));
+    }
+
+    #[test]
+    fn test_struct_registry_chain_dependency() {
+        // A depends on B, B depends on C — all should register in order C, B, A
+        let mut tc = TypeChecker::new();
+        let structs = vec![
+            make_struct_def("A", vec![
+                ("b_field", TypeAnnotation::Named("B".to_string())),
+            ]),
+            make_struct_def("B", vec![
+                ("c_field", TypeAnnotation::Named("C".to_string())),
+            ]),
+            make_struct_def("C", vec![
+                ("val", TypeAnnotation::Int),
+            ]),
+        ];
+        tc.register_structs(&structs).unwrap();
+        assert!(tc.struct_registry.contains_key("A"));
+        assert!(tc.struct_registry.contains_key("B"));
+        assert!(tc.struct_registry.contains_key("C"));
+
+        // Verify the resolved types
+        let info_a = &tc.struct_registry["A"];
+        assert_eq!(info_a.fields[0].1, FluxType::Struct("B".to_string()));
+        let info_b = &tc.struct_registry["B"];
+        assert_eq!(info_b.fields[0].1, FluxType::Struct("C".to_string()));
+    }
+
+    #[test]
+    fn test_struct_registry_error_span_format() {
+        // Verify error messages follow the "at byte N:" format
+        let mut tc = TypeChecker::new();
+        let structs = vec![make_struct_def("Bad", vec![
+            ("x", TypeAnnotation::F64),
+            ("x", TypeAnnotation::Int),
+        ])];
+        let err = tc.register_structs(&structs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("at byte"), "Error should contain 'at byte', got: {}", msg);
     }
 }

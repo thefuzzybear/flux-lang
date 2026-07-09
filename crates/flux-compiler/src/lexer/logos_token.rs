@@ -47,6 +47,8 @@ pub(crate) enum LogosToken {
     Data,
     #[token("connector")]
     Connector,
+    #[token("struct")]
+    Struct,
 
     // Identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
@@ -77,6 +79,8 @@ pub(crate) enum LogosToken {
     AndAnd,
     #[token("||")]
     OrOr,
+    #[token("->")]
+    Arrow,
 
     // Single-character operators
     #[token("+")]
@@ -97,6 +101,8 @@ pub(crate) enum LogosToken {
     Bang,
     #[token("=")]
     Assign,
+    #[token("@")]
+    At,
 
     // Delimiters
     #[token("(")]
@@ -117,4 +123,6 @@ pub(crate) enum LogosToken {
     Dot,
     #[token(":")]
     Colon,
+    #[token(";")]
+    Semicolon,
 }

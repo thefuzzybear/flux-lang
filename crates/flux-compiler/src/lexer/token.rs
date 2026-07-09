@@ -25,6 +25,7 @@ pub enum Token {
     Null,
     Data,
     Connector,
+    Struct,
 
     // Identifiers and literals
     Ident(String),
@@ -47,6 +48,8 @@ pub enum Token {
     AndAnd,     // &&
     OrOr,       // ||
     Bang,       // !
+    At,         // @
+    Arrow,      // ->
 
     // Delimiters
     OpenParen,   // (
@@ -59,6 +62,7 @@ pub enum Token {
     Dot,         // .
     Colon,       // :
     ColonColon,  // ::
+    Semicolon,   // ;
     Assign,      // =
 
     // Special
@@ -91,6 +95,7 @@ impl Token {
                 | Token::Null
                 | Token::Data
                 | Token::Connector
+                | Token::Struct
         )
     }
 }

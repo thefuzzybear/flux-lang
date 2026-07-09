@@ -271,6 +271,7 @@ mod tests {
                     };
 
                     Program {
+                        structs: vec![],
                         imports,
                         functions: vec![],
                         data_block: None,
@@ -441,6 +442,7 @@ mod tests {
                 };
 
                 Program {
+                    structs: vec![],
                     imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -556,6 +558,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -644,6 +647,7 @@ mod tests {
             });
 
             Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -730,6 +734,7 @@ mod tests {
     /// Helper to wrap a single statement in a minimal program with an event handler.
     fn wrap_in_handler(stmt: Stmt, span: Span) -> Program {
         Program {
+            structs: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,
@@ -1298,6 +1303,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1454,6 +1460,7 @@ mod tests {
             }).collect();
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1511,6 +1518,7 @@ mod tests {
             }).collect();
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1580,6 +1588,7 @@ mod tests {
             }];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1643,6 +1652,7 @@ mod tests {
             }];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1700,6 +1710,7 @@ mod tests {
             }];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1772,6 +1783,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1812,6 +1824,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1853,6 +1866,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1926,6 +1940,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -1996,6 +2011,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2066,6 +2082,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2134,6 +2151,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2199,6 +2217,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2276,6 +2295,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2341,6 +2361,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2405,6 +2426,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2484,6 +2506,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![import],
                         functions: vec![],
                         data_block: None,
@@ -2544,6 +2567,7 @@ mod tests {
             ];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2613,6 +2637,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2656,6 +2681,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2693,6 +2719,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2742,6 +2769,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2803,6 +2831,7 @@ mod tests {
             };
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2886,6 +2915,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -2975,6 +3005,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -3048,6 +3079,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -3105,6 +3137,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -3173,6 +3206,7 @@ mod tests {
             }];
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -3261,6 +3295,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,
@@ -3373,6 +3408,7 @@ mod tests {
             });
 
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                         functions: vec![],
                         data_block: None,

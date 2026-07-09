@@ -8,6 +8,7 @@ use crate::lexer::Span;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub imports: Vec<Import>,
+    pub structs: Vec<StructDef>,
     pub functions: Vec<FnDef>,
     pub data_block: Option<DataBlock>,
     pub connector_block: Option<ConnectorBlock>,
@@ -15,12 +16,73 @@ pub struct Program {
     pub span: Span,
 }
 
+/// A struct definition: `struct Name { field: Type, ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<StructField>,
+    pub decorators: Vec<Decorator>,
+    pub span: Span,
+}
+
+/// A single field in a struct definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructField {
+    pub name: String,
+    pub field_type: TypeAnnotation,
+    /// Field-level decorators, e.g. `@hot`/`@cold`.
+    pub field_decorators: Vec<Decorator>,
+    pub span: Span,
+}
+
+/// A decorator annotation: `@name` or `@name(arg)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decorator {
+    pub name: String,
+    pub arg: Option<DecoratorArg>,
+    pub span: Span,
+}
+
+/// A decorator argument value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecoratorArg {
+    Int(i64),
+}
+
+/// Type annotations used in struct fields and function signatures.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeAnnotation {
+    F64,
+    Int,
+    Bool,
+    Str,
+    /// Another struct type, referenced by name.
+    Named(String),
+    /// `[Type; N]`
+    FixedArray(Box<TypeAnnotation>, usize),
+    /// `int(N)` for `@bitfield` structs.
+    BitInt(usize),
+}
+
 /// A user-defined function declaration: `fn name(params) { body }`
+///
+/// Params may optionally carry a type annotation (e.g. `fn f(q: Quote) -> f64 { ... }`).
+/// Untyped functions (`fn f(q) { ... }`) remain fully supported; their params simply
+/// have `param_type: None` and `return_type: None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDef {
     pub name: String,
-    pub params: Vec<String>,
+    pub params: Vec<FnParam>,
+    pub return_type: Option<TypeAnnotation>,
     pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// A single function parameter: `name` or `name: Type`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnParam {
+    pub name: String,
+    pub param_type: Option<TypeAnnotation>,
     pub span: Span,
 }
 
@@ -259,6 +321,11 @@ pub enum ExprKind {
     IndexAccess {
         object: Box<Expr>,
         index: Box<Expr>,
+    },
+    /// A struct literal: `StructName { field = value, ... }`
+    StructLiteral {
+        struct_name: String,
+        fields: Vec<(String, Expr)>,
     },
 }
 

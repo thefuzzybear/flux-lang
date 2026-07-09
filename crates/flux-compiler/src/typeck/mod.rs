@@ -214,6 +214,7 @@ mod integration_tests {
         };
 
         Program {
+            structs: vec![],
             imports: vec![import],
             functions: vec![],
             data_block: None,
@@ -412,6 +413,7 @@ mod integration_tests {
         };
 
         let program = Program {
+            structs: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,

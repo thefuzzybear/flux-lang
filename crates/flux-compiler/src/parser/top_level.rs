@@ -18,15 +18,19 @@ impl ParserState {
     pub fn parse_program(&mut self) -> Result<Program> {
         let start_span = self.current_span();
         let mut imports = Vec::new();
+        let mut structs = Vec::new();
         let mut functions = Vec::new();
         let mut data_block: Option<DataBlock> = None;
         let mut connector_block: Option<ConnectorBlock> = None;
 
-        // Parse imports, functions, optional data block, and optional connector block (interleaved before strategy)
+        // Parse imports, structs, functions, optional data block, and optional connector block (interleaved before strategy)
         loop {
             match self.peek().clone() {
                 Token::From => {
                     imports.push(self.parse_import()?);
+                }
+                Token::At | Token::Struct => {
+                    structs.push(self.parse_struct_def()?);
                 }
                 Token::Fn => {
                     functions.push(self.parse_fn_def()?);
@@ -70,6 +74,7 @@ impl ParserState {
             let span = self.span_from(start_span);
             return Ok(Program {
                 imports,
+                structs,
                 functions,
                 data_block: None,
                 connector_block: None,
@@ -113,6 +118,7 @@ impl ParserState {
         let span = self.span_from(start_span);
         Ok(Program {
             imports,
+            structs,
             functions,
             data_block,
             connector_block,
@@ -121,7 +127,56 @@ impl ParserState {
         })
     }
 
+    /// Parse a struct definition: optional leading decorators, `struct Name { field: Type, ... }`.
+    ///
+    /// Fields may carry their own leading decorators (e.g. `@hot`/`@cold`).
+    /// A trailing comma after the last field is permitted.
+    fn parse_struct_def(&mut self) -> Result<StructDef> {
+        let start_span = self.current_span();
+
+        let decorators = self.parse_decorators()?;
+        self.expect(&Token::Struct)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::OpenBrace)?;
+
+        let mut fields = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            let field_start = self.current_span();
+            let field_decorators = self.parse_decorators()?;
+            let (field_name, _) = self.expect_ident()?;
+            self.expect(&Token::Colon)?;
+            let field_type = self.parse_type_annotation()?;
+            let field_span = self.span_from(field_start);
+            fields.push(StructField {
+                name: field_name,
+                field_type,
+                field_decorators,
+                span: field_span,
+            });
+
+            if self.check(&Token::Comma) {
+                self.advance(); // consume comma
+            } else {
+                break;
+            }
+        }
+
+        self.expect(&Token::CloseBrace)?;
+        let span = self.span_from(start_span);
+        Ok(StructDef {
+            name,
+            fields,
+            decorators,
+            span,
+        })
+    }
+
     /// Parse a function definition: `fn name(params) { body }`
+    ///
+    /// Each parameter may optionally carry a type annotation (`p: Type`), and the
+    /// function itself may optionally declare a return type (`-> Type`) after the
+    /// closing `)`. Both are optional and fully backward-compatible with the
+    /// untyped `fn name(p) { body }` form.
     fn parse_fn_def(&mut self) -> Result<FnDef> {
         let start_span = self.current_span();
         self.expect(&Token::Fn)?;
@@ -130,18 +185,24 @@ impl ParserState {
 
         let mut params = Vec::new();
         if !self.check(&Token::CloseParen) {
-            let (first, _) = self.expect_ident()?;
-            params.push(first);
+            params.push(self.parse_fn_param()?);
             while self.check(&Token::Comma) {
                 self.advance(); // consume comma
                 if self.check(&Token::CloseParen) {
                     break; // trailing comma
                 }
-                let (p, _) = self.expect_ident()?;
-                params.push(p);
+                params.push(self.parse_fn_param()?);
             }
         }
         self.expect(&Token::CloseParen)?;
+
+        let return_type = if self.check(&Token::Arrow) {
+            self.advance(); // consume `->`
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+
         self.expect(&Token::OpenBrace)?;
 
         let mut body = Vec::new();
@@ -158,7 +219,23 @@ impl ParserState {
         self.expect(&Token::CloseBrace)?;
 
         let span = self.span_from(start_span);
-        Ok(FnDef { name, params, body, span })
+        Ok(FnDef { name, params, return_type, body, span })
+    }
+
+    /// Parse a single function parameter: `name` or `name: Type`.
+    fn parse_fn_param(&mut self) -> Result<FnParam> {
+        let start_span = self.current_span();
+        let (name, _) = self.expect_ident()?;
+
+        let param_type = if self.check(&Token::Colon) {
+            self.advance(); // consume `:`
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+
+        let span = self.span_from(start_span);
+        Ok(FnParam { name, param_type, span })
     }
 
     /// Parse an import statement: `from module.path import {name1, name2}`
@@ -579,6 +656,11 @@ mod tests {
         let spanned = make_tokens(tokens);
         let mut state = ParserState::new(spanned)?;
         state.parse_program()
+    }
+
+    /// Helper: extract plain parameter names from an `FnDef` for assertions.
+    fn param_names(fn_def: &FnDef) -> Vec<String> {
+        fn_def.params.iter().map(|p| p.name.clone()).collect()
     }
 
     // ===== 1. Minimal valid program =====
@@ -1703,9 +1785,9 @@ strategy MyStrat {
         // Should be a library file with empty strategy placeholder
         assert_eq!(program.functions.len(), 2);
         assert_eq!(program.functions[0].name, "add");
-        assert_eq!(program.functions[0].params, vec!["a", "b"]);
+        assert_eq!(param_names(&program.functions[0]), vec!["a", "b"]);
         assert_eq!(program.functions[1].name, "sub");
-        assert_eq!(program.functions[1].params, vec!["a", "b"]);
+        assert_eq!(param_names(&program.functions[1]), vec!["a", "b"]);
         assert!(program.imports.is_empty());
         assert!(program.data_block.is_none());
         assert!(program.connector_block.is_none());
@@ -1852,10 +1934,341 @@ fn try_enter(price, lookback, threshold) {
         assert_eq!(program.functions.len(), 1);
         assert_eq!(program.functions[0].name, "try_enter");
         assert_eq!(
-            program.functions[0].params,
+            param_names(&program.functions[0]),
             vec!["price", "lookback", "threshold"]
         );
         assert_eq!(program.strategy.name, "");
         assert!(program.strategy.body.is_empty());
+    }
+
+    // ===== Struct definition parsing (flux-structs Task 2.4) =====
+    // Validates: Requirements 1.1, 1.2, 21.2, 21.5
+
+    #[test]
+    fn struct_def_with_one_field() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+struct Tick {
+    price: f64
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.name, "Tick");
+        assert!(s.decorators.is_empty());
+        assert_eq!(s.fields.len(), 1);
+        assert_eq!(s.fields[0].name, "price");
+        assert_eq!(s.fields[0].field_type, TypeAnnotation::F64);
+        assert!(s.fields[0].field_decorators.is_empty());
+    }
+
+    #[test]
+    fn struct_def_with_three_fields() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+struct Quote {
+    bid: f64,
+    ask: f64,
+    timestamp: f64,
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.name, "Quote");
+        assert_eq!(s.fields.len(), 3);
+        assert_eq!(s.fields[0].name, "bid");
+        assert_eq!(s.fields[0].field_type, TypeAnnotation::F64);
+        assert_eq!(s.fields[1].name, "ask");
+        assert_eq!(s.fields[1].field_type, TypeAnnotation::F64);
+        assert_eq!(s.fields[2].name, "timestamp");
+        assert_eq!(s.fields[2].field_type, TypeAnnotation::F64);
+    }
+
+    #[test]
+    fn struct_def_with_five_fields_and_decorators() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+@aligned(64)
+struct Book {
+    bids: [Level; 20],
+    asks: [Level; 20],
+    bid_depth: int,
+    ask_depth: int,
+    sequence: int,
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.name, "Book");
+        assert_eq!(s.decorators.len(), 1);
+        assert_eq!(s.decorators[0].name, "aligned");
+        assert_eq!(s.decorators[0].arg, Some(DecoratorArg::Int(64)));
+
+        assert_eq!(s.fields.len(), 5);
+        assert_eq!(s.fields[0].name, "bids");
+        assert_eq!(
+            s.fields[0].field_type,
+            TypeAnnotation::FixedArray(Box::new(TypeAnnotation::Named("Level".to_string())), 20)
+        );
+        assert_eq!(s.fields[1].name, "asks");
+        assert_eq!(s.fields[2].name, "bid_depth");
+        assert_eq!(s.fields[2].field_type, TypeAnnotation::Int);
+        assert_eq!(s.fields[3].name, "ask_depth");
+        assert_eq!(s.fields[4].name, "sequence");
+    }
+
+    #[test]
+    fn struct_def_with_field_level_decorators() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+struct Order {
+    @hot
+    price: f64,
+    @hot
+    qty: f64,
+    @cold
+    notes: str,
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.fields.len(), 3);
+        assert_eq!(s.fields[0].field_decorators.len(), 1);
+        assert_eq!(s.fields[0].field_decorators[0].name, "hot");
+        assert_eq!(s.fields[2].field_decorators[0].name, "cold");
+    }
+
+    #[test]
+    fn struct_def_with_multiple_decorators_mixed_args_preserves_order() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        // Decorators with and without arguments, order must be preserved.
+        let source = r#"
+@packed
+@aligned(64)
+@hot
+struct Flags {
+    value: int
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.decorators.len(), 3);
+        assert_eq!(s.decorators[0].name, "packed");
+        assert_eq!(s.decorators[0].arg, None);
+        assert_eq!(s.decorators[1].name, "aligned");
+        assert_eq!(s.decorators[1].arg, Some(DecoratorArg::Int(64)));
+        assert_eq!(s.decorators[2].name, "hot");
+        assert_eq!(s.decorators[2].arg, None);
+    }
+
+    #[test]
+    fn struct_def_with_no_decorators_has_empty_decorator_list() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+struct Plain {
+    value: int
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        assert!(program.structs[0].decorators.is_empty());
+    }
+
+    #[test]
+    fn struct_def_with_nested_named_struct_field_type() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        // A struct field whose type is another struct name (not wrapped in an array).
+        let source = r#"
+struct MarketSnapshot {
+    quote: Quote,
+    last_price: f64
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.name, "MarketSnapshot");
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "quote");
+        assert_eq!(
+            s.fields[0].field_type,
+            TypeAnnotation::Named("Quote".to_string())
+        );
+        assert_eq!(s.fields[1].name, "last_price");
+        assert_eq!(s.fields[1].field_type, TypeAnnotation::F64);
+    }
+
+    #[test]
+    fn struct_def_with_bitfield_field_type() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        // `int(N)` bitfield type parsing as a struct field.
+        let source = r#"
+@bitfield
+struct Flags {
+    side: int(2),
+    active: bool
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        let s = &program.structs[0];
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "side");
+        assert_eq!(s.fields[0].field_type, TypeAnnotation::BitInt(2));
+        assert_eq!(s.fields[1].name, "active");
+        assert_eq!(s.fields[1].field_type, TypeAnnotation::Bool);
+    }
+
+    #[test]
+    fn multiple_struct_defs_before_strategy() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let source = r#"
+struct Tick {
+    price: f64
+}
+
+struct Bar {
+    open: f64,
+    close: f64
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 2);
+        assert_eq!(program.structs[0].name, "Tick");
+        assert_eq!(program.structs[1].name, "Bar");
+    }
+
+    #[test]
+    fn end_to_end_struct_decorators_literal_and_typed_fn_together() {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        // Combines: decorated struct def, fixed array + named field types,
+        // struct literal expression, and a struct-typed function signature.
+        let source = r#"
+@aligned(64)
+@packed
+struct Quote {
+    bid: f64,
+    ask: f64,
+    timestamp: f64
+}
+
+struct Book {
+    levels: [Quote; 5],
+    depth: int
+}
+
+fn calc_spread(q: Quote) -> f64 {
+    return q.ask - q.bid
+}
+
+fn make_quote() -> Quote {
+    return Quote { bid = 100.0, ask = 101.0, timestamp = 0.0 }
+}
+
+strategy X {}
+"#;
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.structs.len(), 2);
+
+        let quote = &program.structs[0];
+        assert_eq!(quote.name, "Quote");
+        assert_eq!(quote.decorators.len(), 2);
+        assert_eq!(quote.decorators[0].name, "aligned");
+        assert_eq!(quote.decorators[0].arg, Some(DecoratorArg::Int(64)));
+        assert_eq!(quote.decorators[1].name, "packed");
+        assert_eq!(quote.decorators[1].arg, None);
+        assert_eq!(quote.fields.len(), 3);
+
+        let book = &program.structs[1];
+        assert_eq!(book.name, "Book");
+        assert_eq!(
+            book.fields[0].field_type,
+            TypeAnnotation::FixedArray(Box::new(TypeAnnotation::Named("Quote".to_string())), 5)
+        );
+
+        assert_eq!(program.functions.len(), 2);
+        let calc_spread = &program.functions[0];
+        assert_eq!(calc_spread.params[0].param_type, Some(TypeAnnotation::Named("Quote".to_string())));
+        assert_eq!(calc_spread.return_type, Some(TypeAnnotation::F64));
+
+        let make_quote = &program.functions[1];
+        assert_eq!(make_quote.return_type, Some(TypeAnnotation::Named("Quote".to_string())));
+        assert_eq!(make_quote.body.len(), 1);
+        if let Stmt::Return(ret) = &make_quote.body[0] {
+            match &ret.value.as_ref().unwrap().kind {
+                ExprKind::StructLiteral { struct_name, fields } => {
+                    assert_eq!(struct_name, "Quote");
+                    assert_eq!(fields.len(), 3);
+                    assert_eq!(fields[0].0, "bid");
+                    assert_eq!(fields[0].1.kind, ExprKind::FloatLiteral(100.0));
+                }
+                other => panic!("Expected StructLiteral, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Return statement");
+        }
     }
 }

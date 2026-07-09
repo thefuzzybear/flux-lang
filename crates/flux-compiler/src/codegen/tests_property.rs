@@ -109,6 +109,9 @@ mod tests {
             })
             .boxed(),
             FluxType::Fn { .. } => unreachable!("Generator excludes Fn"),
+            FluxType::Struct(_) | FluxType::FixedArray(_, _) => {
+                unreachable!("Generator excludes Struct/FixedArray")
+            }
         }
     }
 
@@ -156,6 +159,9 @@ mod tests {
                 FluxType::VecFloat => prop_assert_eq!(&rust_type, "Vec<f64>"),
                 FluxType::MatFloat => prop_assert_eq!(&rust_type, "Vec<f64>"),
                 FluxType::Fn { .. } => unreachable!("Generator excludes Fn"),
+                FluxType::Struct(_) | FluxType::FixedArray(_, _) => {
+                    unreachable!("Generator excludes Struct/FixedArray")
+                }
             }
         }
     }
@@ -207,6 +213,7 @@ mod tests {
                     names: vec!["sma".to_string()],
                     span: Span::new(0, 20),
                 }],
+            structs: vec![],
             functions: vec![],
                 data_block: None,
                 connector_block: None,
@@ -363,6 +370,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -548,6 +556,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -610,6 +619,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -674,6 +684,7 @@ mod tests {
             // Build a minimal TypedProgram with strategy named `name`
             let program = TypedProgram {
                 imports: vec![],
+            structs: vec![],
             functions: vec![],
                 data_block: None,
                 connector_block: None,
@@ -785,6 +796,7 @@ mod tests {
 
             let program = TypedProgram {
                 imports: vec![],
+            structs: vec![],
             functions: vec![],
                 data_block: None,
                 connector_block: None,
@@ -836,6 +848,7 @@ mod tests {
             // Build a program with a param whose type is FluxType::Fn
             let program = TypedProgram {
                 imports: vec![],
+            structs: vec![],
             functions: vec![],
                 data_block: None,
                 connector_block: None,
@@ -1093,6 +1106,7 @@ mod tests {
             functions.push(TypedFnDef {
                 name: fn_names[i].clone(),
                 params: vec!["x".to_string()],
+                param_types: vec![FluxType::Float],
                 body,
                 return_type: FluxType::Float,
                 span,
@@ -1126,6 +1140,7 @@ mod tests {
 
         TypedProgram {
             imports: vec![],
+            structs: vec![],
             functions,
             data_block: None,
             connector_block: None,

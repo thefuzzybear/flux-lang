@@ -97,7 +97,7 @@ impl ParserState {
         let start_span = self.current_span();
         self.advance(); // consume `if`
 
-        let condition = self.parse_expr(0)?;
+        let condition = self.with_struct_literal_forbidden(|state| state.parse_expr(0))?;
         let body = self.parse_block()?;
 
         let mut elif_branches = Vec::new();
@@ -107,7 +107,7 @@ impl ParserState {
         while self.check(&Token::Elif) {
             let elif_start = self.current_span();
             self.advance(); // consume `elif`
-            let elif_condition = self.parse_expr(0)?;
+            let elif_condition = self.with_struct_literal_forbidden(|state| state.parse_expr(0))?;
             let elif_body = self.parse_block()?;
             let elif_span = self.span_from(elif_start);
             elif_branches.push(ElifBranch {
@@ -148,7 +148,7 @@ impl ParserState {
             _ => return Err(self.error_expected("\"in\"")),
         }
 
-        let iterable = self.parse_expr(0)?;
+        let iterable = self.with_struct_literal_forbidden(|state| state.parse_expr(0))?;
         let body = self.parse_block()?;
         let span = self.span_from(start_span);
 
@@ -165,7 +165,7 @@ impl ParserState {
         let start_span = self.current_span();
         self.advance(); // consume `while`
 
-        let condition = self.parse_expr(0)?;
+        let condition = self.with_struct_literal_forbidden(|state| state.parse_expr(0))?;
         let body = self.parse_block()?;
         let span = self.span_from(start_span);
 

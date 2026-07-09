@@ -123,20 +123,24 @@ enum Commands {
     Live(LiveArgs),
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let exit_code = run();
+    process::exit(exit_code);
+}
+
+fn run() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
             err.print().expect("failed to write error");
             match err.kind() {
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => process::exit(SUCCESS),
-                _ => process::exit(USAGE_ERROR),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => return SUCCESS,
+                _ => return USAGE_ERROR,
             }
         }
     };
 
-    let exit_code = match cli.command {
+    match cli.command {
         Commands::Check { file } => match commands::check::run_check(&file) {
             Ok(()) => SUCCESS,
             Err(_e) => FAILURE,
@@ -165,7 +169,7 @@ async fn main() {
             // Determine color mode — mutually exclusive flags
             let color_mode = if color && no_color {
                 eprintln!("error: flags '--color' and '--no-color' are mutually exclusive");
-                process::exit(USAGE_ERROR);
+                return USAGE_ERROR;
             } else if color {
                 formatter::ansi::ColorMode::Always
             } else if no_color {
@@ -242,7 +246,8 @@ async fn main() {
             }
         },
         Commands::Live(args) => {
-            match commands::live::run_live_cmd(args).await {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            match rt.block_on(commands::live::run_live_cmd(args)) {
                 Ok(()) => SUCCESS,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -250,7 +255,5 @@ async fn main() {
                 }
             }
         },
-    };
-
-    process::exit(exit_code);
+    }
 }

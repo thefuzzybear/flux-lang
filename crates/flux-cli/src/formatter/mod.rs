@@ -555,6 +555,19 @@ impl Formatter {
                 self.format_expr(index);
                 self.output.push(']');
             }
+            ExprKind::StructLiteral { struct_name, fields } => {
+                self.output.push_str(struct_name);
+                self.output.push_str(" { ");
+                for (i, (name, value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.output.push_str(name);
+                    self.output.push_str(" = ");
+                    self.format_expr(value);
+                }
+                self.output.push_str(" }");
+            }
         }
     }
 }

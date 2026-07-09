@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9f76e4af84bb7597cca83b2ea650d5d1261333165dc7c00cd2b3cbfaef4751cd # shrinks to program = Program { imports: [], structs: [], functions: [], data_block: None, connector_block: None, strategy: Strategy { name: "AAA", body: [EventHandler(EventHandler { event_name: "bar", body: [If(IfStmt { condition: Expr { kind: IntLiteral(1), span: Span { start: 0, end: 0 } }, body: [Assignment(Assignment { target: Expr { kind: Ident("a0"), span: Span { start: 0, end: 0 } }, value: Expr { kind: FunctionCall { function: Expr { kind: Ident("fn"), span: Span { start: 0, end: 0 } }, args: [] }, span: Span { start: 0, end: 0 } }, span: Span { start: 0, end: 0 } })], elif_branches: [], else_body: None, span: Span { start: 0, end: 0 } })], span: Span { start: 0, end: 0 } })], span: Span { start: 0, end: 0 } }, span: Span { start: 0, end: 0 } }

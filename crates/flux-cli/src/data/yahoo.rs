@@ -653,6 +653,6 @@ mod tests {
         assert!(url.contains("crumb=test_crumb"));
         assert!(url.contains("period1="));
         assert!(url.contains("period2="));
-        assert!(url.starts_with("https://query1.finance.yahoo.com/v7/finance/download/"));
+        assert!(url.starts_with("https://query1.finance.yahoo.com/v8/finance/chart/"));
     }
 }

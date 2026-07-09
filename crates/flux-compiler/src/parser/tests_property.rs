@@ -8,8 +8,8 @@
 mod tests {
     use crate::lexer::{lex_with_spans, Span};
     use crate::parser::ast::{
-        Assignment, BinOp, EventHandler, Expr, ExprKind, ExprStmt, FnDef, ForLoop, IfStmt,
-        Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar,
+        Assignment, BinOp, EventHandler, Expr, ExprKind, ExprStmt, FnDef, FnParam, ForLoop,
+        IfStmt, Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar,
         Stmt, Strategy as AstStrategy, StrategyItem, UnaryOp, WhileLoop,
     };
     use crate::parser::{parse, pretty_print_program};
@@ -335,6 +335,7 @@ mod tests {
             proptest::collection::vec(arb_strategy_item(), 1..4),
         )
             .prop_map(|(imports, name, body)| Program {
+                structs: vec![],
                 imports,
                 functions: vec![],
                 data_block: None,
@@ -359,13 +360,19 @@ mod tests {
             .prop_map(|(name, params, body)| {
                 // Deduplicate params to avoid invalid duplicate parameter names
                 let mut seen = std::collections::HashSet::new();
-                let unique_params: Vec<String> = params
+                let unique_params: Vec<FnParam> = params
                     .into_iter()
                     .filter(|p| seen.insert(p.clone()))
+                    .map(|name| FnParam {
+                        name,
+                        param_type: None,
+                        span: dummy_span(),
+                    })
                     .collect();
                 FnDef {
                     name,
                     params: unique_params,
+                    return_type: None,
                     body,
                     span: dummy_span(),
                 }
@@ -445,7 +452,12 @@ mod tests {
 
     fn fn_defs_eq(a: &FnDef, b: &FnDef) -> bool {
         a.name == b.name
-            && a.params == b.params
+            && a.params.len() == b.params.len()
+            && a.params
+                .iter()
+                .zip(b.params.iter())
+                .all(|(pa, pb)| pa.name == pb.name && pa.param_type == pb.param_type)
+            && a.return_type == b.return_type
             && a.body.len() == b.body.len()
             && a.body
                 .iter()
@@ -623,6 +635,7 @@ mod tests {
         fn prop_fn_def_round_trip(fn_def in arb_fn_def()) {
             // Build a minimal program containing just this FnDef + a dummy strategy
             let program = Program {
+                structs: vec![],
                 imports: vec![],
                 functions: vec![fn_def.clone()],
                 data_block: None,

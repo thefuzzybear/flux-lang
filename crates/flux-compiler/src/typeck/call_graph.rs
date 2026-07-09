@@ -206,6 +206,11 @@ fn extract_calls_from_expr(expr: &Expr, fn_names: &HashSet<String>, callees: &mu
                 extract_calls_from_expr(elem, fn_names, callees);
             }
         }
+        ExprKind::StructLiteral { fields, .. } => {
+            for (_, value) in fields {
+                extract_calls_from_expr(value, fn_names, callees);
+            }
+        }
         // Terminals — no further calls to extract
         ExprKind::IntLiteral(_)
         | ExprKind::FloatLiteral(_)
@@ -243,6 +248,7 @@ mod tests {
         FnDef {
             name: name.to_string(),
             params: vec![],
+            return_type: None,
             body,
             span: span(),
         }

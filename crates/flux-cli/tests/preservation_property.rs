@@ -130,6 +130,7 @@ fn build_single_sma_strategy(period: i64) -> TypedProgram {
 
     TypedProgram {
         imports: vec![],
+            structs: vec![],
             functions: vec![],
         data_block: None,
         connector_block: None,
@@ -200,6 +201,7 @@ fn build_single_ema_strategy(period: i64) -> TypedProgram {
 
     TypedProgram {
         imports: vec![],
+            structs: vec![],
             functions: vec![],
         data_block: None,
         connector_block: None,
@@ -265,6 +267,7 @@ fn build_no_signal_strategy() -> TypedProgram {
 
     TypedProgram {
         imports: vec![],
+            structs: vec![],
             functions: vec![],
         data_block: None,
         connector_block: None,

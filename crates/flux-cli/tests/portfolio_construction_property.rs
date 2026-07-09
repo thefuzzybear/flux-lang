@@ -24,7 +24,8 @@ use flux_runtime::{BarContext, PositionTracker, Signal};
 fn build_empty_strategy() -> TypedProgram {
     TypedProgram {
         imports: vec![],
-            functions: vec![],
+            structs: vec![],
+        functions: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

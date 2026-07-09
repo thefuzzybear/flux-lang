@@ -33,6 +33,11 @@ pub fn map_type(ty: &FluxType, span_start: usize) -> Result<String> {
             "at byte {}: function types cannot be emitted as Rust types",
             span_start
         ))),
+        FluxType::Struct(name) => Ok(name.clone()),
+        FluxType::FixedArray(elem, size) => {
+            let elem_rust = map_type(elem, span_start)?;
+            Ok(format!("[{}; {}]", elem_rust, size))
+        }
     }
 }
 
@@ -159,5 +164,48 @@ mod tests {
             Err(other) => panic!("Expected CompileError::Codegen, got: {:?}", other),
             Ok(val) => panic!("Expected error, got Ok({})", val),
         }
+    }
+
+    #[test]
+    fn map_struct_type() {
+        let ty = FluxType::Struct("Quote".to_string());
+        assert_eq!(map_type(&ty, 0).unwrap(), "Quote");
+    }
+
+    #[test]
+    fn map_struct_type_custom_name() {
+        let ty = FluxType::Struct("MyCustomStruct".to_string());
+        assert_eq!(map_type(&ty, 0).unwrap(), "MyCustomStruct");
+    }
+
+    #[test]
+    fn map_fixed_array_f64() {
+        let ty = FluxType::FixedArray(Box::new(FluxType::Float), 20);
+        assert_eq!(map_type(&ty, 0).unwrap(), "[f64; 20]");
+    }
+
+    #[test]
+    fn map_fixed_array_i64() {
+        let ty = FluxType::FixedArray(Box::new(FluxType::Int), 10);
+        assert_eq!(map_type(&ty, 0).unwrap(), "[i64; 10]");
+    }
+
+    #[test]
+    fn map_fixed_array_bool() {
+        let ty = FluxType::FixedArray(Box::new(FluxType::Bool), 5);
+        assert_eq!(map_type(&ty, 0).unwrap(), "[bool; 5]");
+    }
+
+    #[test]
+    fn map_fixed_array_struct() {
+        let ty = FluxType::FixedArray(Box::new(FluxType::Struct("Level".to_string())), 20);
+        assert_eq!(map_type(&ty, 0).unwrap(), "[Level; 20]");
+    }
+
+    #[test]
+    fn map_nested_fixed_array() {
+        // [f64; 3] inside a struct field type scenario - checks recursion works
+        let ty = FluxType::FixedArray(Box::new(FluxType::Float), 3);
+        assert_eq!(map_type(&ty, 42).unwrap(), "[f64; 3]");
     }
 }

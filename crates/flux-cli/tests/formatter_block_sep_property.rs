@@ -25,7 +25,7 @@ use flux_cli::formatter::Formatter;
 const FLUX_KEYWORDS: &[&str] = &[
     "strategy", "params", "state", "on", "if", "elif", "else", "for", "while",
     "return", "from", "import", "and", "or", "not", "true", "false", "null",
-    "in", "bar",
+    "in", "bar", "fn", "struct", "data", "connector",
 ];
 
 /// Generate a valid Flux identifier (not a keyword).
@@ -140,6 +140,7 @@ fn arb_multi_block_program() -> impl Strategy<Value = Program> {
         blocks_strategy,
     )
         .prop_map(|(name, body)| Program {
+            structs: vec![],
             imports: Vec::new(),
             functions: vec![],
             data_block: None,

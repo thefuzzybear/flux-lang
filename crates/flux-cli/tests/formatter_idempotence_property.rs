@@ -26,7 +26,7 @@ use flux_cli::formatter::Formatter;
 const FLUX_KEYWORDS: &[&str] = &[
     "strategy", "params", "state", "on", "if", "elif", "else", "for", "while",
     "return", "from", "import", "and", "or", "not", "true", "false", "null",
-    "in", "bar",
+    "in", "bar", "fn", "struct", "data", "connector",
 ];
 
 /// Generate a valid Flux identifier (not a keyword).
@@ -397,6 +397,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
         proptest::collection::vec(arb_strategy_item(), 1..4),
     )
         .prop_map(|(imports, name, body)| Program {
+            structs: vec![],
             imports: imports
                 .into_iter()
                 .map(|(module_path, names)| Import {
