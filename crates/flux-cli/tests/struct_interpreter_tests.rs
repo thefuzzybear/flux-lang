@@ -237,6 +237,8 @@ fn test_out_of_bounds_fixed_array_access_produces_error() {
             fields: vec![TypedStructField {
                 name: "values".to_string(),
                 resolved_type: array_type,
+                bit_width: None,
+                field_decorator_names: vec![],
                 span: Span::new(0, 0),
             }],
             decorators: vec![],
@@ -340,6 +342,8 @@ fn test_valid_fixed_array_access_returns_correct_element() {
             fields: vec![TypedStructField {
                 name: "values".to_string(),
                 resolved_type: array_type,
+                bit_width: None,
+                field_decorator_names: vec![],
                 span: Span::new(0, 0),
             }],
             decorators: vec![],

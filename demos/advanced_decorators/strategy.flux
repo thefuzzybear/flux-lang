@@ -14,30 +14,14 @@
 from market::l1 import {Quote, calc_spread, calc_mid}
 from market::l2 import {Book, book_spread_bps, book_microprice, book_imbalance}
 
-# =============================================================================
-# Decorated Types — Each demonstrates a different memory layout decorator
-# =============================================================================
+# Project-local module imports:
+from types::market_state import {MarketState, SignalVector, build_market_state}
+from types::config import {StrategyConfig, SessionStats}
+from types::orders import {LiveOrder, OrderFlags, TradeRecord}
 
-# @aligned(64): Cache-line aligned for hot-path access, prevents false sharing
-@aligned(64)
-struct MarketState {
-    mid_price: f64,
-    spread_bps: f64,
-    imbalance: f64,
-    microprice: f64,
-    last_trade_side: int,
-    tick_count: int
-}
-
-# @immutable: Frozen after construction — compiler rejects field assignment
-@immutable
-struct StrategyConfig {
-    max_spread_bps: f64,
-    min_imbalance: f64,
-    position_limit: f64,
-    skew_factor: f64,
-    fade_ticks: int
-}
+# =============================================================================
+# Additional decorated types (not in local modules — defined inline)
+# =============================================================================
 
 # @volatile: Reads/writes cannot be reordered — for shared-memory feeds
 @volatile
@@ -45,46 +29,6 @@ struct SharedFeedState {
     bid: f64,
     ask: f64,
     last_price: f64,
-    sequence: int
-}
-
-# @prefetch: CPU prefetch hints before struct access in hot loops
-@prefetch
-struct SignalVector {
-    bid_pressure: f64,
-    ask_pressure: f64,
-    momentum: f64,
-    mean_reversion: f64,
-    volatility: f64
-}
-
-# @pool(256): Pre-allocated slab with O(1) alloc/free for order lifecycle
-@pool(256)
-struct LiveOrder {
-    price: f64,
-    size: f64,
-    remaining: f64,
-    side: int,
-    status: int
-}
-
-# @bitfield: Bit-packed flags — bool=1 bit, int(N)=N bits, max 64 total
-@bitfield
-struct OrderFlags {
-    is_active: bool,
-    is_filled: bool,
-    is_cancelled: bool,
-    side: int(2),
-    priority: int(4),
-    venue_id: int(6)
-}
-
-# @packed: Zero padding — minimal footprint for wire formats and storage
-@packed
-struct TradeRecord {
-    price: f64,
-    size: f64,
-    side: int,
     sequence: int
 }
 
@@ -114,17 +58,6 @@ struct FillLog {
     size: f64,
     side: int,
     order_id: int
-}
-
-# @zero_init: All fields guaranteed zeroed (f64→0.0, int→0, bool→false)
-@zero_init
-struct SessionStats {
-    total_trades: int,
-    total_volume: f64,
-    pnl: f64,
-    max_drawdown: f64,
-    win_count: int,
-    loss_count: int
 }
 
 # @heap: Box<T> allocation — for large structs that exceed stack frame

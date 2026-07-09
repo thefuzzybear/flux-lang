@@ -53,6 +53,10 @@ pub struct TypedFnDef {
 pub struct TypedStructField {
     pub name: String,
     pub resolved_type: FluxType,
+    /// Bit width for `@bitfield` struct fields: `Some(1)` for bool, `Some(n)` for `int(n)`, `None` otherwise.
+    pub bit_width: Option<usize>,
+    /// Field-level decorator names (e.g. `"hot"`, `"cold"`), populated from the parsed AST.
+    pub field_decorator_names: Vec<String>,
     pub span: Span,
 }
 

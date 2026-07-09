@@ -311,14 +311,35 @@ impl TypeChecker {
 
             // Build the typed struct def from the now-registered info
             let info = &self.struct_registry[&struct_def.name];
+            let is_bitfield = info.decorators.iter().any(|d| d.kind == DecoratorKind::Bitfield);
             let typed_fields = info
                 .fields
                 .iter()
                 .zip(struct_def.fields.iter())
-                .map(|((name, resolved_type), field)| TypedStructField {
-                    name: name.clone(),
-                    resolved_type: resolved_type.clone(),
-                    span: field.span,
+                .map(|((name, resolved_type), field)| {
+                    // Compute bit_width for @bitfield structs from the source TypeAnnotation
+                    let bit_width = if is_bitfield {
+                        match &field.field_type {
+                            TypeAnnotation::Bool => Some(1),
+                            TypeAnnotation::BitInt(n) => Some(*n),
+                            TypeAnnotation::Int => Some(64),
+                            TypeAnnotation::F64 => Some(64),
+                            _ => Some(64),
+                        }
+                    } else {
+                        None
+                    };
+                    TypedStructField {
+                        name: name.clone(),
+                        resolved_type: resolved_type.clone(),
+                        bit_width,
+                        field_decorator_names: field
+                            .field_decorators
+                            .iter()
+                            .map(|d| d.name.clone())
+                            .collect(),
+                        span: field.span,
+                    }
                 })
                 .collect();
 

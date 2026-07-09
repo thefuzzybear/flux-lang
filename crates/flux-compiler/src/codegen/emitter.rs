@@ -203,6 +203,28 @@ impl<'a> CodeEmitter<'a> {
         }
     }
 
+    /// Return the zero-initialization expression for a given FluxType.
+    /// Used by `@zero_init` decorator to generate `impl Default`.
+    fn zero_init_value(ty: &FluxType) -> String {
+        match ty {
+            FluxType::Float => "0.0".to_string(),
+            FluxType::Int => "0".to_string(),
+            FluxType::Bool => "false".to_string(),
+            FluxType::String => "String::new()".to_string(),
+            FluxType::Struct(name) => format!("{}::default()", name),
+            FluxType::FixedArray(elem, size) => {
+                let elem_zero = Self::zero_init_value(elem);
+                format!("[{}; {}]", elem_zero, size)
+            }
+            FluxType::List(_) => "Vec::new()".to_string(),
+            FluxType::VecFloat => "Vec::new()".to_string(),
+            FluxType::MatFloat => "Vec::new()".to_string(),
+            FluxType::Signal => "Signal::default()".to_string(),
+            FluxType::Null | FluxType::Void => "()".to_string(),
+            FluxType::Fn { .. } => "/* unsupported */".to_string(),
+        }
+    }
+
     /// Emit all Flux struct definitions in dependency order.
     /// Each struct gets `#[derive(Clone, Copy)]` and `pub` visibility on all fields.
     fn emit_struct_definitions(&mut self) -> Result<()> {
@@ -215,6 +237,12 @@ impl<'a> CodeEmitter<'a> {
         struct StructEmitInfo {
             name: String,
             fields: Vec<(String, String)>,
+            /// Original FluxType for each field (used for zero-init value generation).
+            field_types: Vec<(String, FluxType)>,
+            /// Bit widths for @bitfield fields: (field_name, bit_width).
+            bit_widths: Vec<(String, usize)>,
+            /// Field-level decorator names per field: (field_name, vec_of_decorator_names).
+            field_decorators: Vec<(String, Vec<String>)>,
             is_heap: bool,
             is_packed: bool,
             aligned_n: Option<u32>,
@@ -240,6 +268,21 @@ impl<'a> CodeEmitter<'a> {
                             .map(|rust_type| (f.name.clone(), rust_type))
                     })
                     .collect();
+                let field_types: Vec<(String, FluxType)> = s
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.resolved_type.clone()))
+                    .collect();
+                let bit_widths: Vec<(String, usize)> = s
+                    .fields
+                    .iter()
+                    .filter_map(|f| f.bit_width.map(|w| (f.name.clone(), w)))
+                    .collect();
+                let field_decorators: Vec<(String, Vec<String>)> = s
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.field_decorator_names.clone()))
+                    .collect();
                 let is_heap = s.decorators.iter().any(|d| d.kind == DecoratorKind::Heap);
                 let is_packed = s.decorators.iter().any(|d| d.kind == DecoratorKind::Packed);
                 let aligned_n = s.decorators.iter().find_map(|d| {
@@ -261,6 +304,9 @@ impl<'a> CodeEmitter<'a> {
                 fields.map(|fs| StructEmitInfo {
                     name: s.name.clone(),
                     fields: fs,
+                    field_types,
+                    bit_widths,
+                    field_decorators,
                     is_heap,
                     is_packed,
                     aligned_n,
@@ -286,7 +332,7 @@ impl<'a> CodeEmitter<'a> {
                 self.output.push_str("// @streaming: non-temporal stores for field writes\n");
             }
             if info.is_soa {
-                self.output.push_str("// @soa: struct-of-arrays transformation intent\n");
+                self.output.push_str("// @soa: struct-of-arrays layout — companion SoA container emitted below\n");
             }
             if let Some(n) = info.is_pool {
                 self.output.push_str(&format!("// @pool({}): pre-allocated slab with free-list\n", n));
@@ -312,7 +358,7 @@ impl<'a> CodeEmitter<'a> {
             }
 
             // Emit #[repr(...)] attributes
-            if info.is_packed {
+            if info.is_packed && !info.is_bitfield {
                 self.output.push_str("#[repr(packed)]\n");
             }
             if let Some(n) = info.aligned_n {
@@ -323,12 +369,446 @@ impl<'a> CodeEmitter<'a> {
                 self.output.push_str(&format!("#[repr(align({}))]\n", n / 8));
             }
 
-            self.output.push_str(&format!("pub struct {} {{\n", info.name));
-            for (field_name, rust_type) in &info.fields {
-                self.output
-                    .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
+            if info.is_bitfield {
+                // --- @bitfield: emit packed u64 storage with bitwise accessors ---
+                self.output.push_str(&format!("pub struct {} {{\n", info.name));
+                self.output.push_str("    _bits: u64,\n");
+                self.output.push_str("}\n\n");
+
+                self.output.push_str(&format!("impl {} {{\n", info.name));
+                let mut bit_offset: usize = 0;
+                for (field_name, width) in &info.bit_widths {
+                    let mask = (1u64 << width) - 1;
+                    let field_type = info.field_types.iter().find(|(n, _)| n == field_name);
+                    let is_bool = field_type.map(|(_, t)| matches!(t, FluxType::Bool)).unwrap_or(false);
+
+                    if is_bool {
+                        // Bool getter: returns bool
+                        self.output.push_str(&format!(
+                            "    // {}: bit {}, width {}\n",
+                            field_name, bit_offset, width
+                        ));
+                        self.output.push_str(&format!(
+                            "    pub fn get_{}(&self) -> bool {{ (self._bits >> {}) & 0x{:X} != 0 }}\n",
+                            field_name, bit_offset, mask
+                        ));
+                        // Bool setter
+                        self.output.push_str(&format!(
+                            "    pub fn set_{}(&mut self, val: bool) {{\n",
+                            field_name
+                        ));
+                        self.output.push_str(&format!(
+                            "        if val {{ self._bits |= 0x{:X} << {}; }} else {{ self._bits &= !(0x{:X} << {}); }}\n",
+                            mask, bit_offset, mask, bit_offset
+                        ));
+                        self.output.push_str("    }\n");
+                    } else {
+                        // Int getter: returns i64
+                        self.output.push_str(&format!(
+                            "    // {}: bits {}..{}, width {}\n",
+                            field_name, bit_offset, bit_offset + width, width
+                        ));
+                        self.output.push_str(&format!(
+                            "    pub fn get_{}(&self) -> i64 {{ ((self._bits >> {}) & 0x{:X}) as i64 }}\n",
+                            field_name, bit_offset, mask
+                        ));
+                        // Int setter
+                        self.output.push_str(&format!(
+                            "    pub fn set_{}(&mut self, val: i64) {{\n",
+                            field_name
+                        ));
+                        self.output.push_str(&format!(
+                            "        self._bits = (self._bits & !(0x{:X} << {})) | (((val as u64) & 0x{:X}) << {});\n",
+                            mask, bit_offset, mask, bit_offset
+                        ));
+                        self.output.push_str("    }\n");
+                    }
+
+                    bit_offset += width;
+                }
+                self.output.push_str("}\n\n");
+            } else {
+                // --- Normal struct emission ---
+                self.output.push_str(&format!("pub struct {} {{\n", info.name));
+                for (field_name, rust_type) in &info.fields {
+                    self.output
+                        .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
+                }
+                self.output.push_str("}\n\n");
             }
-            self.output.push_str("}\n\n");
+
+            // Emit `impl Default` for @zero_init structs (not applicable for @bitfield)
+            if info.is_zero_init && !info.is_bitfield {
+                self.output.push_str(&format!("impl Default for {} {{\n", info.name));
+                self.output.push_str("    fn default() -> Self {\n");
+                self.output.push_str("        Self {\n");
+                for (field_name, field_type) in &info.field_types {
+                    let zero_value = Self::zero_init_value(field_type);
+                    self.output.push_str(&format!("            {}: {},\n", field_name, zero_value));
+                }
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+                self.output.push_str("}\n\n");
+            }
+
+            // Emit volatile accessor impl block for @volatile structs (not applicable for @bitfield)
+            if info.is_volatile && !info.is_bitfield {
+                self.output.push_str(&format!("impl {} {{\n", info.name));
+                for (field_name, rust_type) in &info.fields {
+                    // Getter: read_volatile
+                    self.output.push_str("    #[inline(always)]\n");
+                    self.output.push_str(&format!(
+                        "    pub fn get_{}(&self) -> {} {{\n",
+                        field_name, rust_type
+                    ));
+                    self.output.push_str(&format!(
+                        "        unsafe {{ std::ptr::read_volatile(&self.{}) }}\n",
+                        field_name
+                    ));
+                    self.output.push_str("    }\n");
+                    // Setter: write_volatile
+                    self.output.push_str("    #[inline(always)]\n");
+                    self.output.push_str(&format!(
+                        "    pub fn set_{}(&mut self, val: {}) {{\n",
+                        field_name, rust_type
+                    ));
+                    self.output.push_str(&format!(
+                        "        unsafe {{ std::ptr::write_volatile(&mut self.{}, val) }}\n",
+                        field_name
+                    ));
+                    self.output.push_str("    }\n");
+                }
+                self.output.push_str("}\n\n");
+            }
+
+            // Emit prefetch helper impl block for @prefetch structs
+            if info.is_prefetch {
+                self.output.push_str(&format!("impl {} {{\n", info.name));
+                self.output.push_str("    /// Prefetch this struct into L1 cache for read access.\n");
+                self.output.push_str("    #[inline(always)]\n");
+                self.output.push_str("    pub fn prefetch(&self) {\n");
+                self.output.push_str("        #[cfg(target_arch = \"x86_64\")]\n");
+                self.output.push_str("        unsafe {\n");
+                self.output.push_str("            std::arch::x86_64::_mm_prefetch(\n");
+                self.output.push_str("                self as *const Self as *const i8,\n");
+                self.output.push_str("                std::arch::x86_64::_MM_HINT_T0,\n");
+                self.output.push_str("            );\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("        #[cfg(target_arch = \"aarch64\")]\n");
+                self.output.push_str("        unsafe {\n");
+                self.output.push_str("            std::arch::aarch64::_prefetch(\n");
+                self.output.push_str("                self as *const Self as *const i8,\n");
+                self.output.push_str("                0, // read\n");
+                self.output.push_str("                3, // L1 cache\n");
+                self.output.push_str("            );\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+                self.output.push_str("}\n\n");
+            }
+
+            // Emit streaming (non-temporal store) impl block for @streaming structs
+            if info.is_streaming {
+                self.output.push_str(&format!("impl {} {{\n", info.name));
+                for (field_name, rust_type) in &info.fields {
+                    self.output.push_str(&format!(
+                        "    /// Write `{}` using non-temporal store (bypasses cache).\n",
+                        field_name
+                    ));
+                    self.output.push_str("    #[inline(always)]\n");
+                    self.output.push_str(&format!(
+                        "    pub fn stream_{}(&mut self, val: {}) {{\n",
+                        field_name, rust_type
+                    ));
+                    self.output.push_str("        unsafe {\n");
+                    self.output.push_str(&format!(
+                        "            let ptr = &mut self.{} as *mut {};\n",
+                        field_name, rust_type
+                    ));
+                    self.output.push_str("            #[cfg(target_arch = \"x86_64\")]\n");
+                    self.output.push_str("            {\n");
+                    self.output.push_str("                // Use write_volatile as a portable approximation of NT store.\n");
+                    self.output.push_str("                // True NT stores require SSE streaming intrinsics on aligned data.\n");
+                    self.output.push_str("                std::ptr::write_volatile(ptr, val);\n");
+                    self.output.push_str("            }\n");
+                    self.output.push_str("            #[cfg(not(target_arch = \"x86_64\"))]\n");
+                    self.output.push_str("            {\n");
+                    self.output.push_str("                std::ptr::write_volatile(ptr, val);\n");
+                    self.output.push_str("            }\n");
+                    self.output.push_str("        }\n");
+                    self.output.push_str("    }\n");
+                }
+                self.output.push_str("\n");
+                self.output.push_str("    /// Memory fence ensuring all streaming writes are visible.\n");
+                self.output.push_str("    #[inline(always)]\n");
+                self.output.push_str("    pub fn stream_fence() {\n");
+                self.output.push_str("        #[cfg(target_arch = \"x86_64\")]\n");
+                self.output.push_str("        unsafe {\n");
+                self.output.push_str("            std::arch::x86_64::_mm_sfence();\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+                self.output.push_str("}\n\n");
+            }
+
+            // Emit pool module for @pool(N) structs: pre-allocated slab with O(1) alloc/free
+            if let Some(pool_size) = info.is_pool {
+                self.output.push_str(&format!("mod pool_{} {{\n", info.name));
+                self.output.push_str(&format!("    use super::{};\n", info.name));
+                self.output.push_str("    use std::sync::atomic::{AtomicUsize, Ordering};\n");
+                self.output.push_str("\n");
+                self.output.push_str(&format!("    const POOL_SIZE: usize = {};\n", pool_size));
+                self.output.push_str(&format!(
+                    "    static mut SLAB: [std::mem::MaybeUninit<{}>; POOL_SIZE] =\n",
+                    info.name
+                ));
+                self.output.push_str("        unsafe { std::mem::MaybeUninit::uninit().assume_init() };\n");
+                self.output.push_str("    static mut FREE_LIST: [usize; POOL_SIZE] = [0; POOL_SIZE];\n");
+                self.output.push_str("    static FREE_TOP: AtomicUsize = AtomicUsize::new(POOL_SIZE);\n");
+                self.output.push_str("\n");
+                self.output.push_str("    /// Initialize the pool (must be called once before use).\n");
+                self.output.push_str("    pub fn init() {\n");
+                self.output.push_str("        unsafe {\n");
+                self.output.push_str("            for i in 0..POOL_SIZE {\n");
+                self.output.push_str("                FREE_LIST[i] = i;\n");
+                self.output.push_str("            }\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+                self.output.push_str("\n");
+                self.output.push_str("    /// Allocate a slot from the pool. Returns None if pool is exhausted.\n");
+                self.output.push_str(&format!(
+                    "    pub fn alloc() -> Option<&'static mut {}> {{\n",
+                    info.name
+                ));
+                self.output.push_str("        let top = FREE_TOP.fetch_sub(1, Ordering::Relaxed);\n");
+                self.output.push_str("        if top == 0 {\n");
+                self.output.push_str("            FREE_TOP.fetch_add(1, Ordering::Relaxed);\n");
+                self.output.push_str("            return None;\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("        unsafe {\n");
+                self.output.push_str("            let idx = FREE_LIST[top - 1];\n");
+                self.output.push_str("            Some(&mut *SLAB[idx].as_mut_ptr())\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+                self.output.push_str("\n");
+                self.output.push_str("    /// Return a slot to the pool.\n");
+                self.output.push_str(&format!(
+                    "    pub fn free(slot: &mut {}) {{\n",
+                    info.name
+                ));
+                self.output.push_str("        unsafe {\n");
+                self.output.push_str("            let base = SLAB.as_ptr() as usize;\n");
+                self.output.push_str(&format!(
+                    "            let ptr = slot as *mut {} as usize;\n",
+                    info.name
+                ));
+                self.output.push_str(&format!(
+                    "            let idx = (ptr - base) / std::mem::size_of::<{}>();\n",
+                    info.name
+                ));
+                self.output.push_str("            let top = FREE_TOP.fetch_add(1, Ordering::Relaxed);\n");
+                self.output.push_str("            FREE_LIST[top] = idx;\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+                self.output.push_str("}\n\n");
+            }
+
+            // Emit SoA (Struct-of-Arrays) companion container for @soa structs
+            if info.is_soa {
+                let soa_name = format!("{}SoA", info.name);
+
+                // Doc comment
+                self.output.push_str(&format!(
+                    "/// SoA (Struct-of-Arrays) container for {}.\n",
+                    info.name
+                ));
+                self.output.push_str(&format!(
+                    "/// Instead of `[{}; N]`, use `{}::with_capacity(N)` for\n",
+                    info.name, soa_name
+                ));
+                self.output.push_str("/// cache-friendly per-field iteration and SIMD vectorization.\n");
+
+                // Struct definition
+                self.output.push_str(&format!("pub struct {} {{\n", soa_name));
+                for (field_name, rust_type) in &info.fields {
+                    self.output.push_str(&format!(
+                        "    pub {}: Vec<{}>,\n",
+                        field_name, rust_type
+                    ));
+                }
+                self.output.push_str("    pub len: usize,\n");
+                self.output.push_str("}\n\n");
+
+                // impl block
+                self.output.push_str(&format!("impl {} {{\n", soa_name));
+
+                // with_capacity constructor
+                self.output.push_str("    pub fn with_capacity(cap: usize) -> Self {\n");
+                self.output.push_str("        Self {\n");
+                for (field_name, _rust_type) in &info.fields {
+                    let field_type = info.field_types.iter().find(|(n, _)| n == field_name);
+                    let zero_val = match field_type {
+                        Some((_, FluxType::Float)) => "0.0",
+                        Some((_, FluxType::Int)) => "0",
+                        Some((_, FluxType::Bool)) => "false",
+                        _ => "Default::default()",
+                    };
+                    self.output.push_str(&format!(
+                        "            {}: vec![{}; cap],\n",
+                        field_name, zero_val
+                    ));
+                }
+                self.output.push_str("            len: 0,\n");
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n\n");
+
+                // push method
+                self.output.push_str(&format!(
+                    "    pub fn push(&mut self, item: {}) {{\n",
+                    info.name
+                ));
+                self.output.push_str("        let idx = self.len;\n");
+                for (field_name, _) in &info.fields {
+                    self.output.push_str(&format!(
+                        "        self.{}[idx] = item.{};\n",
+                        field_name, field_name
+                    ));
+                }
+                self.output.push_str("        self.len += 1;\n");
+                self.output.push_str("    }\n\n");
+
+                // get method
+                self.output.push_str(&format!(
+                    "    pub fn get(&self, idx: usize) -> {} {{\n",
+                    info.name
+                ));
+                self.output.push_str(&format!("        {} {{\n", info.name));
+                for (field_name, _) in &info.fields {
+                    self.output.push_str(&format!(
+                        "            {}: self.{}[idx],\n",
+                        field_name, field_name
+                    ));
+                }
+                self.output.push_str("        }\n");
+                self.output.push_str("    }\n");
+
+                self.output.push_str("}\n\n");
+            }
+
+            // Emit @hot/@cold field-level split: cache-line-separated sub-structs
+            let hot_fields: Vec<&(String, String)> = info
+                .fields
+                .iter()
+                .filter(|(name, _)| {
+                    info.field_decorators
+                        .iter()
+                        .any(|(n, decs)| n == name && decs.contains(&"hot".to_string()))
+                })
+                .collect();
+            let cold_fields: Vec<&(String, String)> = info
+                .fields
+                .iter()
+                .filter(|(name, _)| {
+                    info.field_decorators
+                        .iter()
+                        .any(|(n, decs)| n == name && decs.contains(&"cold".to_string()))
+                })
+                .collect();
+
+            if !hot_fields.is_empty() || !cold_fields.is_empty() {
+                let hot_name = format!("{}_Hot", info.name);
+                let cold_name = format!("{}_Cold", info.name);
+
+                self.output.push_str(
+                    "// @hot/@cold split: frequently-accessed fields grouped for cache efficiency\n"
+                );
+
+                // Emit _Hot sub-struct (aligned to 64-byte cache line)
+                if !hot_fields.is_empty() {
+                    self.output.push_str("#[derive(Clone, Copy)]\n");
+                    self.output.push_str("#[repr(align(64))]\n");
+                    self.output.push_str(&format!("pub struct {} {{\n", hot_name));
+                    for (field_name, rust_type) in &hot_fields {
+                        self.output
+                            .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
+                    }
+                    self.output.push_str("}\n\n");
+                }
+
+                // Emit _Cold sub-struct
+                if !cold_fields.is_empty() {
+                    self.output.push_str("#[derive(Clone, Copy)]\n");
+                    self.output.push_str(&format!("pub struct {} {{\n", cold_name));
+                    for (field_name, rust_type) in &cold_fields {
+                        self.output
+                            .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
+                    }
+                    self.output.push_str("}\n\n");
+                }
+
+                // Emit split() method on original struct
+                if !hot_fields.is_empty() && !cold_fields.is_empty() {
+                    self.output.push_str(&format!("impl {} {{\n", info.name));
+                    self.output.push_str(&format!(
+                        "    pub fn split(&self) -> ({}, {}) {{\n",
+                        hot_name, cold_name
+                    ));
+                    self.output.push_str("        (\n");
+                    // Hot struct init
+                    self.output.push_str(&format!("            {} {{\n", hot_name));
+                    for (field_name, _) in &hot_fields {
+                        self.output.push_str(&format!(
+                            "                {}: self.{},\n",
+                            field_name, field_name
+                        ));
+                    }
+                    self.output.push_str("            },\n");
+                    // Cold struct init
+                    self.output.push_str(&format!("            {} {{\n", cold_name));
+                    for (field_name, _) in &cold_fields {
+                        self.output.push_str(&format!(
+                            "                {}: self.{},\n",
+                            field_name, field_name
+                        ));
+                    }
+                    self.output.push_str("            },\n");
+                    self.output.push_str("        )\n");
+                    self.output.push_str("    }\n");
+                    self.output.push_str("}\n\n");
+                } else if !hot_fields.is_empty() {
+                    // Only hot fields — emit split that returns just the hot sub-struct
+                    self.output.push_str(&format!("impl {} {{\n", info.name));
+                    self.output.push_str(&format!(
+                        "    pub fn split_hot(&self) -> {} {{\n",
+                        hot_name
+                    ));
+                    self.output.push_str(&format!("        {} {{\n", hot_name));
+                    for (field_name, _) in &hot_fields {
+                        self.output.push_str(&format!(
+                            "            {}: self.{},\n",
+                            field_name, field_name
+                        ));
+                    }
+                    self.output.push_str("        }\n");
+                    self.output.push_str("    }\n");
+                    self.output.push_str("}\n\n");
+                } else {
+                    // Only cold fields — emit split that returns just the cold sub-struct
+                    self.output.push_str(&format!("impl {} {{\n", info.name));
+                    self.output.push_str(&format!(
+                        "    pub fn split_cold(&self) -> {} {{\n",
+                        cold_name
+                    ));
+                    self.output.push_str(&format!("        {} {{\n", cold_name));
+                    for (field_name, _) in &cold_fields {
+                        self.output.push_str(&format!(
+                            "            {}: self.{},\n",
+                            field_name, field_name
+                        ));
+                    }
+                    self.output.push_str("        }\n");
+                    self.output.push_str("    }\n");
+                    self.output.push_str("}\n\n");
+                }
+            }
         }
 
         Ok(())
@@ -2881,5 +3361,144 @@ mod tests {
             "}\n",
         );
         assert_eq!(output, expected);
+    }
+
+    // ===== @hot/@cold field-level decorator codegen test =====
+
+    #[test]
+    fn hot_cold_field_decorators_emit_split_structs() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "MarketTick".to_string(),
+            fields: vec![
+                TypedStructField {
+                    name: "price".to_string(),
+                    resolved_type: FluxType::Float,
+                    bit_width: None,
+                    field_decorator_names: vec!["hot".to_string()],
+                    span: Span::new(10, 20),
+                },
+                TypedStructField {
+                    name: "volume".to_string(),
+                    resolved_type: FluxType::Float,
+                    bit_width: None,
+                    field_decorator_names: vec!["hot".to_string()],
+                    span: Span::new(20, 30),
+                },
+                TypedStructField {
+                    name: "exchange_id".to_string(),
+                    resolved_type: FluxType::Int,
+                    bit_width: None,
+                    field_decorator_names: vec!["cold".to_string()],
+                    span: Span::new(30, 40),
+                },
+                TypedStructField {
+                    name: "debug_tag".to_string(),
+                    resolved_type: FluxType::Int,
+                    bit_width: None,
+                    field_decorator_names: vec!["cold".to_string()],
+                    span: Span::new(40, 50),
+                },
+            ],
+            decorators: vec![],
+            span: Span::new(0, 60),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        // The original struct is still emitted
+        assert!(output.contains("pub struct MarketTick {"), "original struct missing");
+        assert!(output.contains("pub price: f64,"), "price field missing");
+
+        // Hot sub-struct with cache-line alignment
+        assert!(output.contains("#[repr(align(64))]"), "cache-line alignment missing");
+        assert!(output.contains("pub struct MarketTick_Hot {"), "hot sub-struct missing");
+        assert!(output.contains("pub struct MarketTick_Cold {"), "cold sub-struct missing");
+
+        // Split method emitted
+        assert!(output.contains("pub fn split(&self) -> (MarketTick_Hot, MarketTick_Cold)"), "split method missing");
+
+        // Verify hot struct contains only hot fields
+        let hot_start = output.find("pub struct MarketTick_Hot {").unwrap();
+        let hot_end = output[hot_start..].find('}').unwrap() + hot_start;
+        let hot_body = &output[hot_start..hot_end];
+        assert!(hot_body.contains("pub price: f64,"), "hot struct missing price");
+        assert!(hot_body.contains("pub volume: f64,"), "hot struct missing volume");
+        assert!(!hot_body.contains("exchange_id"), "hot struct should not have cold field");
+
+        // Verify cold struct contains only cold fields
+        let cold_start = output.find("pub struct MarketTick_Cold {").unwrap();
+        let cold_end = output[cold_start..].find('}').unwrap() + cold_start;
+        let cold_body = &output[cold_start..cold_end];
+        assert!(cold_body.contains("pub exchange_id: i64,"), "cold struct missing exchange_id");
+        assert!(cold_body.contains("pub debug_tag: i64,"), "cold struct missing debug_tag");
+        assert!(!cold_body.contains("price"), "cold struct should not have hot field");
+    }
+
+    #[test]
+    fn no_hot_cold_decorators_emits_no_split() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "Plain".to_string(),
+            fields: vec![
+                TypedStructField {
+                    name: "x".to_string(),
+                    resolved_type: FluxType::Float,
+                    bit_width: None,
+                    field_decorator_names: vec![],
+                    span: Span::new(10, 20),
+                },
+                TypedStructField {
+                    name: "y".to_string(),
+                    resolved_type: FluxType::Float,
+                    bit_width: None,
+                    field_decorator_names: vec![],
+                    span: Span::new(20, 30),
+                },
+            ],
+            decorators: vec![],
+            span: Span::new(0, 40),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(output.contains("pub struct Plain {"), "struct missing");
+        assert!(!output.contains("Plain_Hot"), "should not emit hot split");
+        assert!(!output.contains("Plain_Cold"), "should not emit cold split");
+    }
+
+    #[test]
+    fn hot_only_decorators_emit_split_hot() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "Tick".to_string(),
+            fields: vec![
+                TypedStructField {
+                    name: "price".to_string(),
+                    resolved_type: FluxType::Float,
+                    bit_width: None,
+                    field_decorator_names: vec!["hot".to_string()],
+                    span: Span::new(10, 20),
+                },
+                TypedStructField {
+                    name: "extra".to_string(),
+                    resolved_type: FluxType::Float,
+                    bit_width: None,
+                    field_decorator_names: vec![],
+                    span: Span::new(20, 30),
+                },
+            ],
+            decorators: vec![],
+            span: Span::new(0, 40),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(output.contains("pub struct Tick_Hot {"), "hot sub-struct missing");
+        assert!(!output.contains("Tick_Cold"), "should not emit cold split when no cold fields");
+        assert!(output.contains("pub fn split_hot(&self) -> Tick_Hot"), "split_hot method missing");
     }
 }

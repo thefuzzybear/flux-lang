@@ -188,8 +188,8 @@ pub fn resolve_modules(program: Program, main_file_dir: &Path) -> Result<Program
 struct ModuleResolver {
     /// Base directory for resolving the initial imports (main file's dir).
     base_dir: PathBuf,
-    /// Cache: canonical path → parsed function definitions.
-    cache: HashMap<PathBuf, Vec<FnDef>>,
+    /// Cache: canonical path → parsed (struct definitions, function definitions).
+    cache: HashMap<PathBuf, (Vec<StructDef>, Vec<FnDef>)>,
     /// Import stack for circular dependency detection.
     import_stack: Vec<PathBuf>,
 }
@@ -281,28 +281,68 @@ impl ModuleResolver {
             }
         }
 
-        // Resolve each file-module import (existing behavior)
+        // Resolve each file-module import (handles both structs and functions)
         for import in &file_imports {
             let base_dir = self.base_dir.clone();
             let resolved_path = self.resolve_path(&import.module_path, &base_dir)?;
-            let all_fns = self.load_file(&resolved_path)?;
+            let (all_structs, all_fns) = self.load_file(&resolved_path)?;
 
-            // Selective inclusion: walk call graph from requested names
-            let selected = self.select_functions(&import.names, &all_fns, &resolved_path)?;
+            // Partition requested names into struct names and function names
+            let mut fn_names: Vec<String> = Vec::new();
+            for name in &import.names {
+                let is_struct = all_structs.iter().any(|s| s.name == *name);
+                let is_fn = all_fns.iter().any(|f| f.name == *name);
 
-            // Check for duplicates
-            for fn_def in &selected {
-                if let Some(existing_file) = known_names.get(&fn_def.name) {
-                    return Err(ModuleError::DuplicateFunction {
-                        name: fn_def.name.clone(),
-                        first_file: existing_file.clone(),
-                        second_file: resolved_path.clone(),
+                if !is_struct && !is_fn {
+                    return Err(ModuleError::FunctionNotFound {
+                        function_name: name.clone(),
+                        file_path: resolved_path.clone(),
                     });
                 }
-                known_names.insert(fn_def.name.clone(), resolved_path.clone());
+
+                // Check for duplicates
+                if let Some(existing_file) = known_names.get(name) {
+                    if !is_struct {
+                        return Err(ModuleError::DuplicateFunction {
+                            name: name.clone(),
+                            first_file: existing_file.clone(),
+                            second_file: resolved_path.clone(),
+                        });
+                    }
+                }
+                known_names.insert(name.clone(), resolved_path.clone());
+
+                if is_struct {
+                    let struct_def = all_structs.iter().find(|s| s.name == *name).unwrap();
+                    self.add_struct_with_deps(struct_def, &all_structs, &mut merged_structs);
+                }
+                if is_fn {
+                    fn_names.push(name.clone());
+                }
             }
 
-            merged_functions.extend(selected);
+            // Selective inclusion: walk call graph from requested function names only
+            if !fn_names.is_empty() {
+                let selected = self.select_functions(&fn_names, &all_fns, &resolved_path)?;
+
+                // Check for duplicates (only for transitive dependencies not already registered)
+                for fn_def in &selected {
+                    if let Some(existing_file) = known_names.get(&fn_def.name) {
+                        // Skip if we already registered this name from the same file
+                        if existing_file == &resolved_path {
+                            continue;
+                        }
+                        return Err(ModuleError::DuplicateFunction {
+                            name: fn_def.name.clone(),
+                            first_file: existing_file.clone(),
+                            second_file: resolved_path.clone(),
+                        });
+                    }
+                    known_names.insert(fn_def.name.clone(), resolved_path.clone());
+                }
+
+                merged_functions.extend(selected);
+            }
         }
 
         // Assemble final program: retain only built-in imports, merge functions and structs
@@ -313,7 +353,7 @@ impl ModuleResolver {
     }
 
     /// Load and parse a library file, using cache and detecting cycles.
-    fn load_file(&mut self, path: &Path) -> Result<Vec<FnDef>, ModuleError> {
+    fn load_file(&mut self, path: &Path) -> Result<(Vec<StructDef>, Vec<FnDef>), ModuleError> {
         // Check cache first
         if let Some(cached) = self.cache.get(path) {
             return Ok(cached.clone());
@@ -355,47 +395,50 @@ impl ModuleResolver {
             .cloned()
             .collect();
 
+        let mut all_structs = program.structs;
         let mut all_fns = program.functions;
 
         for import in &file_imports {
             let dep_path = self.resolve_path(&import.module_path, file_dir)?;
-            let dep_fns = self.load_file(&dep_path)?;
+            let (dep_structs, dep_fns) = self.load_file(&dep_path)?;
+            // Merge structs from dependencies (avoid duplicates)
+            for s in dep_structs {
+                if !all_structs.iter().any(|existing| existing.name == s.name) {
+                    all_structs.push(s);
+                }
+            }
             let selected = self.select_functions(&import.names, &dep_fns, &dep_path)?;
             all_fns.extend(selected);
         }
 
         // Pop import stack and cache result
         self.import_stack.pop();
-        self.cache.insert(path.to_path_buf(), all_fns.clone());
+        self.cache.insert(path.to_path_buf(), (all_structs.clone(), all_fns.clone()));
 
-        Ok(all_fns)
+        Ok((all_structs, all_fns))
     }
 
     /// Select only the explicitly requested functions plus their transitive call dependencies.
+    /// Names that don't match any available function are silently skipped (they may be structs).
     fn select_functions(
         &self,
         requested_names: &[String],
         available_fns: &[FnDef],
-        file_path: &Path,
+        _file_path: &Path,
     ) -> Result<Vec<FnDef>, ModuleError> {
         let fn_map: HashMap<&str, &FnDef> = available_fns
             .iter()
             .map(|f| (f.name.as_str(), f))
             .collect();
 
-        // Verify all requested names exist
-        for name in requested_names {
-            if !fn_map.contains_key(name.as_str()) {
-                return Err(ModuleError::FunctionNotFound {
-                    function_name: name.clone(),
-                    file_path: file_path.to_path_buf(),
-                });
-            }
-        }
-
         // BFS from requested names to find transitive dependencies
+        // (skip names not found in the function map — they may be struct imports)
         let mut included: HashSet<&str> = HashSet::new();
-        let mut queue: VecDeque<&str> = requested_names.iter().map(|s| s.as_str()).collect();
+        let mut queue: VecDeque<&str> = requested_names
+            .iter()
+            .filter(|n| fn_map.contains_key(n.as_str()))
+            .map(|s| s.as_str())
+            .collect();
 
         while let Some(name) = queue.pop_front() {
             if included.contains(name) {
