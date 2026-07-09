@@ -3,8 +3,12 @@
 //! Resolves `::` path-separated imports to filesystem paths, parses library files,
 //! walks the call graph for selective function inclusion, and merges `FnDef` nodes
 //! into the main `Program` AST before typechecking.
+//!
+//! Stdlib struct modules (`market::l1`, `market::l2`, `collections::buffers`) are
+//! resolved from the workspace `std/` directory and provide both struct definitions
+//! and helper functions to the importing scope.
 
-use flux_compiler::parser::ast::{Expr, ExprKind, FnDef, Program, Stmt};
+use flux_compiler::parser::ast::{Expr, ExprKind, FnDef, Program, Stmt, StructDef};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -93,6 +97,81 @@ impl fmt::Display for ModuleError {
 
 impl std::error::Error for ModuleError {}
 
+/// Known stdlib struct module paths and the struct names they export.
+const STDLIB_STRUCT_MODULES: &[(&str, &[&str])] = &[
+    ("market::l1", &["Tick", "Bar", "Quote", "MarketSnapshot"]),
+    ("market::l2", &["Level", "Book"]),
+    ("collections::buffers", &["QuoteWindow", "BarWindow", "Quote", "Bar"]),
+];
+
+/// Known stdlib function names exported from struct modules.
+const STDLIB_MODULE_FUNCTIONS: &[(&str, &[&str])] = &[
+    (
+        "market::l1",
+        &[
+            "calc_spread",
+            "calc_mid",
+            "classify_trade",
+            "window_new",
+            "window_push",
+            "window_get",
+            "window_mean",
+        ],
+    ),
+    (
+        "market::l2",
+        &["book_spread_bps", "book_microprice", "book_imbalance", "book_vwap"],
+    ),
+    (
+        "collections::buffers",
+        &[
+            "quotewindow_new",
+            "quotewindow_push",
+            "quotewindow_get",
+            "barwindow_new",
+            "barwindow_push",
+            "barwindow_get",
+        ],
+    ),
+];
+
+/// Returns the import path suggestion for a struct type name, if it's a known stdlib struct.
+pub fn suggest_import_for_struct(name: &str) -> Option<&'static str> {
+    for &(module_path, struct_names) in STDLIB_STRUCT_MODULES {
+        if struct_names.contains(&name) {
+            return Some(module_path);
+        }
+    }
+    None
+}
+
+/// Check if a name is a struct exported by a given stdlib module path.
+pub fn is_stdlib_struct(module_path: &str, name: &str) -> bool {
+    for &(path, struct_names) in STDLIB_STRUCT_MODULES {
+        if path == module_path {
+            return struct_names.contains(&name);
+        }
+    }
+    false
+}
+
+/// Check if a name is a function exported by a given stdlib module path.
+pub fn is_stdlib_function(module_path: &str, name: &str) -> bool {
+    for &(path, fn_names) in STDLIB_MODULE_FUNCTIONS {
+        if path == module_path {
+            return fn_names.contains(&name);
+        }
+    }
+    false
+}
+
+/// Check if a module path corresponds to a known stdlib struct module.
+pub fn is_stdlib_struct_module(module_path: &str) -> bool {
+    STDLIB_STRUCT_MODULES
+        .iter()
+        .any(|&(path, _)| path == module_path)
+}
+
 /// Resolve all file-module imports in the given program.
 ///
 /// - `program`: The parsed main-file Program AST
@@ -125,13 +204,26 @@ impl ModuleResolver {
     }
 
     fn resolve(&mut self, mut program: Program) -> Result<Program, ModuleError> {
-        // Partition imports into file-module (contains `::`) and built-in (no `::`)
-        let (file_imports, builtin_imports): (Vec<_>, Vec<_>) = program
-            .imports
-            .into_iter()
-            .partition(|imp| imp.module_path.contains("::"));
+        // Partition imports into:
+        // - stdlib struct modules (e.g., market::l1, market::l2, collections::buffers)
+        // - file-module (contains `::` but not a stdlib struct module)
+        // - built-in (no `::`)
+        let mut file_imports = Vec::new();
+        let mut builtin_imports = Vec::new();
+        let mut stdlib_struct_imports = Vec::new();
 
-        // Resolve each file-module import
+        for imp in program.imports.into_iter() {
+            if !imp.module_path.contains("::") {
+                builtin_imports.push(imp);
+            } else if is_stdlib_struct_module(&imp.module_path) {
+                stdlib_struct_imports.push(imp);
+            } else {
+                file_imports.push(imp);
+            }
+        }
+
+        // Resolve stdlib struct module imports
+        let mut merged_structs: Vec<StructDef> = Vec::new();
         let mut merged_functions: Vec<FnDef> = Vec::new();
         let mut known_names: HashMap<String, PathBuf> = HashMap::new();
 
@@ -139,7 +231,57 @@ impl ModuleResolver {
         for fn_def in &program.functions {
             known_names.insert(fn_def.name.clone(), self.base_dir.join("main"));
         }
+        // Register main file's own structs as known
+        for struct_def in &program.structs {
+            known_names.insert(struct_def.name.clone(), self.base_dir.join("main"));
+        }
 
+        for import in &stdlib_struct_imports {
+            let stdlib_path = self.resolve_stdlib_path(&import.module_path)?;
+            let (all_structs, all_fns) = self.load_stdlib_file(&stdlib_path)?;
+
+            // Select requested names (structs + functions)
+            for name in &import.names {
+                let is_struct = all_structs.iter().any(|s| s.name == *name);
+                let is_fn = all_fns.iter().any(|f| f.name == *name);
+
+                if !is_struct && !is_fn {
+                    return Err(ModuleError::FunctionNotFound {
+                        function_name: name.clone(),
+                        file_path: stdlib_path.clone(),
+                    });
+                }
+
+                // Check for duplicates
+                if let Some(existing_file) = known_names.get(name) {
+                    // Allow silent override for structs duplicated across stdlib files
+                    // (e.g., Quote/Bar defined in both l1.flux and buffers.flux)
+                    if !is_struct {
+                        return Err(ModuleError::DuplicateFunction {
+                            name: name.clone(),
+                            first_file: existing_file.clone(),
+                            second_file: stdlib_path.clone(),
+                        });
+                    }
+                }
+                known_names.insert(name.clone(), stdlib_path.clone());
+
+                if is_struct {
+                    let struct_def = all_structs.iter().find(|s| s.name == *name).unwrap();
+                    // Also add any struct dependencies (e.g., Quote depends on nothing,
+                    // but MarketSnapshot depends on Quote, Book depends on Level)
+                    self.add_struct_with_deps(struct_def, &all_structs, &mut merged_structs);
+                }
+                if is_fn {
+                    let fn_def = all_fns.iter().find(|f| f.name == *name).unwrap();
+                    if !merged_functions.iter().any(|f| f.name == fn_def.name) {
+                        merged_functions.push(fn_def.clone());
+                    }
+                }
+            }
+        }
+
+        // Resolve each file-module import (existing behavior)
         for import in &file_imports {
             let base_dir = self.base_dir.clone();
             let resolved_path = self.resolve_path(&import.module_path, &base_dir)?;
@@ -163,8 +305,9 @@ impl ModuleResolver {
             merged_functions.extend(selected);
         }
 
-        // Assemble final program: retain only built-in imports, merge functions
+        // Assemble final program: retain only built-in imports, merge functions and structs
         program.imports = builtin_imports;
+        program.structs.extend(merged_structs);
         program.functions.extend(merged_functions);
         Ok(program)
     }
@@ -297,6 +440,114 @@ impl ModuleResolver {
         })?;
 
         Ok(canonical)
+    }
+
+    /// Resolve a stdlib module path to a filesystem path.
+    ///
+    /// Looks for the file in the `std/` directory relative to the workspace root.
+    /// The workspace root is found by searching upward from `base_dir` for `Cargo.toml`.
+    fn resolve_stdlib_path(&self, module_path: &str) -> Result<PathBuf, ModuleError> {
+        let workspace_root = self.find_workspace_root();
+        let segments: Vec<&str> = module_path.split("::").collect();
+        let mut path = workspace_root.join("std");
+        for segment in &segments {
+            path.push(segment);
+        }
+        path.set_extension("flux");
+
+        if path.exists() {
+            path.canonicalize().map_err(|_| ModuleError::FileNotFound {
+                import_path: module_path.to_string(),
+                resolved_path: path.clone(),
+            })
+        } else {
+            Err(ModuleError::FileNotFound {
+                import_path: module_path.to_string(),
+                resolved_path: path,
+            })
+        }
+    }
+
+    /// Find the workspace root by searching upward from base_dir for Cargo.toml
+    /// with a [workspace] section, or fall back to the first Cargo.toml found.
+    fn find_workspace_root(&self) -> PathBuf {
+        let mut dir = self.base_dir.clone();
+        loop {
+            let cargo_path = dir.join("Cargo.toml");
+            if cargo_path.exists() {
+                // Check if it has a [workspace] section
+                if let Ok(content) = std::fs::read_to_string(&cargo_path) {
+                    if content.contains("[workspace]") {
+                        return dir;
+                    }
+                }
+            }
+            if !dir.pop() {
+                // Fall back to base_dir if we can't find workspace root
+                return self.base_dir.clone();
+            }
+        }
+    }
+
+    /// Load and parse a stdlib file, returning both struct definitions and function definitions.
+    fn load_stdlib_file(&self, path: &Path) -> Result<(Vec<StructDef>, Vec<FnDef>), ModuleError> {
+        let source = std::fs::read_to_string(path).map_err(|_| ModuleError::FileNotFound {
+            import_path: path.display().to_string(),
+            resolved_path: path.to_path_buf(),
+        })?;
+
+        let tokens =
+            flux_compiler::lexer::lex_with_spans(&source).map_err(|e| ModuleError::ParseError {
+                file_path: path.to_path_buf(),
+                message: e.to_string(),
+            })?;
+
+        let program =
+            flux_compiler::parser::parse(tokens).map_err(|e| ModuleError::ParseError {
+                file_path: path.to_path_buf(),
+                message: e.to_string(),
+            })?;
+
+        Ok((program.structs, program.functions))
+    }
+
+    /// Add a struct definition and its transitive struct dependencies to the merged list.
+    ///
+    /// If struct A has a field of type B, B must be added before A.
+    fn add_struct_with_deps(
+        &self,
+        struct_def: &StructDef,
+        all_structs: &[StructDef],
+        merged: &mut Vec<StructDef>,
+    ) {
+        // Don't add duplicates
+        if merged.iter().any(|s| s.name == struct_def.name) {
+            return;
+        }
+
+        // First, add dependencies
+        for field in &struct_def.fields {
+            for dep_name in Self::struct_type_refs_from_annotation(&field.field_type) {
+                if let Some(dep) = all_structs.iter().find(|s| s.name == dep_name) {
+                    self.add_struct_with_deps(dep, all_structs, merged);
+                }
+            }
+        }
+
+        // Then add this struct (if not already present after dep resolution)
+        if !merged.iter().any(|s| s.name == struct_def.name) {
+            merged.push(struct_def.clone());
+        }
+    }
+
+    /// Extract struct type references from a type annotation.
+    fn struct_type_refs_from_annotation(annotation: &flux_compiler::parser::ast::TypeAnnotation) -> Vec<String> {
+        use flux_compiler::parser::ast::TypeAnnotation;
+        match annotation {
+            TypeAnnotation::Named(name) => vec![name.clone()],
+            TypeAnnotation::FixedArray(elem, _) => Self::struct_type_refs_from_annotation(elem),
+            _ => vec![],
+        }
     }
 }
 

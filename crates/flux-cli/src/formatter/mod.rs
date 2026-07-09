@@ -5,9 +5,9 @@
 //! and optionally apply ANSI colorization for terminal display.
 
 use flux_compiler::parser::ast::{
-    Assignment, BinOp, DataBlock, EventHandler, Expr, ExprKind, ExprStmt, ForLoop, IfStmt,
-    Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar, Strategy,
-    StrategyItem, Stmt, UnaryOp, WhileLoop,
+    Assignment, BinOp, DataBlock, DecoratorArg, EventHandler, Expr, ExprKind, ExprStmt, ForLoop,
+    IfStmt, Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar,
+    Strategy, StrategyItem, Stmt, StructDef, TypeAnnotation, UnaryOp, WhileLoop,
 };
 use flux_compiler::{extract_comments, Comment};
 
@@ -137,7 +137,22 @@ impl Formatter {
         if let Some(ref data_block) = program.data_block {
             self.emit_comments_before(data_block.span.start);
             self.format_data_block(data_block);
-            // Blank line between data block and strategy
+            // Blank line between data block and next section
+            self.output.push('\n');
+        }
+
+        // Format struct definitions
+        for (i, struct_def) in program.structs.iter().enumerate() {
+            self.emit_comments_before(struct_def.span.start);
+            self.format_struct_def(struct_def);
+            // Blank line between struct definitions
+            if i < program.structs.len() - 1 {
+                self.output.push('\n');
+            }
+        }
+
+        // Blank line between structs and strategy (if there were structs)
+        if !program.structs.is_empty() {
             self.output.push('\n');
         }
 
@@ -160,6 +175,89 @@ impl Formatter {
         self.output.push('}');
         self.emit_trailing_comment(import.span.end);
         self.output.push('\n');
+    }
+
+    fn format_struct_def(&mut self, struct_def: &StructDef) {
+        // Emit decorators, one per line above the struct keyword
+        for decorator in &struct_def.decorators {
+            self.push_indent();
+            self.output.push('@');
+            self.output.push_str(&decorator.name);
+            if let Some(ref arg) = decorator.arg {
+                match arg {
+                    DecoratorArg::Int(n) => {
+                        self.output.push('(');
+                        self.output.push_str(&n.to_string());
+                        self.output.push(')');
+                    }
+                }
+            }
+            self.output.push('\n');
+        }
+
+        // Emit struct keyword and name
+        self.push_indent();
+        self.output.push_str("struct ");
+        self.output.push_str(&struct_def.name);
+        self.output.push_str(" {\n");
+
+        self.indent_level += 1;
+
+        // Emit fields, one per line
+        for (i, field) in struct_def.fields.iter().enumerate() {
+            // Emit field-level decorators (e.g. @hot, @cold)
+            for dec in &field.field_decorators {
+                self.push_indent();
+                self.output.push('@');
+                self.output.push_str(&dec.name);
+                if let Some(ref arg) = dec.arg {
+                    match arg {
+                        DecoratorArg::Int(n) => {
+                            self.output.push('(');
+                            self.output.push_str(&n.to_string());
+                            self.output.push(')');
+                        }
+                    }
+                }
+                self.output.push('\n');
+            }
+
+            self.push_indent();
+            self.output.push_str(&field.name);
+            self.output.push_str(": ");
+            self.format_type_annotation(&field.field_type);
+            // Comma after each field except the last
+            if i < struct_def.fields.len() - 1 {
+                self.output.push(',');
+            }
+            self.output.push('\n');
+        }
+
+        self.indent_level -= 1;
+        self.push_indent();
+        self.output.push_str("}\n");
+    }
+
+    fn format_type_annotation(&mut self, ty: &TypeAnnotation) {
+        match ty {
+            TypeAnnotation::F64 => self.output.push_str("f64"),
+            TypeAnnotation::Int => self.output.push_str("int"),
+            TypeAnnotation::Bool => self.output.push_str("bool"),
+            TypeAnnotation::Str => self.output.push_str("str"),
+            TypeAnnotation::Named(name) => self.output.push_str(name),
+            TypeAnnotation::FixedArray(elem_type, size) => {
+                self.output.push('[');
+                self.format_type_annotation(elem_type);
+                self.output.push_str("; ");
+                self.output.push_str(&size.to_string());
+                self.output.push(']');
+            }
+            TypeAnnotation::BitInt(n) => {
+                self.output.push_str("int(");
+                self.output.push_str(&n.to_string());
+                self.output.push(')');
+            }
+        }
     }
 
     fn format_data_block(&mut self, block: &DataBlock) {
@@ -556,18 +654,44 @@ impl Formatter {
                 self.output.push(']');
             }
             ExprKind::StructLiteral { struct_name, fields } => {
-                self.output.push_str(struct_name);
-                self.output.push_str(" { ");
-                for (i, (name, value)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        self.output.push_str(", ");
-                    }
-                    self.output.push_str(name);
-                    self.output.push_str(" = ");
-                    self.format_expr(value);
-                }
-                self.output.push_str(" }");
+                self.format_struct_literal(struct_name, fields);
             }
+        }
+    }
+
+    /// Format a struct literal expression.
+    /// Uses single-line format for ≤3 fields and multi-line format for >3 fields.
+    fn format_struct_literal(&mut self, struct_name: &str, fields: &[(String, Expr)]) {
+        self.output.push_str(struct_name);
+        if fields.len() <= 3 {
+            // Single-line: Point { x = 1.0, y = 2.0 }
+            self.output.push_str(" { ");
+            for (i, (name, value)) in fields.iter().enumerate() {
+                if i > 0 {
+                    self.output.push_str(", ");
+                }
+                self.output.push_str(name);
+                self.output.push_str(" = ");
+                self.format_expr(value);
+            }
+            self.output.push_str(" }");
+        } else {
+            // Multi-line: one field per line with increased indentation
+            self.output.push_str(" {\n");
+            self.indent_level += 1;
+            for (i, (name, value)) in fields.iter().enumerate() {
+                self.push_indent();
+                self.output.push_str(name);
+                self.output.push_str(" = ");
+                self.format_expr(value);
+                if i < fields.len() - 1 {
+                    self.output.push(',');
+                }
+                self.output.push('\n');
+            }
+            self.indent_level -= 1;
+            self.push_indent();
+            self.output.push('}');
         }
     }
 }

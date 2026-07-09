@@ -21,6 +21,7 @@ use super::types::{FluxType, FnParams};
 pub(crate) struct StructDefInfo {
     pub name: String,
     pub fields: Vec<(String, FluxType)>,
+    pub decorators: Vec<ValidatedDecorator>,
 }
 
 /// The core type checker. Walks the untyped AST, resolves identifiers,
@@ -34,6 +35,8 @@ pub(crate) struct TypeChecker {
     struct_registry: HashMap<String, StructDefInfo>,
     /// The declared return type of the function currently being checked (if any).
     current_fn_return_type: Option<FluxType>,
+    /// Warnings collected during type checking (non-fatal diagnostics).
+    pub(crate) warnings: Vec<String>,
 }
 
 impl TypeChecker {
@@ -46,6 +49,7 @@ impl TypeChecker {
             state_var_names: HashSet::new(),
             struct_registry: HashMap::new(),
             current_fn_return_type: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -269,6 +273,23 @@ impl TypeChecker {
         Ok(())
     }
 
+    /// Suggest an import path for a struct type name that is not in scope.
+    ///
+    /// Returns `Some(path)` if the name matches a known stdlib struct, `None` otherwise.
+    fn suggest_import_for_type(name: &str) -> Option<&'static str> {
+        const STDLIB_STRUCT_IMPORTS: &[(&str, &[&str])] = &[
+            ("market::l1", &["Tick", "Bar", "Quote", "MarketSnapshot"]),
+            ("market::l2", &["Level", "Book"]),
+            ("collections::buffers", &["QuoteWindow", "BarWindow"]),
+        ];
+        for &(module_path, struct_names) in STDLIB_STRUCT_IMPORTS {
+            if struct_names.contains(&name) {
+                return Some(module_path);
+            }
+        }
+        None
+    }
+
     /// Register struct definitions in the struct registry.
     ///
     /// Structs are registered in topological order by field-type dependencies:
@@ -304,6 +325,7 @@ impl TypeChecker {
             typed_structs.push(TypedStructDef {
                 name: struct_def.name.clone(),
                 fields: typed_fields,
+                decorators: info.decorators.clone(),
                 span: struct_def.span,
             });
         }
@@ -409,6 +431,19 @@ impl TypeChecker {
                 ));
             }
 
+            // Validate field-level decorators (@hot/@cold)
+            for dec in &field.field_decorators {
+                match dec.name.as_str() {
+                    "hot" | "cold" => {} // recognized field decorators
+                    _ => {
+                        self.warnings.push(format!(
+                            "at byte {}: unknown field decorator '@{}' (ignored)",
+                            dec.span.start, dec.name
+                        ));
+                    }
+                }
+            }
+
             // Resolve the field type
             let resolved_type = self.resolve_type_annotation(
                 &field.field_type,
@@ -420,15 +455,306 @@ impl TypeChecker {
         }
 
         // Insert into the struct registry
+        let validated_decorators = self.validate_decorators(&struct_def.decorators);
         self.struct_registry.insert(
             struct_def.name.clone(),
             StructDefInfo {
                 name: struct_def.name.clone(),
                 fields: resolved_fields,
+                decorators: validated_decorators,
             },
         );
 
+        // --- Post-registration validations ---
+
+        // Validate @stack / @heap constraint: a @stack struct (or implicitly @stack,
+        // i.e. no allocation decorator) cannot contain fields whose type is a @heap struct.
+        let info = &self.struct_registry[&struct_def.name];
+        let has_heap_decorator = info.decorators.iter().any(|d| d.kind == DecoratorKind::Heap);
+        let has_stack_decorator = info.decorators.iter().any(|d| d.kind == DecoratorKind::Stack);
+        let is_stack = !has_heap_decorator; // implicitly or explicitly @stack
+
+        if is_stack || has_stack_decorator {
+            // Check each field's type: if it's a struct marked @heap, report error
+            for field in &struct_def.fields {
+                let field_struct_names = Self::field_type_struct_refs(&field.field_type);
+                for ref_name in field_struct_names {
+                    if let Some(ref_info) = self.struct_registry.get(&ref_name) {
+                        let ref_is_heap = ref_info.decorators.iter().any(|d| d.kind == DecoratorKind::Heap);
+                        if ref_is_heap {
+                            return Err(self.type_error(
+                                field.span,
+                                format!(
+                                    "@stack struct '{}' cannot contain @heap-allocated field '{}'",
+                                    struct_def.name, field.name
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate @aligned(N): N must be a power of 2 in [1, 4096]
+        let info = &self.struct_registry[&struct_def.name];
+        for dec in &info.decorators.clone() {
+            if let DecoratorKind::Aligned(n) = dec.kind {
+                if n == 0 || !n.is_power_of_two() || n > 4096 {
+                    return Err(self.type_error(
+                        dec.span,
+                        format!(
+                            "@aligned argument must be power of 2 between 1 and 4096, got {}",
+                            n
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Validate @simd(N): N must be 128, 256, or 512
+        let info = &self.struct_registry[&struct_def.name];
+        for dec in &info.decorators.clone() {
+            if let DecoratorKind::Simd(n) = dec.kind {
+                if n != 128 && n != 256 && n != 512 {
+                    return Err(self.type_error(
+                        dec.span,
+                        format!(
+                            "@simd width must be 128, 256, or 512, got {}",
+                            n
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Validate @pool(N): N must be a positive integer
+        let info = &self.struct_registry[&struct_def.name];
+        for dec in &info.decorators.clone() {
+            if let DecoratorKind::Pool(n) = dec.kind {
+                if n == 0 {
+                    return Err(self.type_error(
+                        dec.span,
+                        "@pool size must be a positive integer".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Validate @soa: all fields must be scalar (f64, int, bool)
+        let info = &self.struct_registry[&struct_def.name];
+        let has_soa = info.decorators.iter().any(|d| d.kind == DecoratorKind::Soa);
+        if has_soa {
+            let info_fields = info.fields.clone();
+            let soa_span = info.decorators.iter().find(|d| d.kind == DecoratorKind::Soa).unwrap().span;
+            for (field_name, field_type) in &info_fields {
+                match field_type {
+                    FluxType::Float | FluxType::Int | FluxType::Bool => {}
+                    _ => {
+                        return Err(self.type_error(
+                            soa_span,
+                            format!(
+                                "@soa struct '{}' field '{}' must be scalar (f64, int, or bool), got {}",
+                                struct_def.name, field_name, field_type
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Validate @bitfield: total bit count must not exceed 64
+        let info = &self.struct_registry[&struct_def.name];
+        let has_bitfield = info.decorators.iter().any(|d| d.kind == DecoratorKind::Bitfield);
+        if has_bitfield {
+            let bitfield_span = info.decorators.iter().find(|d| d.kind == DecoratorKind::Bitfield).unwrap().span;
+            let mut total_bits: usize = 0;
+            for field in &struct_def.fields {
+                match &field.field_type {
+                    TypeAnnotation::Bool => total_bits += 1,
+                    TypeAnnotation::BitInt(n) => total_bits += n,
+                    TypeAnnotation::Int => total_bits += 64, // full int width
+                    TypeAnnotation::F64 => total_bits += 64,
+                    _ => total_bits += 64, // conservative
+                }
+            }
+            if total_bits > 64 {
+                return Err(self.type_error(
+                    bitfield_span,
+                    format!(
+                        "@bitfield struct total is {} bits, maximum is 64",
+                        total_bits
+                    ),
+                ));
+            }
+        }
+
+        // Validate decorator compatibility matrix
+        self.validate_decorator_compatibility(struct_def)?;
+
         Ok(())
+    }
+
+    /// Validate that decorator combinations on a struct are compatible.
+    /// Rejects incompatible pairs and emits warnings for contradictory but non-fatal pairs.
+    fn validate_decorator_compatibility(&mut self, struct_def: &StructDef) -> Result<()> {
+        let info = &self.struct_registry[&struct_def.name];
+        let decorators = info.decorators.clone();
+
+        // Helper: check if a specific kind is present
+        let has_kind = |kind: &DecoratorKind| -> bool {
+            decorators.iter().any(|d| &d.kind == kind)
+        };
+
+        let find_span = |kind: &DecoratorKind| -> Span {
+            decorators.iter().find(|d| &d.kind == kind).map(|d| d.span).unwrap_or(struct_def.span)
+        };
+
+        // Check if aligned is present (any value)
+        let has_aligned = decorators.iter().any(|d| matches!(d.kind, DecoratorKind::Aligned(_)));
+        let has_packed = has_kind(&DecoratorKind::Packed);
+        let has_soa = has_kind(&DecoratorKind::Soa);
+        let has_stack = has_kind(&DecoratorKind::Stack);
+        let has_heap = has_kind(&DecoratorKind::Heap);
+        let has_pool = decorators.iter().any(|d| matches!(d.kind, DecoratorKind::Pool(_)));
+        let has_bitfield = has_kind(&DecoratorKind::Bitfield);
+        let has_immutable = has_kind(&DecoratorKind::Immutable);
+        let has_volatile = has_kind(&DecoratorKind::Volatile);
+
+        // Incompatible pairs: @packed + @aligned
+        if has_packed && has_aligned {
+            let span = find_span(&DecoratorKind::Packed);
+            return Err(self.type_error(
+                span,
+                "decorators @packed and @aligned cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        // Incompatible: @soa + @packed
+        if has_soa && has_packed {
+            let span = find_span(&DecoratorKind::Soa);
+            return Err(self.type_error(
+                span,
+                "decorators @soa and @packed cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        // Incompatible: @stack + @heap
+        if has_stack && has_heap {
+            let span = find_span(&DecoratorKind::Stack);
+            return Err(self.type_error(
+                span,
+                "decorators @stack and @heap cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        // Incompatible: @pool + @heap
+        if has_pool && has_heap {
+            let span = decorators.iter().find(|d| matches!(d.kind, DecoratorKind::Pool(_))).unwrap().span;
+            return Err(self.type_error(
+                span,
+                "decorators @pool and @heap cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        // Incompatible: @pool + @stack
+        if has_pool && has_stack {
+            let span = decorators.iter().find(|d| matches!(d.kind, DecoratorKind::Pool(_))).unwrap().span;
+            return Err(self.type_error(
+                span,
+                "decorators @pool and @stack cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        // Incompatible: @bitfield + @soa
+        if has_bitfield && has_soa {
+            let span = find_span(&DecoratorKind::Bitfield);
+            return Err(self.type_error(
+                span,
+                "decorators @bitfield and @soa cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        // Incompatible: @immutable + @volatile
+        if has_immutable && has_volatile {
+            let span = find_span(&DecoratorKind::Immutable);
+            return Err(self.type_error(
+                span,
+                "decorators @immutable and @volatile cannot be combined on the same struct".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate a list of parsed decorators, converting recognized names into
+    /// `ValidatedDecorator` values. Unrecognized decorator names emit a warning
+    /// (not an error) and are skipped, allowing forward-compatible usage.
+    fn validate_decorators(&mut self, decorators: &[Decorator]) -> Vec<ValidatedDecorator> {
+        let mut validated = Vec::new();
+
+        for decorator in decorators {
+            let kind = match decorator.name.as_str() {
+                "stack" => Some(DecoratorKind::Stack),
+                "heap" => Some(DecoratorKind::Heap),
+                "aligned" => {
+                    let arg = decorator
+                        .arg
+                        .as_ref()
+                        .and_then(|a| match a {
+                            DecoratorArg::Int(n) => Some(*n as u32),
+                        })
+                        .unwrap_or(64); // default alignment
+                    Some(DecoratorKind::Aligned(arg))
+                }
+                "packed" => Some(DecoratorKind::Packed),
+                "prefetch" => Some(DecoratorKind::Prefetch),
+                "streaming" => Some(DecoratorKind::Streaming),
+                "soa" => Some(DecoratorKind::Soa),
+                "pool" => {
+                    let arg = decorator
+                        .arg
+                        .as_ref()
+                        .and_then(|a| match a {
+                            DecoratorArg::Int(n) => Some(*n as u32),
+                        })
+                        .unwrap_or(64); // default pool size
+                    Some(DecoratorKind::Pool(arg))
+                }
+                "hot" => Some(DecoratorKind::Hot),
+                "cold" => Some(DecoratorKind::Cold),
+                "volatile" => Some(DecoratorKind::Volatile),
+                "bitfield" => Some(DecoratorKind::Bitfield),
+                "simd" => {
+                    let arg = decorator
+                        .arg
+                        .as_ref()
+                        .and_then(|a| match a {
+                            DecoratorArg::Int(n) => Some(*n as u32),
+                        })
+                        .unwrap_or(256); // default SIMD width
+                    Some(DecoratorKind::Simd(arg))
+                }
+                "zero_init" => Some(DecoratorKind::ZeroInit),
+                "immutable" => Some(DecoratorKind::Immutable),
+                _ => {
+                    // Unknown decorator: emit a warning (not an error)
+                    self.warnings.push(format!(
+                        "at byte {}: unknown decorator '@{}' (ignored)",
+                        decorator.span.start, decorator.name
+                    ));
+                    None
+                }
+            };
+
+            if let Some(kind) = kind {
+                validated.push(ValidatedDecorator {
+                    kind,
+                    span: decorator.span,
+                });
+            }
+        }
+
+        validated
     }
 
     /// Resolve a TypeAnnotation to a FluxType, checking that Named references
@@ -449,13 +775,18 @@ impl TypeChecker {
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
                 } else {
-                    Err(self.type_error(
-                        span,
+                    let msg = if let Some(import_path) = Self::suggest_import_for_type(name) {
+                        format!(
+                            "type '{}' is not defined. Did you mean 'from {} import {{{}}}'?",
+                            name, import_path, name
+                        )
+                    } else {
                         format!(
                             "unknown type '{}' in struct '{}' field '{}'",
                             name, struct_name, field_name
-                        ),
-                    ))
+                        )
+                    };
+                    Err(self.type_error(span, msg))
                 }
             }
             TypeAnnotation::FixedArray(elem_type, size) => {
@@ -500,13 +831,18 @@ impl TypeChecker {
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
                 } else {
-                    Err(self.type_error(
-                        span,
+                    let msg = if let Some(import_path) = Self::suggest_import_for_type(name) {
+                        format!(
+                            "type '{}' is not defined. Did you mean 'from {} import {{{}}}'?",
+                            name, import_path, name
+                        )
+                    } else {
                         format!(
                             "unknown type '{}' in function '{}' {}",
                             name, fn_name, context
-                        ),
-                    ))
+                        )
+                    };
+                    Err(self.type_error(span, msg))
                 }
             }
             TypeAnnotation::FixedArray(elem_type, size) => {
@@ -1034,7 +1370,24 @@ impl TypeChecker {
                     span: assign.span,
                 }))
             }
-            ExprKind::MemberAccess { .. } => {
+            ExprKind::MemberAccess { object, field } => {
+                // Check @immutable enforcement before moving assign.target
+                let immutable_field = field.clone();
+                let immutable_struct_name = self.resolve_struct_type_from_expr(object);
+                if let Some(ref struct_name) = immutable_struct_name {
+                    if let Some(info) = self.struct_registry.get(struct_name) {
+                        let is_immutable = info.decorators.iter().any(|d| d.kind == DecoratorKind::Immutable);
+                        if is_immutable {
+                            return Err(self.type_error(
+                                assign.span,
+                                format!(
+                                    "cannot assign to field '{}' of @immutable struct '{}'",
+                                    immutable_field, struct_name
+                                ),
+                            ));
+                        }
+                    }
+                }
                 let typed_target = self.check_expr(assign.target)?;
                 Ok(TypedStmt::Assignment(TypedAssignment {
                     target: typed_target,
@@ -1976,10 +2329,15 @@ impl TypeChecker {
         let struct_info = match self.struct_registry.get(struct_name) {
             Some(info) => info.clone(),
             None => {
-                return Err(self.type_error(
-                    span,
-                    format!("unknown struct type '{}'", struct_name),
-                ));
+                let msg = if let Some(import_path) = Self::suggest_import_for_type(struct_name) {
+                    format!(
+                        "type '{}' is not defined. Did you mean 'from {} import {{{}}}'?",
+                        struct_name, import_path, struct_name
+                    )
+                } else {
+                    format!("unknown struct type '{}'", struct_name)
+                };
+                return Err(self.type_error(span, msg));
             }
         };
 
@@ -2053,6 +2411,22 @@ impl TypeChecker {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    /// Attempt to resolve the struct type name from an expression (for @immutable checking).
+    /// Returns the struct name if the expression is an identifier with a struct type.
+    fn resolve_struct_type_from_expr(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                if let Some(ty) = self.env.resolve(name) {
+                    if let FluxType::Struct(struct_name) = ty {
+                        return Some(struct_name.clone());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
 
     /// Construct a `CompileError::Type` with a consistent format:
     /// `"at byte {span.start}: {description}"`
@@ -3752,8 +4126,9 @@ strategy Test {
         ])];
         let err = tc.register_structs(&structs).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("unknown type 'Level' in struct 'Book' field 'bids'"),
-            "Expected undefined type error, got: {}", msg);
+        // Level is a known stdlib struct, so the error suggests importing it
+        assert!(msg.contains("type 'Level' is not defined") && msg.contains("from market::l2 import {Level}"),
+            "Expected import suggestion error, got: {}", msg);
     }
 
     #[test]

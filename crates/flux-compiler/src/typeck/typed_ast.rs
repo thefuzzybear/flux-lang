@@ -9,6 +9,33 @@ use crate::lexer::Span;
 use crate::parser::ast::{BinOp, Import, UnaryOp};
 use super::types::FluxType;
 
+/// A validated decorator that has been resolved from a parsed `Decorator` AST node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedDecorator {
+    pub kind: DecoratorKind,
+    pub span: Span,
+}
+
+/// The set of recognized decorator kinds in Flux.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecoratorKind {
+    Stack,
+    Heap,
+    Aligned(u32),
+    Packed,
+    Prefetch,
+    Streaming,
+    Soa,
+    Pool(u32),
+    Hot,
+    Cold,
+    Volatile,
+    Bitfield,
+    Simd(u32),
+    ZeroInit,
+    Immutable,
+}
+
 /// A typed user-defined function declaration.
 /// Mirrors `FnDef` from the parser AST with an inferred `return_type`.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +62,7 @@ pub struct TypedStructField {
 pub struct TypedStructDef {
     pub name: String,
     pub fields: Vec<TypedStructField>,
+    pub decorators: Vec<ValidatedDecorator>,
     pub span: Span,
 }
 

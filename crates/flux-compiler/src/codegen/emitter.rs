@@ -211,8 +211,25 @@ impl<'a> CodeEmitter<'a> {
             return Ok(());
         }
 
-        // Collect struct info (names, fields, types) to release the borrow on self
-        let struct_data: Vec<(String, Vec<(String, String)>)> = sorted_structs
+        // Collect struct info to release the borrow on self
+        struct StructEmitInfo {
+            name: String,
+            fields: Vec<(String, String)>,
+            is_heap: bool,
+            is_packed: bool,
+            aligned_n: Option<u32>,
+            simd_n: Option<u32>,
+            is_prefetch: bool,
+            is_streaming: bool,
+            is_soa: bool,
+            is_pool: Option<u32>,
+            is_volatile: bool,
+            is_bitfield: bool,
+            is_zero_init: bool,
+            is_immutable: bool,
+        }
+
+        let struct_data: Vec<StructEmitInfo> = sorted_structs
             .iter()
             .map(|s| {
                 let fields: std::result::Result<Vec<_>, _> = s
@@ -223,15 +240,91 @@ impl<'a> CodeEmitter<'a> {
                             .map(|rust_type| (f.name.clone(), rust_type))
                     })
                     .collect();
-                fields.map(|fs| (s.name.clone(), fs))
+                let is_heap = s.decorators.iter().any(|d| d.kind == DecoratorKind::Heap);
+                let is_packed = s.decorators.iter().any(|d| d.kind == DecoratorKind::Packed);
+                let aligned_n = s.decorators.iter().find_map(|d| {
+                    if let DecoratorKind::Aligned(n) = d.kind { Some(n) } else { None }
+                });
+                let simd_n = s.decorators.iter().find_map(|d| {
+                    if let DecoratorKind::Simd(n) = d.kind { Some(n) } else { None }
+                });
+                let is_prefetch = s.decorators.iter().any(|d| d.kind == DecoratorKind::Prefetch);
+                let is_streaming = s.decorators.iter().any(|d| d.kind == DecoratorKind::Streaming);
+                let is_soa = s.decorators.iter().any(|d| d.kind == DecoratorKind::Soa);
+                let is_pool = s.decorators.iter().find_map(|d| {
+                    if let DecoratorKind::Pool(n) = d.kind { Some(n) } else { None }
+                });
+                let is_volatile = s.decorators.iter().any(|d| d.kind == DecoratorKind::Volatile);
+                let is_bitfield = s.decorators.iter().any(|d| d.kind == DecoratorKind::Bitfield);
+                let is_zero_init = s.decorators.iter().any(|d| d.kind == DecoratorKind::ZeroInit);
+                let is_immutable = s.decorators.iter().any(|d| d.kind == DecoratorKind::Immutable);
+                fields.map(|fs| StructEmitInfo {
+                    name: s.name.clone(),
+                    fields: fs,
+                    is_heap,
+                    is_packed,
+                    aligned_n,
+                    simd_n,
+                    is_prefetch,
+                    is_streaming,
+                    is_soa,
+                    is_pool,
+                    is_volatile,
+                    is_bitfield,
+                    is_zero_init,
+                    is_immutable,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        for (name, fields) in &struct_data {
-            self.output.push_str("#[derive(Clone, Copy)]\n");
-            self.output
-                .push_str(&format!("pub struct {} {{\n", name));
-            for (field_name, rust_type) in fields {
+        for info in &struct_data {
+            // Emit decorator comments for advanced transformations
+            if info.is_prefetch {
+                self.output.push_str("// @prefetch: CPU prefetch hints for this struct\n");
+            }
+            if info.is_streaming {
+                self.output.push_str("// @streaming: non-temporal stores for field writes\n");
+            }
+            if info.is_soa {
+                self.output.push_str("// @soa: struct-of-arrays transformation intent\n");
+            }
+            if let Some(n) = info.is_pool {
+                self.output.push_str(&format!("// @pool({}): pre-allocated slab with free-list\n", n));
+            }
+            if info.is_volatile {
+                self.output.push_str("// @volatile: read_volatile/write_volatile for all field access\n");
+            }
+            if info.is_bitfield {
+                self.output.push_str("// @bitfield: bit-level packing with shift/mask operations\n");
+            }
+            if info.is_zero_init {
+                self.output.push_str("// @zero_init: all fields zero-initialized by default\n");
+            }
+            if info.is_immutable {
+                self.output.push_str("// @immutable: no field mutation after construction\n");
+            }
+
+            // Emit #[derive(...)]
+            if info.is_heap {
+                self.output.push_str("#[derive(Clone)]\n");
+            } else {
+                self.output.push_str("#[derive(Clone, Copy)]\n");
+            }
+
+            // Emit #[repr(...)] attributes
+            if info.is_packed {
+                self.output.push_str("#[repr(packed)]\n");
+            }
+            if let Some(n) = info.aligned_n {
+                self.output.push_str(&format!("#[repr(align({}))]\n", n));
+            }
+            if let Some(n) = info.simd_n {
+                // @simd(N) emits align(N/8)
+                self.output.push_str(&format!("#[repr(align({}))]\n", n / 8));
+            }
+
+            self.output.push_str(&format!("pub struct {} {{\n", info.name));
+            for (field_name, rust_type) in &info.fields {
                 self.output
                     .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
             }

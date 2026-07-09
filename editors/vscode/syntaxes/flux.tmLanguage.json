@@ -5,12 +5,18 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
+    { "include": "#decorators" },
     { "include": "#signal-functions" },
     { "include": "#keywords-control" },
     { "include": "#keywords-declaration" },
+    { "include": "#builtin-types" },
+    { "include": "#function-definition" },
+    { "include": "#struct-type-names" },
     { "include": "#strategy-name" },
     { "include": "#constants" },
+    { "include": "#bar-context" },
     { "include": "#builtin-functions" },
+    { "include": "#function-call" },
     { "include": "#numbers" },
     { "include": "#operators" },
     { "include": "#punctuation" },
@@ -36,7 +42,7 @@
     "keywords-declaration": {
       "patterns": [
         {
-          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector)\\b",
+          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector|struct)\\b",
           "name": "keyword.other.flux"
         }
       ]
@@ -100,8 +106,66 @@
         }
       ]
     },
+    "decorators": {
+      "patterns": [
+        {
+          "match": "@[a-z_]+",
+          "name": "meta.decorator.flux"
+        }
+      ]
+    },
+    "builtin-types": {
+      "patterns": [
+        {
+          "match": "\\b(f64|int|bool|str)\\b",
+          "name": "support.type.primitive.flux"
+        }
+      ]
+    },
+    "struct-type-names": {
+      "patterns": [
+        {
+          "comment": "Capitalized identifiers used as struct/type names (e.g., Quote, Tick, Bar, Book, Level)",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+          "name": "entity.name.type.struct.flux"
+        }
+      ]
+    },
+    "function-definition": {
+      "patterns": [
+        {
+          "comment": "Function name in a definition: fn calc_spread(...)",
+          "match": "(?<=\\bfn\\s)[a-z_][a-zA-Z0-9_]*",
+          "name": "entity.name.function.flux"
+        }
+      ]
+    },
+    "function-call": {
+      "patterns": [
+        {
+          "comment": "Function call: identifier immediately followed by (",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.call.flux" }
+          }
+        }
+      ]
+    },
+    "bar-context": {
+      "patterns": [
+        {
+          "comment": "Built-in bar context variables available in on_bar handlers",
+          "match": "\\b(close|open|high|low|volume|symbol|in_position)\\b",
+          "name": "variable.language.flux"
+        }
+      ]
+    },
     "operators": {
       "patterns": [
+        {
+          "match": "->",
+          "name": "punctuation.arrow.flux"
+        },
         {
           "match": "\\b(and|or|not)\\b",
           "name": "keyword.operator.logical.flux"
@@ -131,7 +195,11 @@
     "punctuation": {
       "patterns": [
         {
-          "match": "[(){}\\[\\],.:]",
+          "match": "::",
+          "name": "punctuation.separator.namespace.flux"
+        },
+        {
+          "match": "[(){}\\[\\],.:;@]",
           "name": "punctuation.flux"
         }
       ]

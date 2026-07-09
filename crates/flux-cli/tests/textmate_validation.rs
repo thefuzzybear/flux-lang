@@ -173,21 +173,15 @@ fn extension_has_contributes_grammars() {
 }
 
 #[test]
-fn extension_has_activation_events() {
+fn extension_has_no_activation_events() {
+    // Pure grammar extensions (no main/browser entry point) should NOT have
+    // activationEvents — VS Code/Kiro auto-activates them based on the
+    // contributes.languages declaration.
     let manifest = load_extension_manifest();
     let events = &manifest["activationEvents"];
     assert!(
-        events.is_array(),
-        "Extension must have 'activationEvents' array"
-    );
-
-    let events_arr = events.as_array().unwrap();
-    let has_on_language = events_arr
-        .iter()
-        .any(|e| e.as_str() == Some("onLanguage:flux"));
-    assert!(
-        has_on_language,
-        "activationEvents must contain 'onLanguage:flux'"
+        events.is_null(),
+        "Pure grammar extensions should not have 'activationEvents' (causes warnings)"
     );
 }
 
@@ -395,8 +389,8 @@ fn builtin_functions_matches_expected_words() {
 #[test]
 fn operators_logical_matches() {
     let grammar = load_grammar();
-    // Logical operators are the first pattern in the operators rule
-    let pattern = get_rule_match_at(&grammar, "operators", 0);
+    // Logical operators are the second pattern in the operators rule (after -> arrow)
+    let pattern = get_rule_match_at(&grammar, "operators", 1);
     let re = Regex::new(&pattern).expect("operators logical regex must be valid");
 
     for op in &["and", "or", "not"] {
@@ -411,8 +405,8 @@ fn operators_logical_matches() {
 #[test]
 fn operators_comparison_matches() {
     let grammar = load_grammar();
-    // Comparison operators are the second pattern in the operators rule
-    let pattern = get_rule_match_at(&grammar, "operators", 1);
+    // Comparison operators are the third pattern in the operators rule
+    let pattern = get_rule_match_at(&grammar, "operators", 2);
     let re = Regex::new(&pattern).expect("operators comparison regex must be valid");
 
     for op in &["==", "!=", "<=", ">=", "<", ">"] {
@@ -427,8 +421,8 @@ fn operators_comparison_matches() {
 #[test]
 fn operators_arithmetic_matches() {
     let grammar = load_grammar();
-    // Arithmetic operators are the third pattern in the operators rule
-    let pattern = get_rule_match_at(&grammar, "operators", 2);
+    // Arithmetic operators are the fourth pattern in the operators rule
+    let pattern = get_rule_match_at(&grammar, "operators", 3);
     let re = Regex::new(&pattern).expect("operators arithmetic regex must be valid");
 
     for op in &["+", "-", "*", "/", "%"] {
