@@ -140,7 +140,7 @@ fn arb_multi_block_program() -> impl Strategy<Value = Program> {
         blocks_strategy,
     )
         .prop_map(|(name, body)| Program {
-            structs: vec![],
+            structs: vec![], enums: vec![],
             imports: Vec::new(),
             functions: vec![],
             data_block: None,

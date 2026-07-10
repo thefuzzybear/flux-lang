@@ -327,6 +327,10 @@ fn type_annotation_to_str(ty: &TypeAnnotation) -> String {
             format!("[{}; {}]", type_annotation_to_str(elem), size)
         }
         TypeAnnotation::BitInt(n) => format!("int({})", n),
+        TypeAnnotation::Generic(name, type_args) => {
+            let args: Vec<String> = type_args.iter().map(type_annotation_to_str).collect();
+            format!("{}[{}]", name, args.join(", "))
+        }
     }
 }
 

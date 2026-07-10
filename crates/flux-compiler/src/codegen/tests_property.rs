@@ -112,6 +112,16 @@ mod tests {
             FluxType::Struct(_) | FluxType::FixedArray(_, _) => {
                 unreachable!("Generator excludes Struct/FixedArray")
             }
+            FluxType::Enum(_) | FluxType::Generic(_, _) => {
+                // Enums and generics are not yet supported in codegen tests
+                // Return a null literal placeholder
+                Just(TypedExpr {
+                    kind: TypedExprKind::NullLiteral,
+                    resolved_type: ty,
+                    span,
+                })
+                .boxed()
+            }
         }
     }
 
@@ -161,6 +171,9 @@ mod tests {
                 FluxType::Fn { .. } => unreachable!("Generator excludes Fn"),
                 FluxType::Struct(_) | FluxType::FixedArray(_, _) => {
                     unreachable!("Generator excludes Struct/FixedArray")
+                }
+                FluxType::Enum(_) | FluxType::Generic(_, _) => {
+                    unreachable!("Generator excludes Enum/Generic")
                 }
             }
         }

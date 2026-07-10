@@ -335,7 +335,7 @@ mod tests {
             proptest::collection::vec(arb_strategy_item(), 1..4),
         )
             .prop_map(|(imports, name, body)| Program {
-                structs: vec![],
+                structs: vec![], enums: vec![],
                 imports,
                 functions: vec![],
                 data_block: None,
@@ -635,7 +635,7 @@ mod tests {
         fn prop_fn_def_round_trip(fn_def in arb_fn_def()) {
             // Build a minimal program containing just this FnDef + a dummy strategy
             let program = Program {
-                structs: vec![],
+                structs: vec![], enums: vec![],
                 imports: vec![],
                 functions: vec![fn_def.clone()],
                 data_block: None,

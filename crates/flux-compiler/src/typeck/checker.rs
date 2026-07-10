@@ -829,6 +829,24 @@ impl TypeChecker {
                 // BitInt is used in @bitfield structs, resolve as Int for now
                 Ok(FluxType::Int)
             }
+            TypeAnnotation::Generic(name, type_args) => {
+                // Generic types like Vec[T], HashMap[K, V] - stub for Phase 4
+                // For now, just check that the name exists or is a built-in
+                match name.as_str() {
+                    "Vec" | "HashMap" => {
+                        // Built-in generic types - return a placeholder for now
+                        let resolved_args: Result<Vec<_>> = type_args
+                            .iter()
+                            .map(|arg| self.resolve_type_annotation(arg, struct_name, field_name, span))
+                            .collect();
+                        Ok(FluxType::Generic(name.clone(), resolved_args?))
+                    }
+                    _ => {
+                        // Unknown generic type - for now, just treat as named
+                        Ok(FluxType::Generic(name.clone(), vec![]))
+                    }
+                }
+            }
         }
     }
 
@@ -883,6 +901,21 @@ impl TypeChecker {
             }
             TypeAnnotation::BitInt(_) => {
                 Ok(FluxType::Int)
+            }
+            TypeAnnotation::Generic(name, type_args) => {
+                // Generic types like Vec[T], HashMap[K, V] - stub for Phase 4
+                match name.as_str() {
+                    "Vec" | "HashMap" => {
+                        let resolved_args: Result<Vec<_>> = type_args
+                            .iter()
+                            .map(|arg| self.resolve_fn_type_annotation(arg, fn_name, context, span))
+                            .collect();
+                        Ok(FluxType::Generic(name.clone(), resolved_args?))
+                    }
+                    _ => {
+                        Ok(FluxType::Generic(name.clone(), vec![]))
+                    }
+                }
             }
         }
     }
@@ -1669,6 +1702,20 @@ impl TypeChecker {
                 struct_name,
                 fields,
             } => self.check_struct_literal(&struct_name, fields, span),
+            // EnumConstruction and Match will be implemented in Phase 1B (tasks 2.2 and 2.3)
+            // For now, return a placeholder error
+            ExprKind::EnumConstruction { .. } => {
+                Err(self.type_error(
+                    span,
+                    "enum construction not yet supported (coming in Phase 1B)".to_string(),
+                ))
+            }
+            ExprKind::Match(_) => {
+                Err(self.type_error(
+                    span,
+                    "match expressions not yet supported (coming in Phase 1B)".to_string(),
+                ))
+            }
         }
     }
 
@@ -3150,7 +3197,7 @@ mod tests {
 
     fn make_program(imports: Vec<Import>, body: Vec<StrategyItem>) -> Program {
         Program {
-            structs: vec![],
+            structs: vec![], enums: vec![],
             imports,
             functions: vec![],
             data_block: None,
@@ -3565,7 +3612,7 @@ mod tests {
     /// Helper: build a Program with a connector block and minimal strategy.
     fn make_program_with_connector(connector: ConnectorBlock) -> Program {
         Program {
-            structs: vec![],
+            structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,

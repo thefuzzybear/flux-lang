@@ -218,6 +218,18 @@ fn extract_calls_from_expr(expr: &Expr, fn_names: &HashSet<String>, callees: &mu
         | ExprKind::BoolLiteral(_)
         | ExprKind::NullLiteral
         | ExprKind::Ident(_) => {}
+        // EnumConstruction and Match - will be fully implemented in Phase 1B
+        ExprKind::EnumConstruction { args, .. } => {
+            for arg in args {
+                extract_calls_from_expr(arg, fn_names, callees);
+            }
+        }
+        ExprKind::Match(match_expr) => {
+            extract_calls_from_expr(&match_expr.scrutinee, fn_names, callees);
+            for arm in &match_expr.arms {
+                extract_calls_from_stmts(&arm.body, fn_names, callees);
+            }
+        }
     }
 }
 

@@ -49,6 +49,12 @@ pub(crate) enum LogosToken {
     Connector,
     #[token("struct")]
     Struct,
+    #[token("enum")]
+    Enum,
+    #[token("match")]
+    Match,
+    #[token("self")]
+    SelfKw,
 
     // Identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
@@ -81,6 +87,8 @@ pub(crate) enum LogosToken {
     OrOr,
     #[token("->")]
     Arrow,
+    #[token("=>")]
+    FatArrow,
 
     // Single-character operators
     #[token("+")]

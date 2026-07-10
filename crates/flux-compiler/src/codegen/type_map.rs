@@ -38,6 +38,15 @@ pub fn map_type(ty: &FluxType, span_start: usize) -> Result<String> {
             let elem_rust = map_type(elem, span_start)?;
             Ok(format!("[{}; {}]", elem_rust, size))
         }
+        // Enum and Generic types will be properly implemented in Phase 1B and Phase 4
+        FluxType::Enum(name) => Ok(name.clone()),
+        FluxType::Generic(name, args) => {
+            let args_str: Vec<String> = args
+                .iter()
+                .map(|a| map_type(a, span_start))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("{}<{}>", name, args_str.join(", ")))
+        }
     }
 }
 

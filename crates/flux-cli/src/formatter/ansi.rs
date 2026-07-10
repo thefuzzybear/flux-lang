@@ -178,7 +178,10 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::Not
         | Token::Data
         | Token::Connector
-        | Token::Struct => TokenCategory::Keyword,
+        | Token::Struct
+        | Token::Enum
+        | Token::Match
+        | Token::SelfKw => TokenCategory::Keyword,
 
         // Boolean/Null literals
         Token::True | Token::False | Token::Null => TokenCategory::BooleanLiteral,
@@ -207,7 +210,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::AndAnd
         | Token::OrOr
         | Token::At
-        | Token::Arrow => TokenCategory::Operator,
+        | Token::Arrow
+        | Token::FatArrow => TokenCategory::Operator,
 
         // Delimiters
         Token::OpenParen

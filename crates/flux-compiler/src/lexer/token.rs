@@ -26,6 +26,9 @@ pub enum Token {
     Data,
     Connector,
     Struct,
+    Enum,
+    Match,
+    SelfKw,
 
     // Identifiers and literals
     Ident(String),
@@ -50,6 +53,7 @@ pub enum Token {
     Bang,       // !
     At,         // @
     Arrow,      // ->
+    FatArrow,   // =>
 
     // Delimiters
     OpenParen,   // (
@@ -96,6 +100,9 @@ impl Token {
                 | Token::Data
                 | Token::Connector
                 | Token::Struct
+                | Token::Enum
+                | Token::Match
+                | Token::SelfKw
         )
     }
 }

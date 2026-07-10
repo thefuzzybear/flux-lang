@@ -27,6 +27,11 @@ pub enum FluxType {
     /// A fixed-size array type `[T; N]`. Two fixed-array types are the same
     /// type iff their element types match and their sizes match exactly.
     FixedArray(Box<FluxType>, usize),
+    /// An enum type, identified by name (Phase 1).
+    Enum(String),
+    /// A generic type: name + resolved type arguments (Phase 4).
+    /// e.g., HashMap[String, Float] → Generic("HashMap", [String, Float])
+    Generic(String, Vec<FluxType>),
 }
 
 /// Function parameter specification.
@@ -95,6 +100,17 @@ impl fmt::Display for FluxType {
             FluxType::Fn { ret, .. } => write!(f, "Fn -> {}", ret),
             FluxType::Struct(name) => write!(f, "{}", name),
             FluxType::FixedArray(elem, size) => write!(f, "[{}; {}]", elem, size),
+            FluxType::Enum(name) => write!(f, "{}", name),
+            FluxType::Generic(name, args) => {
+                write!(f, "{}[", name)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::enum_info::EnumInfo;
 use super::types::FluxType;
 
 /// A scoped type environment for identifier resolution.
@@ -8,6 +9,8 @@ use super::types::FluxType;
 /// Scope levels: global (imports) → strategy (params + state) → handler → block
 pub(crate) struct TypeEnvironment {
     scopes: Vec<HashMap<String, FluxType>>,
+    /// Registry of enum definitions: enum name → enum info
+    enums: HashMap<String, EnumInfo>,
 }
 
 impl TypeEnvironment {
@@ -15,6 +18,7 @@ impl TypeEnvironment {
     pub fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()], // Start with global scope
+            enums: HashMap::new(),
         }
     }
 
@@ -50,12 +54,43 @@ impl TypeEnvironment {
     pub fn exists_in_current_scope(&self, name: &str) -> bool {
         self.scopes.last().map_or(false, |s| s.contains_key(name))
     }
+
+    /// Register an enum definition in the type environment.
+    /// Returns `Ok(())` if successful, `Err(())` if an enum with that name already exists.
+    pub fn register_enum(&mut self, info: EnumInfo) -> Result<(), ()> {
+        if self.enums.contains_key(&info.name) {
+            return Err(());
+        }
+        self.enums.insert(info.name.clone(), info);
+        Ok(())
+    }
+
+    /// Look up an enum by name.
+    pub fn get_enum(&self, name: &str) -> Option<&EnumInfo> {
+        self.enums.get(name)
+    }
+
+    /// Check if an enum exists with the given name.
+    pub fn has_enum(&self, name: &str) -> bool {
+        self.enums.contains_key(name)
+    }
+
+    /// Returns an iterator over all registered enum names.
+    pub fn enum_names(&self) -> impl Iterator<Item = &str> {
+        self.enums.keys().map(|s| s.as_str())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::super::types::FluxType;
+    use super::super::enum_info::{EnumInfo, VariantInfo};
+    use crate::lexer::Span;
+
+    fn make_span(start: usize, end: usize) -> Span {
+        Span::new(start, end)
+    }
 
     #[test]
     fn test_new_environment() {
@@ -64,6 +99,8 @@ mod tests {
         assert_eq!(env.scopes.len(), 1);
         // Resolving an unknown name returns None
         assert_eq!(env.resolve("unknown"), None);
+        // New environment has no enums
+        assert!(env.enums.is_empty());
     }
 
     #[test]
@@ -181,5 +218,93 @@ mod tests {
         env.pop_scope();
         assert_eq!(env.resolve("b"), None);
         assert_eq!(env.resolve("a"), Some(&FluxType::Int));
+    }
+
+    // ===== Enum registry tests =====
+
+    #[test]
+    fn test_register_and_lookup_enum() {
+        let mut env = TypeEnvironment::new();
+        let enum_info = EnumInfo::new(
+            "OrderType".to_string(),
+            vec![
+                VariantInfo::unit("Market".to_string(), make_span(0, 6)),
+                VariantInfo::with_fields(
+                    "Limit".to_string(),
+                    vec![("price".to_string(), FluxType::Float)],
+                    make_span(10, 30),
+                ),
+            ],
+            make_span(0, 40),
+        );
+
+        assert!(env.register_enum(enum_info).is_ok());
+        assert!(env.has_enum("OrderType"));
+
+        let retrieved = env.get_enum("OrderType").unwrap();
+        assert_eq!(retrieved.name, "OrderType");
+        assert_eq!(retrieved.variants.len(), 2);
+    }
+
+    #[test]
+    fn test_register_duplicate_enum_fails() {
+        let mut env = TypeEnvironment::new();
+        let enum1 = EnumInfo::new(
+            "Status".to_string(),
+            vec![VariantInfo::unit("Ok".to_string(), make_span(0, 2))],
+            make_span(0, 10),
+        );
+        let enum2 = EnumInfo::new(
+            "Status".to_string(),
+            vec![VariantInfo::unit("Error".to_string(), make_span(0, 5))],
+            make_span(0, 15),
+        );
+
+        assert!(env.register_enum(enum1).is_ok());
+        assert!(env.register_enum(enum2).is_err()); // Duplicate name
+    }
+
+    #[test]
+    fn test_enum_not_found() {
+        let env = TypeEnvironment::new();
+        assert!(env.get_enum("NonExistent").is_none());
+        assert!(!env.has_enum("NonExistent"));
+    }
+
+    #[test]
+    fn test_enum_names_iterator() {
+        let mut env = TypeEnvironment::new();
+        let enum1 = EnumInfo::new("A".to_string(), vec![], make_span(0, 10));
+        let enum2 = EnumInfo::new("B".to_string(), vec![], make_span(0, 10));
+        let enum3 = EnumInfo::new("C".to_string(), vec![], make_span(0, 10));
+
+        env.register_enum(enum1).unwrap();
+        env.register_enum(enum2).unwrap();
+        env.register_enum(enum3).unwrap();
+
+        let mut names: Vec<&str> = env.enum_names().collect();
+        names.sort();
+        assert_eq!(names, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_variant_lookup_from_env() {
+        let mut env = TypeEnvironment::new();
+        let enum_info = EnumInfo::new(
+            "Color".to_string(),
+            vec![
+                VariantInfo::unit("Red".to_string(), make_span(0, 3)),
+                VariantInfo::unit("Green".to_string(), make_span(5, 10)),
+                VariantInfo::unit("Blue".to_string(), make_span(12, 16)),
+            ],
+            make_span(0, 20),
+        );
+        env.register_enum(enum_info).unwrap();
+
+        let retrieved = env.get_enum("Color").unwrap();
+        assert!(retrieved.find_variant("Red").is_some());
+        assert!(retrieved.find_variant("Green").is_some());
+        assert!(retrieved.find_variant("Blue").is_some());
+        assert!(retrieved.find_variant("Yellow").is_none());
     }
 }

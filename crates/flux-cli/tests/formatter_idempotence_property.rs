@@ -397,7 +397,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
         proptest::collection::vec(arb_strategy_item(), 1..4),
     )
         .prop_map(|(imports, name, body)| Program {
-            structs: vec![],
+            structs: vec![], enums: vec![],
             imports: imports
                 .into_iter()
                 .map(|(module_path, names)| Import {

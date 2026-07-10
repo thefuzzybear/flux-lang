@@ -222,6 +222,9 @@ impl<'a> CodeEmitter<'a> {
             FluxType::Signal => "Signal::default()".to_string(),
             FluxType::Null | FluxType::Void => "()".to_string(),
             FluxType::Fn { .. } => "/* unsupported */".to_string(),
+            // Enum and Generic types will be properly implemented in Phase 1B and Phase 4
+            FluxType::Enum(_) => "/* enum zero-init not yet supported */".to_string(),
+            FluxType::Generic(_, _) => "/* generic zero-init not yet supported */".to_string(),
         }
     }
 

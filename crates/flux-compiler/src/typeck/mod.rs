@@ -5,6 +5,7 @@
 
 pub mod types;
 pub mod typed_ast;
+pub mod enum_info;
 mod env;
 mod checker;
 mod builtins;
@@ -216,6 +217,7 @@ mod integration_tests {
         Program {
             structs: vec![],
             imports: vec![import],
+            enums: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,
@@ -415,6 +417,7 @@ mod integration_tests {
         let program = Program {
             structs: vec![],
             imports: vec![],
+            enums: vec![],
             functions: vec![],
             data_block: None,
             connector_block: None,

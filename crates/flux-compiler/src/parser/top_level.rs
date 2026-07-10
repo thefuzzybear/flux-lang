@@ -23,7 +23,9 @@ impl ParserState {
         let mut data_block: Option<DataBlock> = None;
         let mut connector_block: Option<ConnectorBlock> = None;
 
-        // Parse imports, structs, functions, optional data block, and optional connector block (interleaved before strategy)
+        let mut enums = Vec::new();
+
+        // Parse imports, structs, enums, functions, optional data block, and optional connector block (interleaved before strategy)
         loop {
             match self.peek().clone() {
                 Token::From => {
@@ -31,6 +33,9 @@ impl ParserState {
                 }
                 Token::At | Token::Struct => {
                     structs.push(self.parse_struct_def()?);
+                }
+                Token::Enum => {
+                    enums.push(self.parse_enum_def()?);
                 }
                 Token::Fn => {
                     functions.push(self.parse_fn_def()?);
@@ -75,6 +80,7 @@ impl ParserState {
             return Ok(Program {
                 imports,
                 structs,
+                enums,
                 functions,
                 data_block: None,
                 connector_block: None,
@@ -119,6 +125,7 @@ impl ParserState {
         Ok(Program {
             imports,
             structs,
+            enums,
             functions,
             data_block,
             connector_block,
@@ -167,6 +174,75 @@ impl ParserState {
             name,
             fields,
             decorators,
+            span,
+        })
+    }
+
+    /// Parse an enum definition: `enum Name { Variant1, Variant2(field: Type) }`
+    ///
+    /// Supports both unit variants (no fields) and data variants with named fields.
+    /// A trailing comma after the last variant is permitted.
+    fn parse_enum_def(&mut self) -> Result<EnumDef> {
+        let start_span = self.current_span();
+
+        self.expect(&Token::Enum)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::OpenBrace)?;
+
+        let mut variants = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            let variant_start = self.current_span();
+            let (variant_name, _) = self.expect_ident()?;
+
+            // Check if this variant has fields: `VariantName(field: Type, ...)`
+            let mut fields = Vec::new();
+            if self.check(&Token::OpenParen) {
+                self.advance(); // consume `(`
+
+                while !self.check(&Token::CloseParen) && !self.at_eof() {
+                    let field_start = self.current_span();
+                    let (field_name, _) = self.expect_ident()?;
+                    self.expect(&Token::Colon)?;
+                    let field_type = self.parse_type_annotation()?;
+                    let field_span = self.span_from(field_start);
+
+                    fields.push(EnumField {
+                        name: field_name,
+                        field_type,
+                        span: field_span,
+                    });
+
+                    if self.check(&Token::Comma) {
+                        self.advance(); // consume comma
+                    } else {
+                        break;
+                    }
+                }
+
+                self.expect(&Token::CloseParen)?;
+            }
+
+            let variant_span = self.span_from(variant_start);
+            variants.push(EnumVariant {
+                name: variant_name,
+                fields,
+                span: variant_span,
+            });
+
+            // Optional comma separator between variants
+            if self.check(&Token::Comma) {
+                self.advance(); // consume comma
+            } else {
+                break;
+            }
+        }
+
+        self.expect(&Token::CloseBrace)?;
+        let span = self.span_from(start_span);
+        Ok(EnumDef {
+            name,
+            type_params: Vec::new(), // For Phase 4 (generics)
+            variants,
             span,
         })
     }
@@ -2270,5 +2346,193 @@ strategy X {}
         } else {
             panic!("Expected Return statement");
         }
+    }
+
+    // ===== Enum Definition Parsing Tests =====
+
+    #[test]
+    fn parse_simple_enum_unit_variants() {
+        // enum Color { Red, Green, Blue }
+        let program = parse_program(vec![
+            Token::Enum,
+            Token::Ident("Color".to_string()),
+            Token::OpenBrace,
+            Token::Ident("Red".to_string()),
+            Token::Comma,
+            Token::Ident("Green".to_string()),
+            Token::Comma,
+            Token::Ident("Blue".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("Test".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.enums.len(), 1);
+        let enum_def = &program.enums[0];
+        assert_eq!(enum_def.name, "Color");
+        assert_eq!(enum_def.variants.len(), 3);
+        assert_eq!(enum_def.variants[0].name, "Red");
+        assert_eq!(enum_def.variants[0].fields.len(), 0);
+        assert_eq!(enum_def.variants[1].name, "Green");
+        assert_eq!(enum_def.variants[1].fields.len(), 0);
+        assert_eq!(enum_def.variants[2].name, "Blue");
+        assert_eq!(enum_def.variants[2].fields.len(), 0);
+    }
+
+    #[test]
+    fn parse_enum_with_data_variants() {
+        // enum OrderType { Market, Limit(price: f64) }
+        let program = parse_program(vec![
+            Token::Enum,
+            Token::Ident("OrderType".to_string()),
+            Token::OpenBrace,
+            Token::Ident("Market".to_string()),
+            Token::Comma,
+            Token::Ident("Limit".to_string()),
+            Token::OpenParen,
+            Token::Ident("price".to_string()),
+            Token::Colon,
+            Token::Ident("f64".to_string()),
+            Token::CloseParen,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("Test".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.enums.len(), 1);
+        let enum_def = &program.enums[0];
+        assert_eq!(enum_def.name, "OrderType");
+        assert_eq!(enum_def.variants.len(), 2);
+
+        // Unit variant
+        assert_eq!(enum_def.variants[0].name, "Market");
+        assert_eq!(enum_def.variants[0].fields.len(), 0);
+
+        // Data variant
+        assert_eq!(enum_def.variants[1].name, "Limit");
+        assert_eq!(enum_def.variants[1].fields.len(), 1);
+        assert_eq!(enum_def.variants[1].fields[0].name, "price");
+        assert_eq!(enum_def.variants[1].fields[0].field_type, TypeAnnotation::F64);
+    }
+
+    #[test]
+    fn parse_enum_with_multiple_fields() {
+        // enum Message { Move(x: f64, y: f64), Quit }
+        let program = parse_program(vec![
+            Token::Enum,
+            Token::Ident("Message".to_string()),
+            Token::OpenBrace,
+            Token::Ident("Move".to_string()),
+            Token::OpenParen,
+            Token::Ident("x".to_string()),
+            Token::Colon,
+            Token::Ident("f64".to_string()),
+            Token::Comma,
+            Token::Ident("y".to_string()),
+            Token::Colon,
+            Token::Ident("f64".to_string()),
+            Token::CloseParen,
+            Token::Comma,
+            Token::Ident("Quit".to_string()),
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("Test".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.enums.len(), 1);
+        let enum_def = &program.enums[0];
+        assert_eq!(enum_def.name, "Message");
+        assert_eq!(enum_def.variants.len(), 2);
+
+        // Move variant with two fields
+        assert_eq!(enum_def.variants[0].name, "Move");
+        assert_eq!(enum_def.variants[0].fields.len(), 2);
+        assert_eq!(enum_def.variants[0].fields[0].name, "x");
+        assert_eq!(enum_def.variants[0].fields[0].field_type, TypeAnnotation::F64);
+        assert_eq!(enum_def.variants[0].fields[1].name, "y");
+        assert_eq!(enum_def.variants[0].fields[1].field_type, TypeAnnotation::F64);
+
+        // Quit unit variant
+        assert_eq!(enum_def.variants[1].name, "Quit");
+        assert_eq!(enum_def.variants[1].fields.len(), 0);
+    }
+
+    #[test]
+    fn parse_enum_trailing_comma() {
+        // enum Status { Active, Inactive, }
+        let program = parse_program(vec![
+            Token::Enum,
+            Token::Ident("Status".to_string()),
+            Token::OpenBrace,
+            Token::Ident("Active".to_string()),
+            Token::Comma,
+            Token::Ident("Inactive".to_string()),
+            Token::Comma,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("Test".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.enums.len(), 1);
+        let enum_def = &program.enums[0];
+        assert_eq!(enum_def.variants.len(), 2);
+    }
+
+    #[test]
+    fn parse_enum_with_named_type_fields() {
+        // enum Result { Ok, Err(code: int, message: str) }
+        let program = parse_program(vec![
+            Token::Enum,
+            Token::Ident("Result".to_string()),
+            Token::OpenBrace,
+            Token::Ident("Ok".to_string()),
+            Token::Comma,
+            Token::Ident("Err".to_string()),
+            Token::OpenParen,
+            Token::Ident("code".to_string()),
+            Token::Colon,
+            Token::Ident("int".to_string()),
+            Token::Comma,
+            Token::Ident("message".to_string()),
+            Token::Colon,
+            Token::Ident("str".to_string()),
+            Token::CloseParen,
+            Token::CloseBrace,
+            Token::Strategy,
+            Token::Ident("Test".to_string()),
+            Token::OpenBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.enums.len(), 1);
+        let enum_def = &program.enums[0];
+        assert_eq!(enum_def.name, "Result");
+
+        // Err variant with multiple fields
+        let err_variant = &enum_def.variants[1];
+        assert_eq!(err_variant.name, "Err");
+        assert_eq!(err_variant.fields.len(), 2);
+        assert_eq!(err_variant.fields[0].name, "code");
+        assert_eq!(err_variant.fields[0].field_type, TypeAnnotation::Int);
+        assert_eq!(err_variant.fields[1].name, "message");
+        assert_eq!(err_variant.fields[1].field_type, TypeAnnotation::Str);
     }
 }

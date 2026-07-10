@@ -18,6 +18,18 @@ pub fn format_program(program: &Program) -> String {
         output.push('\n');
     }
 
+    // Format struct definitions
+    for struct_def in &program.structs {
+        format_struct_def(&mut output, struct_def);
+        output.push('\n');
+    }
+
+    // Format enum definitions
+    for enum_def in &program.enums {
+        format_enum_def(&mut output, enum_def);
+        output.push('\n');
+    }
+
     // Format function definitions
     for fn_def in &program.functions {
         format_fn_def(&mut output, fn_def);
@@ -86,6 +98,161 @@ fn format_type_annotation(output: &mut String, ty: &TypeAnnotation) {
             output.push_str("int(");
             output.push_str(&width.to_string());
             output.push(')');
+        }
+        TypeAnnotation::Generic(name, args) => {
+            output.push_str(name);
+            output.push('[');
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    output.push_str(", ");
+                }
+                format_type_annotation(output, arg);
+            }
+            output.push(']');
+        }
+    }
+}
+
+// --- Struct formatting ---
+
+fn format_struct_def(output: &mut String, struct_def: &StructDef) {
+    // Format decorators
+    for decorator in &struct_def.decorators {
+        output.push('@');
+        output.push_str(&decorator.name);
+        if let Some(arg) = &decorator.arg {
+            output.push('(');
+            match arg {
+                DecoratorArg::Int(n) => output.push_str(&n.to_string()),
+            }
+            output.push(')');
+        }
+        output.push('\n');
+    }
+
+    output.push_str("struct ");
+    output.push_str(&struct_def.name);
+    output.push_str(" {\n");
+
+    for field in &struct_def.fields {
+        // Format field-level decorators
+        for decorator in &field.field_decorators {
+            write_indent(output, 1);
+            output.push('@');
+            output.push_str(&decorator.name);
+            if let Some(arg) = &decorator.arg {
+                output.push('(');
+                match arg {
+                    DecoratorArg::Int(n) => output.push_str(&n.to_string()),
+                }
+                output.push(')');
+            }
+            output.push('\n');
+        }
+
+        write_indent(output, 1);
+        output.push_str(&field.name);
+        output.push_str(": ");
+        format_type_annotation(output, &field.field_type);
+        output.push('\n');
+    }
+
+    output.push_str("}\n");
+}
+
+// --- Enum formatting ---
+
+fn format_enum_def(output: &mut String, enum_def: &EnumDef) {
+    output.push_str("enum ");
+    output.push_str(&enum_def.name);
+
+    // Format type parameters if present
+    if !enum_def.type_params.is_empty() {
+        output.push('[');
+        for (i, param) in enum_def.type_params.iter().enumerate() {
+            if i > 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&param.name);
+            if let Some(bound) = &param.bound {
+                output.push_str(": ");
+                output.push_str(bound);
+            }
+        }
+        output.push(']');
+    }
+
+    output.push_str(" {\n");
+
+    for (i, variant) in enum_def.variants.iter().enumerate() {
+        write_indent(output, 1);
+        output.push_str(&variant.name);
+
+        if !variant.fields.is_empty() {
+            output.push('(');
+            for (j, field) in variant.fields.iter().enumerate() {
+                if j > 0 {
+                    output.push_str(", ");
+                }
+                output.push_str(&field.name);
+                output.push_str(": ");
+                format_type_annotation(output, &field.field_type);
+            }
+            output.push(')');
+        }
+
+        // Add comma between variants (not after the last one)
+        if i < enum_def.variants.len() - 1 {
+            output.push(',');
+        }
+        output.push('\n');
+    }
+
+    output.push_str("}\n");
+}
+
+// --- Match expression formatting ---
+
+fn format_match_expr(output: &mut String, match_expr: &MatchExpr) {
+    output.push_str("match ");
+    format_expr(output, &match_expr.scrutinee);
+    output.push_str(" {\n");
+
+    for arm in &match_expr.arms {
+        write_indent(output, 1);
+        format_pattern(output, &arm.pattern);
+        output.push_str(" {\n");
+
+        for stmt in &arm.body {
+            format_stmt(output, stmt, 2);
+        }
+
+        write_indent(output, 1);
+        output.push_str("}\n");
+    }
+
+    output.push_str("}\n");
+}
+
+fn format_pattern(output: &mut String, pattern: &Pattern) {
+    match pattern {
+        Pattern::Variant { enum_name, variant_name, bindings, .. } => {
+            output.push_str(enum_name);
+            output.push('.');
+            output.push_str(variant_name);
+            if !bindings.is_empty() {
+                output.push('(');
+                for (i, binding) in bindings.iter().enumerate() {
+                    if i > 0 {
+                        output.push_str(", ");
+                    }
+                    output.push_str(binding);
+                }
+                output.push(')');
+            }
+        }
+        Pattern::Wildcard { .. } => {
+            output.push('_');
         }
     }
 }
@@ -399,6 +566,24 @@ fn format_expr_inner(output: &mut String, expr: &Expr) {
             }
             output.push_str(" }");
         }
+        ExprKind::EnumConstruction { enum_name, variant_name, args } => {
+            output.push_str(enum_name);
+            output.push('.');
+            output.push_str(variant_name);
+            if !args.is_empty() {
+                output.push('(');
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        output.push_str(", ");
+                    }
+                    format_expr(output, arg);
+                }
+                output.push(')');
+            }
+        }
+        ExprKind::Match(match_expr) => {
+            format_match_expr(output, match_expr);
+        }
     }
 }
 
@@ -666,7 +851,7 @@ mod tests {
 
         // Build a minimal program AST
         let program = Program {
-            structs: vec![],
+            structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,
@@ -708,7 +893,7 @@ mod tests {
     #[test]
     fn format_indentation_nested_blocks() {
         let program = Program {
-            structs: vec![],
+            structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
             data_block: None,
@@ -755,6 +940,399 @@ strategy MyStrategy {
             buy()
         }
     }
+}
+";
+        assert_eq!(output, expected);
+    }
+
+    // 18. Enum definition formatting: unit variants
+    #[test]
+    fn format_enum_unit_variants() {
+        let program = Program {
+            imports: vec![],
+            structs: vec![],
+            enums: vec![EnumDef {
+                name: "Color".to_string(),
+                type_params: vec![],
+                variants: vec![
+                    EnumVariant {
+                        name: "Red".to_string(),
+                        fields: vec![],
+                        span: dummy_span(),
+                    },
+                    EnumVariant {
+                        name: "Green".to_string(),
+                        fields: vec![],
+                        span: dummy_span(),
+                    },
+                    EnumVariant {
+                        name: "Blue".to_string(),
+                        fields: vec![],
+                        span: dummy_span(),
+                    },
+                ],
+                span: dummy_span(),
+            }],
+            functions: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: Strategy {
+                name: "Test".to_string(),
+                body: vec![],
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let output = format_program(&program);
+        let expected = "\
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+strategy Test {
+}
+";
+        assert_eq!(output, expected);
+    }
+
+    // 19. Enum definition formatting: data variants with fields
+    #[test]
+    fn format_enum_data_variants() {
+        let program = Program {
+            imports: vec![],
+            structs: vec![],
+            enums: vec![EnumDef {
+                name: "OrderType".to_string(),
+                type_params: vec![],
+                variants: vec![
+                    EnumVariant {
+                        name: "Market".to_string(),
+                        fields: vec![],
+                        span: dummy_span(),
+                    },
+                    EnumVariant {
+                        name: "Limit".to_string(),
+                        fields: vec![
+                            EnumField {
+                                name: "price".to_string(),
+                                field_type: TypeAnnotation::F64,
+                                span: dummy_span(),
+                            },
+                            EnumField {
+                                name: "quantity".to_string(),
+                                field_type: TypeAnnotation::F64,
+                                span: dummy_span(),
+                            },
+                        ],
+                        span: dummy_span(),
+                    },
+                ],
+                span: dummy_span(),
+            }],
+            functions: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: Strategy {
+                name: "Test".to_string(),
+                body: vec![],
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let output = format_program(&program);
+        let expected = "\
+enum OrderType {
+    Market,
+    Limit(price: f64, quantity: f64)
+}
+
+strategy Test {
+}
+";
+        assert_eq!(output, expected);
+    }
+
+    // 20. Enum definition with type parameters
+    #[test]
+    fn format_enum_with_type_params() {
+        let program = Program {
+            imports: vec![],
+            structs: vec![],
+            enums: vec![EnumDef {
+                name: "Option".to_string(),
+                type_params: vec![
+                    TypeParam {
+                        name: "T".to_string(),
+                        bound: None,
+                        span: dummy_span(),
+                    },
+                ],
+                variants: vec![
+                    EnumVariant {
+                        name: "Some".to_string(),
+                        fields: vec![
+                            EnumField {
+                                name: "value".to_string(),
+                                field_type: TypeAnnotation::Named("T".to_string()),
+                                span: dummy_span(),
+                            },
+                        ],
+                        span: dummy_span(),
+                    },
+                    EnumVariant {
+                        name: "None".to_string(),
+                        fields: vec![],
+                        span: dummy_span(),
+                    },
+                ],
+                span: dummy_span(),
+            }],
+            functions: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: Strategy {
+                name: "Test".to_string(),
+                body: vec![],
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let output = format_program(&program);
+        let expected = "\
+enum Option[T] {
+    Some(value: T),
+    None
+}
+
+strategy Test {
+}
+";
+        assert_eq!(output, expected);
+    }
+
+    // 21. Enum construction expression: unit variant
+    #[test]
+    fn format_enum_construction_unit() {
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "Color".to_string(),
+            variant_name: "Red".to_string(),
+            args: vec![],
+        });
+        assert_eq!(format_single_expr(&expr), "Color.Red");
+    }
+
+    // 22. Enum construction expression: with arguments
+    #[test]
+    fn format_enum_construction_with_args() {
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "Limit".to_string(),
+            args: vec![
+                make_expr(ExprKind::FloatLiteral(100.0)),
+                make_expr(ExprKind::FloatLiteral(50.0)),
+            ],
+        });
+        assert_eq!(format_single_expr(&expr), "OrderType.Limit(100.0, 50.0)");
+    }
+
+    // 23. Match expression formatting: variant patterns
+    #[test]
+    fn format_match_expr_variant_patterns() {
+        let match_expr = MatchExpr {
+            scrutinee: Box::new(make_expr(ExprKind::Ident("order".to_string()))),
+            arms: vec![
+                MatchArm {
+                    pattern: Pattern::Variant {
+                        enum_name: "OrderType".to_string(),
+                        variant_name: "Market".to_string(),
+                        bindings: vec![],
+                        span: dummy_span(),
+                    },
+                    body: vec![
+                        Stmt::Expr(ExprStmt {
+                            expr: make_expr(ExprKind::Ident("buy".to_string())),
+                            span: dummy_span(),
+                        }),
+                    ],
+                    span: dummy_span(),
+                },
+                MatchArm {
+                    pattern: Pattern::Variant {
+                        enum_name: "OrderType".to_string(),
+                        variant_name: "Limit".to_string(),
+                        bindings: vec!["price".to_string()],
+                        span: dummy_span(),
+                    },
+                    body: vec![
+                        Stmt::Expr(ExprStmt {
+                            expr: make_expr(ExprKind::Ident("place_limit".to_string())),
+                            span: dummy_span(),
+                        }),
+                    ],
+                    span: dummy_span(),
+                },
+            ],
+            span: dummy_span(),
+        };
+
+        let expr = make_expr(ExprKind::Match(match_expr));
+        assert_eq!(format_single_expr(&expr), "match order {\n    OrderType.Market {\n        buy\n    }\n    OrderType.Limit(price) {\n        place_limit\n    }\n}\n");
+    }
+
+    // 24. Match expression with wildcard pattern
+    #[test]
+    fn format_match_expr_wildcard() {
+        let match_expr = MatchExpr {
+            scrutinee: Box::new(make_expr(ExprKind::Ident("x".to_string()))),
+            arms: vec![
+                MatchArm {
+                    pattern: Pattern::Wildcard { span: dummy_span() },
+                    body: vec![
+                        Stmt::Expr(ExprStmt {
+                            expr: make_expr(ExprKind::Ident("default".to_string())),
+                            span: dummy_span(),
+                        }),
+                    ],
+                    span: dummy_span(),
+                },
+            ],
+            span: dummy_span(),
+        };
+
+        let expr = make_expr(ExprKind::Match(match_expr));
+        assert_eq!(format_single_expr(&expr), "match x {\n    _ {\n        default\n    }\n}\n");
+    }
+
+    // 25. Round-trip: enum definition
+    #[test]
+    fn format_round_trip_enum_definition() {
+        use crate::lexer::lex_with_spans;
+        use super::super::{parse, pretty_print_program};
+
+        let source = "\
+enum OrderType {
+    Market,
+    Limit(price: f64)
+}
+
+strategy Test {
+}
+";
+        let tokens = lex_with_spans(source).expect("lex failed");
+        let parsed = parse(tokens).expect("parse failed");
+        let formatted = pretty_print_program(&parsed);
+
+        // Parse the formatted output again
+        let tokens2 = lex_with_spans(&formatted).expect("re-lex failed");
+        let parsed2 = parse(tokens2).expect("re-parse failed");
+
+        // Compare enums
+        assert_eq!(parsed.enums.len(), parsed2.enums.len());
+        assert_eq!(parsed.enums[0].name, parsed2.enums[0].name);
+        assert_eq!(parsed.enums[0].variants.len(), parsed2.enums[0].variants.len());
+    }
+
+    // 26. Struct definition formatting
+    #[test]
+    fn format_struct_def() {
+        let program = Program {
+            imports: vec![],
+            structs: vec![StructDef {
+                name: "Quote".to_string(),
+                fields: vec![
+                    StructField {
+                        name: "bid".to_string(),
+                        field_type: TypeAnnotation::F64,
+                        field_decorators: vec![],
+                        span: dummy_span(),
+                    },
+                    StructField {
+                        name: "ask".to_string(),
+                        field_type: TypeAnnotation::F64,
+                        field_decorators: vec![],
+                        span: dummy_span(),
+                    },
+                ],
+                decorators: vec![],
+                span: dummy_span(),
+            }],
+            enums: vec![],
+            functions: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: Strategy {
+                name: "Test".to_string(),
+                body: vec![],
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let output = format_program(&program);
+        let expected = "\
+struct Quote {
+    bid: f64
+    ask: f64
+}
+
+strategy Test {
+}
+";
+        assert_eq!(output, expected);
+    }
+
+    // 27. Struct with decorators
+    #[test]
+    fn format_struct_with_decorators() {
+        let program = Program {
+            imports: vec![],
+            structs: vec![StructDef {
+                name: "Order".to_string(),
+                fields: vec![
+                    StructField {
+                        name: "price".to_string(),
+                        field_type: TypeAnnotation::F64,
+                        field_decorators: vec![Decorator {
+                            name: "hot".to_string(),
+                            arg: None,
+                            span: dummy_span(),
+                        }],
+                        span: dummy_span(),
+                    },
+                ],
+                decorators: vec![Decorator {
+                    name: "bitfield".to_string(),
+                    arg: Some(DecoratorArg::Int(32)),
+                    span: dummy_span(),
+                }],
+                span: dummy_span(),
+            }],
+            enums: vec![],
+            functions: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: Strategy {
+                name: "Test".to_string(),
+                body: vec![],
+                span: dummy_span(),
+            },
+            span: dummy_span(),
+        };
+
+        let output = format_program(&program);
+        let expected = "\
+@bitfield(32)
+struct Order {
+    @hot
+    price: f64
+}
+
+strategy Test {
 }
 ";
         assert_eq!(output, expected);

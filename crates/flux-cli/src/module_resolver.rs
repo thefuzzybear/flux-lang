@@ -8,7 +8,7 @@
 //! resolved from the workspace `std/` directory and provide both struct definitions
 //! and helper functions to the importing scope.
 
-use flux_compiler::parser::ast::{Expr, ExprKind, FnDef, Program, Stmt, StructDef};
+use flux_compiler::parser::ast::{Expr, ExprKind, FnDef, MatchExpr, Program, Stmt, StructDef};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -694,6 +694,19 @@ fn collect_calls_from_expr(expr: &Expr, names: &mut Vec<String>) {
         ExprKind::StructLiteral { fields, .. } => {
             for (_, value) in fields {
                 collect_calls_from_expr(value, names);
+            }
+        }
+        ExprKind::EnumConstruction { args, .. } => {
+            for arg in args {
+                collect_calls_from_expr(arg, names);
+            }
+        }
+        ExprKind::Match(MatchExpr { scrutinee, arms, .. }) => {
+            collect_calls_from_expr(scrutinee, names);
+            for arm in arms {
+                for stmt in &arm.body {
+                    collect_calls_from_stmt(stmt, names);
+                }
             }
         }
         // Leaf nodes: no calls to extract

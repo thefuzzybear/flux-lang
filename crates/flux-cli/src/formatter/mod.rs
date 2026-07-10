@@ -6,7 +6,7 @@
 
 use flux_compiler::parser::ast::{
     Assignment, BinOp, DataBlock, DecoratorArg, EventHandler, Expr, ExprKind, ExprStmt, ForLoop,
-    IfStmt, Import, Param, ParamsBlock, Program, Property, ReturnStmt, StateBlock, StateVar,
+    IfStmt, Import, MatchExpr, Param, ParamsBlock, Pattern, Program, Property, ReturnStmt, StateBlock, StateVar,
     Strategy, StrategyItem, Stmt, StructDef, TypeAnnotation, UnaryOp, WhileLoop,
 };
 use flux_compiler::{extract_comments, Comment};
@@ -256,6 +256,17 @@ impl Formatter {
                 self.output.push_str("int(");
                 self.output.push_str(&n.to_string());
                 self.output.push(')');
+            }
+            TypeAnnotation::Generic(name, type_args) => {
+                self.output.push_str(name);
+                self.output.push('[');
+                for (i, arg) in type_args.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.format_type_annotation(arg);
+                }
+                self.output.push(']');
             }
         }
     }
@@ -655,6 +666,81 @@ impl Formatter {
             }
             ExprKind::StructLiteral { struct_name, fields } => {
                 self.format_struct_literal(struct_name, fields);
+            }
+            ExprKind::EnumConstruction { enum_name, variant_name, args } => {
+                self.output.push_str(enum_name);
+                self.output.push('.');
+                self.output.push_str(variant_name);
+                if !args.is_empty() {
+                    self.output.push('(');
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            self.output.push_str(", ");
+                        }
+                        self.format_expr(arg);
+                    }
+                    self.output.push(')');
+                }
+            }
+            ExprKind::Match(match_expr) => {
+                self.format_match_expr(match_expr);
+            }
+        }
+    }
+
+    /// Format a match expression.
+    fn format_match_expr(&mut self, match_expr: &MatchExpr) {
+        self.output.push_str("match ");
+        self.format_expr(&match_expr.scrutinee);
+        self.output.push_str(" {\n");
+        self.indent_level += 1;
+        for arm in &match_expr.arms {
+            self.push_indent();
+            self.format_pattern(&arm.pattern);
+            self.output.push_str(" => ");
+            if arm.body.len() == 1 {
+                // Single statement: put on same line
+                self.format_stmt(&arm.body[0]);
+            } else {
+                // Multiple statements: use block
+                self.output.push_str("{\n");
+                self.indent_level += 1;
+                for stmt in &arm.body {
+                    self.push_indent();
+                    self.format_stmt(stmt);
+                    self.output.push('\n');
+                }
+                self.indent_level -= 1;
+                self.push_indent();
+                self.output.push_str("}");
+            }
+            self.output.push('\n');
+        }
+        self.indent_level -= 1;
+        self.push_indent();
+        self.output.push('}');
+    }
+
+    /// Format a pattern in a match arm.
+    fn format_pattern(&mut self, pattern: &Pattern) {
+        match pattern {
+            Pattern::Variant { enum_name, variant_name, bindings, .. } => {
+                self.output.push_str(enum_name);
+                self.output.push('.');
+                self.output.push_str(variant_name);
+                if !bindings.is_empty() {
+                    self.output.push('(');
+                    for (i, binding) in bindings.iter().enumerate() {
+                        if i > 0 {
+                            self.output.push_str(", ");
+                        }
+                        self.output.push_str(binding);
+                    }
+                    self.output.push(')');
+                }
+            }
+            Pattern::Wildcard { .. } => {
+                self.output.push('_');
             }
         }
     }

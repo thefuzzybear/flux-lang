@@ -9,6 +9,7 @@ use crate::lexer::Span;
 pub struct Program {
     pub imports: Vec<Import>,
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub functions: Vec<FnDef>,
     pub data_block: Option<DataBlock>,
     pub connector_block: Option<ConnectorBlock>,
@@ -62,6 +63,8 @@ pub enum TypeAnnotation {
     FixedArray(Box<TypeAnnotation>, usize),
     /// `int(N)` for `@bitfield` structs.
     BitInt(usize),
+    /// Generic type usage: `Vec[T]`, `HashMap[K, V]`
+    Generic(String, Vec<TypeAnnotation>),
 }
 
 /// A user-defined function declaration: `fn name(params) { body }`
@@ -327,6 +330,14 @@ pub enum ExprKind {
         struct_name: String,
         fields: Vec<(String, Expr)>,
     },
+    /// Enum variant construction: EnumName.Variant or EnumName.Variant(args)
+    EnumConstruction {
+        enum_name: String,
+        variant_name: String,
+        args: Vec<Expr>,
+    },
+    /// Match expression
+    Match(MatchExpr),
 }
 
 /// Binary operators
@@ -352,4 +363,69 @@ pub enum BinOp {
 pub enum UnaryOp {
     Neg,
     Not,
+}
+
+// --- Enum and Match AST Nodes ---
+
+/// Enum definition: `enum Name { Variant1, Variant2(field: Type) }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDef {
+    pub name: String,
+    pub type_params: Vec<TypeParam>,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+/// A single variant in an enum definition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Vec<EnumField>,
+    pub span: Span,
+}
+
+/// A named field in an enum variant.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumField {
+    pub name: String,
+    pub field_type: TypeAnnotation,
+    pub span: Span,
+}
+
+/// Match expression: `match expr { Pattern => body, ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchExpr {
+    pub scrutinee: Box<Expr>,
+    pub arms: Vec<MatchArm>,
+    pub span: Span,
+}
+
+/// A single arm in a match expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// Patterns used in match arms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    /// EnumName.VariantName or EnumName.VariantName(a, b, c)
+    Variant {
+        enum_name: String,
+        variant_name: String,
+        bindings: Vec<String>,
+        span: Span,
+    },
+    /// _ wildcard
+    Wildcard { span: Span },
+}
+
+/// Type parameter: `T` or `T: TraitBound`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: String,
+    pub bound: Option<String>,
+    pub span: Span,
 }

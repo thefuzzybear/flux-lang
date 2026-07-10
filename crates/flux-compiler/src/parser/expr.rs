@@ -130,7 +130,16 @@ impl ParserState {
         Ok(lhs)
     }
 
-    /// Parse a prefix expression (literal, identifier, unary op, grouped expr, list).
+    /// Check if an identifier name looks like an enum name.
+    /// Enum names start with an uppercase letter (PascalCase).
+    fn is_enum_name_like(name: &str) -> bool {
+        name.chars()
+            .next()
+            .map(|c| c.is_ascii_uppercase())
+            .unwrap_or(false)
+    }
+
+    /// Parse a prefix expression (literal, identifier, unary op, grouped expr, list, match).
     fn parse_prefix(&mut self) -> Result<Expr> {
         let token = self.peek().clone();
         match &token {
@@ -150,6 +159,8 @@ impl ParserState {
                     span,
                 })
             }
+            // Match expression
+            Token::Match => self.parse_match_expr(),
             // Grouped expression
             Token::OpenParen => self.parse_grouped_expr(),
             // List literal
@@ -259,13 +270,21 @@ impl ParserState {
         })
     }
 
-    /// Parse a dot expression, distinguishing method call from member access.
-    /// Method call: `lhs.name(args...)`, Member access: `lhs.name`
+    /// Parse a dot expression, distinguishing:
+    /// - Enum construction: `EnumName.VariantName` or `EnumName.VariantName(args)`
+    /// - Method call: `receiver.method(args)`
+    /// - Member access: `object.field`
     fn parse_dot_expr(&mut self, lhs: Expr) -> Result<Expr> {
         self.advance(); // consume Dot
         let (name, name_span) = self.expect_ident()?;
 
-        // Check if it's a method call (followed by OpenParen)
+        // Check if lhs is an identifier that looks like an enum name
+        let is_enum_construction = match &lhs.kind {
+            ExprKind::Ident(ident_name) => Self::is_enum_name_like(ident_name),
+            _ => false,
+        };
+
+        // Check for args following: `EnumName.VariantName(args)` or `receiver.method(args)`
         if self.check(&Token::OpenParen) {
             self.advance(); // consume OpenParen
             let mut args = Vec::new();
@@ -288,25 +307,61 @@ impl ParserState {
             })?;
 
             let end_span = self.expect(&Token::CloseParen)?;
-            let span = Span::new(lhs.span.start, end_span.end);
-            Ok(Expr {
-                kind: ExprKind::MethodCall {
-                    receiver: Box::new(lhs),
-                    method: name,
-                    args,
-                },
-                span,
-            })
+
+            // Distinguish enum construction from method call
+            if is_enum_construction {
+                let enum_name = match &lhs.kind {
+                    ExprKind::Ident(name) => name.clone(),
+                    _ => unreachable!(),
+                };
+                let span = Span::new(lhs.span.start, end_span.end);
+                Ok(Expr {
+                    kind: ExprKind::EnumConstruction {
+                        enum_name,
+                        variant_name: name,
+                        args,
+                    },
+                    span,
+                })
+            } else {
+                let span = Span::new(lhs.span.start, end_span.end);
+                Ok(Expr {
+                    kind: ExprKind::MethodCall {
+                        receiver: Box::new(lhs),
+                        method: name,
+                        args,
+                    },
+                    span,
+                })
+            }
         } else {
-            // Member access
-            let span = Span::new(lhs.span.start, name_span.end);
-            Ok(Expr {
-                kind: ExprKind::MemberAccess {
-                    object: Box::new(lhs),
-                    field: name,
-                },
-                span,
-            })
+            // No args: either enum construction or member access
+            if is_enum_construction {
+                // `EnumName.VariantName` (unit variant)
+                let enum_name = match &lhs.kind {
+                    ExprKind::Ident(name) => name.clone(),
+                    _ => unreachable!(),
+                };
+                let span = Span::new(lhs.span.start, name_span.end);
+                Ok(Expr {
+                    kind: ExprKind::EnumConstruction {
+                        enum_name,
+                        variant_name: name,
+                        args: Vec::new(),
+                    },
+                    span,
+                })
+            } else {
+                // Member access
+                let span = Span::new(lhs.span.start, name_span.end);
+                Ok(Expr {
+                    kind: ExprKind::MemberAccess {
+                        object: Box::new(lhs),
+                        field: name,
+                    },
+                    span,
+                })
+            }
         }
     }
 
@@ -366,6 +421,119 @@ impl ParserState {
         let span = Span::new(start_span.start, end_span.end);
         Ok(Expr {
             kind: ExprKind::ListLiteral(elements),
+            span,
+        })
+    }
+
+    /// Parse a match expression: `match scrutinee { Pattern => { body }, ... }`
+    fn parse_match_expr(&mut self) -> Result<Expr> {
+        let start_span = self.current_span();
+        self.expect(&Token::Match)?;
+
+        // Parse the scrutinee expression
+        let scrutinee = self.with_struct_literal_forbidden(|state| state.parse_expr(0))?;
+
+        // Expect `{` to start the match arms
+        self.expect(&Token::OpenBrace)?;
+
+        let mut arms = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            let arm = self.parse_match_arm()?;
+            arms.push(arm);
+        }
+
+        let end_span = self.expect(&Token::CloseBrace)?;
+        let span = Span::new(start_span.start, end_span.end);
+        Ok(Expr {
+            kind: ExprKind::Match(MatchExpr {
+                scrutinee: Box::new(scrutinee),
+                arms,
+                span,
+            }),
+            span,
+        })
+    }
+
+    /// Parse a single match arm: `Pattern => { body }`
+    fn parse_match_arm(&mut self) -> Result<MatchArm> {
+        let start_span = self.current_span();
+
+        // Parse the pattern
+        let pattern = self.parse_pattern()?;
+
+        // Expect `=>` (fat arrow)
+        self.expect(&Token::FatArrow)?;
+
+        // Parse the body - either a block `{ ... }` or a single expression
+        let body = if self.check(&Token::OpenBrace) {
+            self.advance(); // consume `{`
+            let mut stmts = Vec::new();
+            while !self.check(&Token::CloseBrace) && !self.at_eof() {
+                stmts.push(self.parse_statement()?);
+            }
+            self.expect(&Token::CloseBrace)?;
+            stmts
+        } else {
+            // Single expression statement
+            let expr = self.parse_expr(0)?;
+            let span = expr.span;
+            vec![Stmt::Expr(ExprStmt { expr, span })]
+        };
+
+        let span = self.span_from(start_span);
+        Ok(MatchArm {
+            pattern,
+            body,
+            span,
+        })
+    }
+
+    /// Parse a pattern: `EnumName.VariantName(binding1, binding2)` or `_`
+    fn parse_pattern(&mut self) -> Result<Pattern> {
+        let start_span = self.current_span();
+
+        // Check for wildcard pattern: `_` is parsed as an identifier
+        if let Token::Ident(name) = self.peek() {
+            if name == "_" {
+                self.advance();
+                return Ok(Pattern::Wildcard {
+                    span: start_span,
+                });
+            }
+        }
+
+        // Otherwise, parse a variant pattern: EnumName.VariantName(bindings...)
+        let (enum_name, _) = self.expect_ident()?;
+        self.expect(&Token::Dot)?;
+        let (variant_name, _) = self.expect_ident()?;
+
+        // Check for bindings: `(binding1, binding2, ...)`
+        let mut bindings = Vec::new();
+        if self.check(&Token::OpenParen) {
+            self.advance(); // consume `(`
+
+            if !self.check(&Token::CloseParen) {
+                let (binding, _) = self.expect_ident()?;
+                bindings.push(binding);
+
+                while self.check(&Token::Comma) {
+                    self.advance(); // consume `,`
+                    if self.check(&Token::CloseParen) {
+                        break; // trailing comma
+                    }
+                    let (binding, _) = self.expect_ident()?;
+                    bindings.push(binding);
+                }
+            }
+
+            self.expect(&Token::CloseParen)?;
+        }
+
+        let span = self.span_from(start_span);
+        Ok(Pattern::Variant {
+            enum_name,
+            variant_name,
+            bindings,
             span,
         })
     }
@@ -1208,5 +1376,321 @@ mod tests {
         ]);
 
         assert!(result.is_err());
+    }
+
+    // ===== 14. Enum construction parsing =====
+
+    #[test]
+    fn enum_construction_unit_variant() {
+        // OrderType.Market
+        let expr = parse_expr(vec![
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Market".to_string()),
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::EnumConstruction { enum_name, variant_name, args } => {
+                assert_eq!(enum_name, "OrderType");
+                assert_eq!(variant_name, "Market");
+                assert!(args.is_empty());
+            }
+            _ => panic!("Expected EnumConstruction, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn enum_construction_with_args() {
+        // OrderType.Limit(price: 100.0)
+        let expr = parse_expr(vec![
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Limit".to_string()),
+            Token::OpenParen,
+            Token::Float(100.0),
+            Token::CloseParen,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::EnumConstruction { enum_name, variant_name, args } => {
+                assert_eq!(enum_name, "OrderType");
+                assert_eq!(variant_name, "Limit");
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0].kind, ExprKind::FloatLiteral(100.0));
+            }
+            _ => panic!("Expected EnumConstruction, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn enum_construction_multiple_args() {
+        // Result.Success(value, code)
+        let expr = parse_expr(vec![
+            Token::Ident("Result".to_string()),
+            Token::Dot,
+            Token::Ident("Success".to_string()),
+            Token::OpenParen,
+            Token::Ident("value".to_string()),
+            Token::Comma,
+            Token::Ident("code".to_string()),
+            Token::CloseParen,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::EnumConstruction { enum_name, variant_name, args } => {
+                assert_eq!(enum_name, "Result");
+                assert_eq!(variant_name, "Success");
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected EnumConstruction, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn member_access_lowercase_not_enum() {
+        // obj.field should be member access, not enum construction
+        let expr = parse_expr(vec![
+            Token::Ident("obj".to_string()),
+            Token::Dot,
+            Token::Ident("field".to_string()),
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::MemberAccess { object, field } => {
+                assert_eq!(field, "field");
+                match &object.kind {
+                    ExprKind::Ident(name) => assert_eq!(name, "obj"),
+                    _ => panic!("Expected Ident as object"),
+                }
+            }
+            _ => panic!("Expected MemberAccess, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn method_call_lowercase_not_enum() {
+        // obj.method() should be method call, not enum construction
+        let expr = parse_expr(vec![
+            Token::Ident("obj".to_string()),
+            Token::Dot,
+            Token::Ident("method".to_string()),
+            Token::OpenParen,
+            Token::CloseParen,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::MethodCall { receiver, method, args } => {
+                assert_eq!(method, "method");
+                assert!(args.is_empty());
+                match &receiver.kind {
+                    ExprKind::Ident(name) => assert_eq!(name, "obj"),
+                    _ => panic!("Expected Ident as receiver"),
+                }
+            }
+            _ => panic!("Expected MethodCall, got {:?}", expr.kind),
+        }
+    }
+
+    // ===== 15. Match expression parsing =====
+
+    #[test]
+    fn match_expression_single_arm() {
+        // match x { OrderType.Market => { a } }
+        let expr = parse_expr(vec![
+            Token::Match,
+            Token::Ident("x".to_string()),
+            Token::OpenBrace,
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Market".to_string()),
+            Token::FatArrow,
+            Token::OpenBrace,
+            Token::Ident("a".to_string()),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::Match(MatchExpr { scrutinee, arms, span: _ }) => {
+                assert_eq!(scrutinee.kind, ExprKind::Ident("x".to_string()));
+                assert_eq!(arms.len(), 1);
+                match &arms[0].pattern {
+                    Pattern::Variant { enum_name, variant_name, bindings, span: _ } => {
+                        assert_eq!(enum_name, "OrderType");
+                        assert_eq!(variant_name, "Market");
+                        assert!(bindings.is_empty());
+                    }
+                    _ => panic!("Expected Variant pattern"),
+                }
+            }
+            _ => panic!("Expected Match, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn match_expression_with_bindings() {
+        // match order { OrderType.Limit(p) => { p } }
+        let expr = parse_expr(vec![
+            Token::Match,
+            Token::Ident("order".to_string()),
+            Token::OpenBrace,
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Limit".to_string()),
+            Token::OpenParen,
+            Token::Ident("p".to_string()),
+            Token::CloseParen,
+            Token::FatArrow,
+            Token::OpenBrace,
+            Token::Ident("p".to_string()),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::Match(MatchExpr { scrutinee, arms, span: _ }) => {
+                assert_eq!(scrutinee.kind, ExprKind::Ident("order".to_string()));
+                assert_eq!(arms.len(), 1);
+                match &arms[0].pattern {
+                    Pattern::Variant { enum_name, variant_name, bindings, span: _ } => {
+                        assert_eq!(enum_name, "OrderType");
+                        assert_eq!(variant_name, "Limit");
+                        assert_eq!(bindings, &["p".to_string()]);
+                    }
+                    _ => panic!("Expected Variant pattern"),
+                }
+            }
+            _ => panic!("Expected Match, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn match_expression_wildcard_pattern() {
+        // match x { _ => { default } }
+        let expr = parse_expr(vec![
+            Token::Match,
+            Token::Ident("x".to_string()),
+            Token::OpenBrace,
+            Token::Ident("_".to_string()),
+            Token::FatArrow,
+            Token::OpenBrace,
+            Token::Ident("default".to_string()),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::Match(MatchExpr { scrutinee, arms, span: _ }) => {
+                assert_eq!(scrutinee.kind, ExprKind::Ident("x".to_string()));
+                assert_eq!(arms.len(), 1);
+                match &arms[0].pattern {
+                    Pattern::Wildcard { span: _ } => {}
+                    _ => panic!("Expected Wildcard pattern"),
+                }
+            }
+            _ => panic!("Expected Match, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn match_expression_multiple_arms() {
+        // match x { OrderType.Market => { a } OrderType.Limit(p) => { p } }
+        let expr = parse_expr(vec![
+            Token::Match,
+            Token::Ident("x".to_string()),
+            Token::OpenBrace,
+            // First arm
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Market".to_string()),
+            Token::FatArrow,
+            Token::OpenBrace,
+            Token::Ident("a".to_string()),
+            Token::CloseBrace,
+            // Second arm
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Limit".to_string()),
+            Token::OpenParen,
+            Token::Ident("p".to_string()),
+            Token::CloseParen,
+            Token::FatArrow,
+            Token::OpenBrace,
+            Token::Ident("p".to_string()),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::Match(MatchExpr { arms, .. }) => {
+                assert_eq!(arms.len(), 2);
+                // First arm
+                match &arms[0].pattern {
+                    Pattern::Variant { variant_name, .. } => {
+                        assert_eq!(variant_name, "Market");
+                    }
+                    _ => panic!("Expected Variant pattern"),
+                }
+                // Second arm
+                match &arms[1].pattern {
+                    Pattern::Variant { variant_name, bindings, .. } => {
+                        assert_eq!(variant_name, "Limit");
+                        assert_eq!(bindings, &["p".to_string()]);
+                    }
+                    _ => panic!("Expected Variant pattern"),
+                }
+            }
+            _ => panic!("Expected Match, got {:?}", expr.kind),
+        }
+    }
+
+    #[test]
+    fn match_expression_single_expr_body() {
+        // match x { OrderType.Market => 1 }
+        let expr = parse_expr(vec![
+            Token::Match,
+            Token::Ident("x".to_string()),
+            Token::OpenBrace,
+            Token::Ident("OrderType".to_string()),
+            Token::Dot,
+            Token::Ident("Market".to_string()),
+            Token::FatArrow,
+            Token::Int(1),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        match &expr.kind {
+            ExprKind::Match(MatchExpr { arms, .. }) => {
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].body.len(), 1);
+                match &arms[0].body[0] {
+                    Stmt::Expr(ExprStmt { expr, span: _ }) => {
+                        assert_eq!(expr.kind, ExprKind::IntLiteral(1));
+                    }
+                    _ => panic!("Expected Expr statement"),
+                }
+            }
+            _ => panic!("Expected Match, got {:?}", expr.kind),
+        }
     }
 }

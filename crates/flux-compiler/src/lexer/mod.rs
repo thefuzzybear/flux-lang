@@ -149,6 +149,9 @@ fn convert_token(
         LogosToken::Data => Ok(Token::Data),
         LogosToken::Connector => Ok(Token::Connector),
         LogosToken::Struct => Ok(Token::Struct),
+        LogosToken::Enum => Ok(Token::Enum),
+        LogosToken::Match => Ok(Token::Match),
+        LogosToken::SelfKw => Ok(Token::SelfKw),
 
         // Operators
         LogosToken::ColonColon => Ok(Token::ColonColon),
@@ -159,6 +162,7 @@ fn convert_token(
         LogosToken::AndAnd => Ok(Token::AndAnd),
         LogosToken::OrOr => Ok(Token::OrOr),
         LogosToken::Arrow => Ok(Token::Arrow),
+        LogosToken::FatArrow => Ok(Token::FatArrow),
         LogosToken::Plus => Ok(Token::Plus),
         LogosToken::Minus => Ok(Token::Minus),
         LogosToken::Star => Ok(Token::Star),
@@ -1212,6 +1216,71 @@ mod tests {
             tokens,
             vec![Token::Ident("connectors".to_string()), Token::Eof]
         );
+    }
+
+    // --- enum/match/self keyword tests ---
+    // Validates: Requirements 1.1, 3.1 (flux-type-system)
+
+    #[test]
+    fn lex_keyword_enum() {
+        let tokens = lex("enum").unwrap();
+        assert_eq!(tokens, vec![Token::Enum, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_keyword_match() {
+        let tokens = lex("match").unwrap();
+        assert_eq!(tokens, vec![Token::Match, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_keyword_self() {
+        let tokens = lex("self").unwrap();
+        assert_eq!(tokens, vec![Token::SelfKw, Token::Eof]);
+    }
+
+    #[test]
+    fn lex_enum_as_ident() {
+        // "enums" should be a single Ident, not Enum + s
+        let tokens = lex("enums").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("enums".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_matching_as_ident() {
+        // "matching" should be a single Ident, not Match + ing
+        let tokens = lex("matching").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("matching".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn lex_selfie_as_ident() {
+        // "selfie" should be a single Ident, not SelfKw + ie
+        let tokens = lex("selfie").unwrap();
+        assert_eq!(
+            tokens,
+            vec![Token::Ident("selfie".to_string()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn is_keyword_returns_true_for_enum_match_self() {
+        // Verify is_keyword() returns true for the new keywords
+        assert!(Token::Enum.is_keyword());
+        assert!(Token::Match.is_keyword());
+        assert!(Token::SelfKw.is_keyword());
+        // And verify some existing keywords still work
+        assert!(Token::Struct.is_keyword());
+        assert!(Token::If.is_keyword());
+        // And verify non-keywords return false
+        assert!(!Token::Ident("enum".to_string()).is_keyword());
+        assert!(!Token::Int(42).is_keyword());
     }
 
     #[test]
