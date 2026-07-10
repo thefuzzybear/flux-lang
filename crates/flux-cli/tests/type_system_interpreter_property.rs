@@ -270,6 +270,7 @@ fn build_match_program(
         enums: vec![enum_def],
         functions: vec![],
         impl_blocks: vec![],
+            traits: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

@@ -339,6 +339,7 @@ mod tests {
                 imports,
                 functions: vec![],
                 impl_blocks: vec![],
+                traits: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: AstStrategy {
@@ -372,6 +373,7 @@ mod tests {
                     .collect();
                 FnDef {
                     name,
+                    type_params: vec![],
                     params: unique_params,
                     return_type: None,
                     body,
@@ -640,6 +642,7 @@ mod tests {
                 imports: vec![],
                 functions: vec![fn_def.clone()],
                 impl_blocks: vec![],
+                traits: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: AstStrategy {

@@ -30,6 +30,7 @@ pub enum Token {
     Match,
     SelfKw,
     Impl,
+    Trait,
 
     // Identifiers and literals
     Ident(String),
@@ -105,6 +106,7 @@ impl Token {
                 | Token::Match
                 | Token::SelfKw
                 | Token::Impl
+                | Token::Trait
         )
     }
 }

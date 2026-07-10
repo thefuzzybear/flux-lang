@@ -232,14 +232,26 @@ impl Interpreter {
             enum_defs.insert(enum_def.name.clone(), enum_def.variants.clone());
         }
 
-        // Build impl method registry from typed impl blocks
+        // Build impl method registry from typed impl blocks.
+        // Inherent impl methods are registered first (they appear before trait impl
+        // blocks in the typed program). For trait impl methods, we only insert if no
+        // inherent method with the same name exists — this ensures inherent methods
+        // take priority over trait methods during dispatch (Requirement 6.6).
         let mut impl_methods: HashMap<String, HashMap<String, TypedFnDef>> = HashMap::new();
         for impl_block in &program.impl_blocks {
             let type_methods = impl_methods
                 .entry(impl_block.target_type.clone())
                 .or_default();
             for method in &impl_block.methods {
-                type_methods.insert(method.name.clone(), method.clone());
+                if impl_block.trait_name.is_some() {
+                    // Trait impl method: only register if no inherent method exists
+                    type_methods
+                        .entry(method.name.clone())
+                        .or_insert_with(|| method.clone());
+                } else {
+                    // Inherent impl method: always registers (takes priority)
+                    type_methods.insert(method.name.clone(), method.clone());
+                }
             }
         }
 
@@ -1395,6 +1407,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1489,6 +1502,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2269,6 +2283,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2345,6 +2360,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

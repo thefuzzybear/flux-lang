@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::enum_info::{EnumInfo, MethodInfo};
+use super::enum_info::{EnumInfo, MethodInfo, TraitInfo};
 use super::types::FluxType;
 
 /// A scoped type environment for identifier resolution.
@@ -13,6 +13,10 @@ pub(crate) struct TypeEnvironment {
     enums: HashMap<String, EnumInfo>,
     /// Registry of impl block methods: type name → method name → method info
     impl_methods: HashMap<String, HashMap<String, MethodInfo>>,
+    /// Registry of trait definitions: trait name → trait info
+    traits: HashMap<String, TraitInfo>,
+    /// Registry of trait implementations: (trait_name, type_name) → method implementations
+    trait_impls: HashMap<(String, String), Vec<MethodInfo>>,
 }
 
 impl TypeEnvironment {
@@ -22,6 +26,8 @@ impl TypeEnvironment {
             scopes: vec![HashMap::new()], // Start with global scope
             enums: HashMap::new(),
             impl_methods: HashMap::new(),
+            traits: HashMap::new(),
+            trait_impls: HashMap::new(),
         }
     }
 
@@ -104,6 +110,61 @@ impl TypeEnvironment {
     /// Check if a type has any registered impl methods.
     pub fn has_methods(&self, type_name: &str) -> bool {
         self.impl_methods.contains_key(type_name)
+    }
+
+    // --- Trait registry ---
+
+    /// Register a trait definition. Returns `Err(())` if a trait with that name already exists.
+    pub fn register_trait(&mut self, info: TraitInfo) -> Result<(), ()> {
+        if self.traits.contains_key(&info.name) {
+            return Err(());
+        }
+        self.traits.insert(info.name.clone(), info);
+        Ok(())
+    }
+
+    /// Look up a trait by name.
+    pub fn get_trait(&self, name: &str) -> Option<&TraitInfo> {
+        self.traits.get(name)
+    }
+
+    /// Check if a trait exists with the given name.
+    pub fn has_trait(&self, name: &str) -> bool {
+        self.traits.contains_key(name)
+    }
+
+    // --- Trait implementation registry ---
+
+    /// Register a trait implementation for a type.
+    /// Returns `Err(())` if this (trait, type) pair already has an implementation.
+    pub fn register_trait_impl(
+        &mut self,
+        trait_name: &str,
+        type_name: &str,
+        methods: Vec<MethodInfo>,
+    ) -> Result<(), ()> {
+        let key = (trait_name.to_string(), type_name.to_string());
+        if self.trait_impls.contains_key(&key) {
+            return Err(());
+        }
+        self.trait_impls.insert(key, methods);
+        Ok(())
+    }
+
+    /// Look up a trait implementation method for a specific type.
+    pub fn get_trait_method(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<&MethodInfo> {
+        for ((_, impl_type), methods) in &self.trait_impls {
+            if impl_type == type_name {
+                if let Some(m) = methods.iter().find(|m| m.name == method_name) {
+                    return Some(m);
+                }
+            }
+        }
+        None
     }
 }
 

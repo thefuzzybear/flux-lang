@@ -41,6 +41,9 @@ pub enum DecoratorKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedFnDef {
     pub name: String,
+    /// Type parameters for generic functions (e.g., ["T"] for `fn push[T](...)`).
+    /// Empty for non-generic functions.
+    pub type_params: Vec<String>,
     pub params: Vec<String>,
     pub param_types: Vec<FluxType>,
     pub body: Vec<TypedStmt>,
@@ -65,6 +68,9 @@ pub struct TypedStructField {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedStructDef {
     pub name: String,
+    /// Type parameters for generic structs (e.g., ["T"] for `struct Vec[T]`).
+    /// Empty for non-generic structs.
+    pub type_params: Vec<String>,
     pub fields: Vec<TypedStructField>,
     pub decorators: Vec<ValidatedDecorator>,
     pub span: Span,
@@ -82,6 +88,8 @@ pub struct TypedProgram {
     pub functions: Vec<TypedFnDef>,
     /// Impl blocks with typechecked method bodies.
     pub impl_blocks: Vec<TypedImplBlock>,
+    /// Trait definitions with resolved method signatures.
+    pub traits: Vec<TypedTraitDef>,
     pub data_block: Option<TypedDataBlock>,
     pub connector_block: Option<TypedConnectorBlock>,
     pub strategy: TypedStrategy,
@@ -373,5 +381,21 @@ pub struct TypedImplBlock {
     pub target_type: String,
     /// Typechecked method definitions.
     pub methods: Vec<TypedFnDef>,
+    pub span: Span,
+}
+
+// --- Trait Typed AST Nodes ---
+
+/// A typed trait definition with resolved method signatures.
+///
+/// Represents a `trait Name { fn method(self, ...) -> Type }` block
+/// with all method parameter types and return types resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedTraitDef {
+    /// The trait name (e.g., "DataFeed")
+    pub name: String,
+    /// The resolved method signatures for this trait.
+    pub methods: Vec<super::enum_info::TraitMethodInfo>,
+    /// Source span of the trait definition.
     pub span: Span,
 }

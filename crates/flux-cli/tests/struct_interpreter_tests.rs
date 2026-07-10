@@ -247,6 +247,7 @@ fn test_out_of_bounds_fixed_array_access_produces_error() {
         enums: vec![],
         functions: vec![],
         impl_blocks: vec![],
+            traits: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -354,6 +355,7 @@ fn test_valid_fixed_array_access_returns_correct_element() {
         enums: vec![],
         functions: vec![],
         impl_blocks: vec![],
+            traits: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

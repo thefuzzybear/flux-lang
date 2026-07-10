@@ -12,7 +12,7 @@ use crate::lexer::Span;
 use crate::parser::ast::*;
 
 use super::builtins;
-use super::enum_info::{EnumInfo, MethodInfo, VariantInfo};
+use super::enum_info::{EnumInfo, MethodInfo, TraitInfo, TraitMethodInfo, VariantInfo};
 use super::env::TypeEnvironment;
 use super::typed_ast::*;
 use super::types::{FluxType, FnParams};
@@ -21,6 +21,9 @@ use super::types::{FluxType, FnParams};
 #[derive(Debug, Clone)]
 pub(crate) struct StructDefInfo {
     pub name: String,
+    /// Type parameters for generic structs (e.g., ["T"] for `struct Vec[T]`).
+    /// Empty for non-generic structs.
+    pub type_params: Vec<String>,
     pub fields: Vec<(String, FluxType)>,
     pub decorators: Vec<ValidatedDecorator>,
 }
@@ -71,6 +74,12 @@ impl TypeChecker {
         // Register impl blocks (validates target type, checks method bodies, detects duplicates)
         let typed_impl_blocks = self.register_impl_blocks(&program.impl_blocks)?;
 
+        // Register trait definitions (validates names, checks for duplicates)
+        let typed_traits = self.register_traits(&program.traits)?;
+
+        // Validate trait impls (checks method completeness and signature matching)
+        let typed_trait_impl_blocks = self.register_trait_impls(&program.impl_blocks)?;
+
         // Detect recursion via call graph analysis (before body checking)
         let call_graph = super::call_graph::build_call_graph(&program.functions);
         if let Some(cycle) = super::call_graph::detect_cycles(&call_graph) {
@@ -104,7 +113,12 @@ impl TypeChecker {
             structs: typed_structs,
             enums: typed_enums,
             functions: typed_functions,
-            impl_blocks: typed_impl_blocks,
+            impl_blocks: {
+                let mut all_impl_blocks = typed_impl_blocks;
+                all_impl_blocks.extend(typed_trait_impl_blocks);
+                all_impl_blocks
+            },
+            traits: typed_traits,
             data_block: typed_data_block,
             connector_block: typed_connector_block,
             strategy: typed_strategy,
@@ -354,6 +368,7 @@ impl TypeChecker {
 
             typed_structs.push(TypedStructDef {
                 name: struct_def.name.clone(),
+                type_params: info.type_params.clone(),
                 fields: typed_fields,
                 decorators: info.decorators.clone(),
                 span: struct_def.span,
@@ -486,10 +501,16 @@ impl TypeChecker {
 
         // Insert into the struct registry
         let validated_decorators = self.validate_decorators(&struct_def.decorators);
+        let type_params: Vec<String> = struct_def
+            .type_params
+            .iter()
+            .map(|tp| tp.name.clone())
+            .collect();
         self.struct_registry.insert(
             struct_def.name.clone(),
             StructDefInfo {
                 name: struct_def.name.clone(),
+                type_params,
                 fields: resolved_fields,
                 decorators: validated_decorators,
             },
@@ -1333,6 +1354,7 @@ impl TypeChecker {
 
                 typed_methods.push(TypedFnDef {
                     name: method.name.clone(),
+                    type_params: method.type_params.iter().map(|tp| tp.name.clone()).collect(),
                     params: full_param_names,
                     param_types: full_param_types,
                     body: typed_body,
@@ -1343,6 +1365,390 @@ impl TypeChecker {
 
             typed_impl_blocks.push(TypedImplBlock {
                 trait_name: None,
+                target_type: target_type.clone(),
+                methods: typed_methods,
+                span: impl_block.span,
+            });
+        }
+
+        Ok(typed_impl_blocks)
+    }
+
+    /// Register trait definitions in the type environment.
+    ///
+    /// Validates:
+    /// - No duplicate trait names (conflicts with existing traits or types)
+    /// - No duplicate method signatures within a single trait
+    fn register_traits(&mut self, traits: &[TraitDef]) -> Result<Vec<TypedTraitDef>> {
+        let mut typed_traits = Vec::new();
+
+        for trait_def in traits {
+            // Check for trait name conflict with existing traits
+            if self.env.has_trait(&trait_def.name) {
+                return Err(self.type_error(
+                    trait_def.span,
+                    format!(
+                        "Trait name '{}' already defined at {:?}",
+                        trait_def.name, trait_def.span
+                    ),
+                ));
+            }
+
+            // Check for trait name conflict with existing types (structs, enums)
+            if self.struct_registry.contains_key(&trait_def.name)
+                || self.env.has_enum(&trait_def.name)
+            {
+                return Err(self.type_error(
+                    trait_def.span,
+                    format!(
+                        "Name conflict: '{}' is already defined as a type",
+                        trait_def.name
+                    ),
+                ));
+            }
+
+            // Check for duplicate method names within the trait
+            let mut seen_methods: HashSet<String> = HashSet::new();
+            let mut trait_methods = Vec::new();
+
+            for method_sig in &trait_def.methods {
+                if !seen_methods.insert(method_sig.name.clone()) {
+                    return Err(self.type_error(
+                        method_sig.span,
+                        format!(
+                            "Duplicate method signature '{}' in trait '{}'",
+                            method_sig.name, trait_def.name
+                        ),
+                    ));
+                }
+
+                // Determine if method has self
+                let has_self = method_sig
+                    .params
+                    .first()
+                    .map_or(false, |p| p.name == "self");
+
+                // Resolve parameter types (excluding self)
+                let non_self_params: Vec<&FnParam> = if has_self {
+                    method_sig.params.iter().skip(1).collect()
+                } else {
+                    method_sig.params.iter().collect()
+                };
+
+                let mut param_types = Vec::new();
+                for param in &non_self_params {
+                    let param_ty = if let Some(ref annotation) = param.param_type {
+                        self.resolve_fn_type_annotation(
+                            annotation,
+                            &method_sig.name,
+                            &format!("parameter '{}'", param.name),
+                            param.span,
+                        )?
+                    } else {
+                        FluxType::Float // default type
+                    };
+                    param_types.push(param_ty);
+                }
+
+                // Resolve return type
+                let return_type = if let Some(ref annotation) = method_sig.return_type {
+                    self.resolve_fn_type_annotation(
+                        annotation,
+                        &method_sig.name,
+                        "return type",
+                        method_sig.span,
+                    )?
+                } else {
+                    FluxType::Void
+                };
+
+                trait_methods.push(TraitMethodInfo {
+                    name: method_sig.name.clone(),
+                    param_types,
+                    return_type,
+                    has_self,
+                });
+            }
+
+            // Register the trait in the type environment
+            let trait_info = TraitInfo {
+                name: trait_def.name.clone(),
+                methods: trait_methods.clone(),
+                span: trait_def.span,
+            };
+            self.env.register_trait(trait_info).map_err(|()| {
+                self.type_error(
+                    trait_def.span,
+                    format!("Trait '{}' already defined", trait_def.name),
+                )
+            })?;
+
+            typed_traits.push(TypedTraitDef {
+                name: trait_def.name.clone(),
+                methods: trait_methods,
+                span: trait_def.span,
+            });
+        }
+
+        Ok(typed_traits)
+    }
+
+    /// Register trait implementations (impl TraitName for StructName { ... }).
+    ///
+    /// Validates:
+    /// - The trait exists
+    /// - The struct exists
+    /// - All required methods are implemented
+    /// - Method signatures match the trait declaration (param types, return type)
+    fn register_trait_impls(&mut self, impl_blocks: &[ImplBlock]) -> Result<Vec<TypedImplBlock>> {
+        let mut typed_impl_blocks = Vec::new();
+
+        for impl_block in impl_blocks {
+            // Only process trait impls (skip inherent impls — handled by register_impl_blocks)
+            let trait_name = match &impl_block.trait_name {
+                Some(name) => name.clone(),
+                None => continue,
+            };
+
+            let target_type = &impl_block.target_type;
+
+            // Verify the trait exists
+            let trait_info = match self.env.get_trait(&trait_name) {
+                Some(info) => info.clone(),
+                None => {
+                    return Err(self.type_error(
+                        impl_block.span,
+                        format!("Unknown trait '{}' in impl block", trait_name),
+                    ));
+                }
+            };
+
+            // Verify the struct exists
+            if !self.struct_registry.contains_key(target_type) {
+                return Err(self.type_error(
+                    impl_block.span,
+                    format!(
+                        "Cannot implement trait '{}' for unknown type '{}'",
+                        trait_name, target_type
+                    ),
+                ));
+            }
+
+            // Typecheck each method in the impl block
+            let mut typed_methods = Vec::new();
+            let mut impl_method_infos = Vec::new();
+            let mut impl_method_names: HashSet<String> = HashSet::new();
+
+            for method in &impl_block.methods {
+                impl_method_names.insert(method.name.clone());
+
+                // Determine if the method has a `self` parameter
+                let has_self = method
+                    .params
+                    .first()
+                    .map_or(false, |p| p.name == "self");
+
+                let is_static = !has_self;
+
+                // Get the non-self parameters for type resolution
+                let non_self_params: Vec<&FnParam> = if has_self {
+                    method.params.iter().skip(1).collect()
+                } else {
+                    method.params.iter().collect()
+                };
+
+                // Resolve parameter types (excluding self)
+                let mut param_types = Vec::new();
+                for param in &non_self_params {
+                    let param_ty = if let Some(ref annotation) = param.param_type {
+                        self.resolve_fn_type_annotation(
+                            annotation,
+                            &method.name,
+                            &format!("parameter '{}'", param.name),
+                            param.span,
+                        )?
+                    } else {
+                        FluxType::Float
+                    };
+                    param_types.push(param_ty);
+                }
+
+                // Resolve declared return type
+                let declared_return_type = if let Some(ref annotation) = method.return_type {
+                    Some(self.resolve_fn_type_annotation(
+                        annotation,
+                        &method.name,
+                        "return type",
+                        method.span,
+                    )?)
+                } else {
+                    None
+                };
+
+                // Verify signature matches the trait declaration
+                if let Some(trait_method) = trait_info.methods.iter().find(|m| m.name == method.name)
+                {
+                    // Check parameter types match
+                    if param_types.len() != trait_method.param_types.len() {
+                        return Err(self.type_error(
+                            method.span,
+                            format!(
+                                "Method '{}' signature mismatch: trait '{}' declares {} parameters (excluding self), impl provides {}",
+                                method.name, trait_name, trait_method.param_types.len(), param_types.len()
+                            ),
+                        ));
+                    }
+
+                    for (i, (impl_ty, trait_ty)) in
+                        param_types.iter().zip(trait_method.param_types.iter()).enumerate()
+                    {
+                        if impl_ty != trait_ty && !impl_ty.is_assignable_to(trait_ty) {
+                            return Err(self.type_error(
+                                method.span,
+                                format!(
+                                    "Method '{}' signature mismatch: parameter {} expects '{}' (from trait '{}'), got '{}'",
+                                    method.name, i + 1, trait_ty, trait_name, impl_ty
+                                ),
+                            ));
+                        }
+                    }
+
+                    // Check return type matches
+                    let impl_return = declared_return_type.clone().unwrap_or(FluxType::Void);
+                    if impl_return != trait_method.return_type
+                        && !impl_return.is_assignable_to(&trait_method.return_type)
+                    {
+                        return Err(self.type_error(
+                            method.span,
+                            format!(
+                                "Method '{}' signature mismatch: trait '{}' declares return type '{}', impl provides '{}'",
+                                method.name, trait_name, trait_method.return_type, impl_return
+                            ),
+                        ));
+                    }
+                }
+
+                // Typecheck the method body in a new scope
+                self.env.push_scope();
+                self.in_function_body = true;
+
+                // Store the declared return type for return-statement validation
+                let prev_fn_return_type = self.current_fn_return_type.take();
+                self.current_fn_return_type = declared_return_type.clone();
+
+                // Bind `self` as the struct type if this is an instance method
+                if has_self {
+                    self.env
+                        .insert("self".to_string(), FluxType::Struct(target_type.clone()));
+                }
+
+                // Bind non-self parameters
+                let mut all_param_names = Vec::new();
+                for (param, ty) in non_self_params.iter().zip(param_types.iter()) {
+                    self.env.insert(param.name.clone(), ty.clone());
+                    all_param_names.push(param.name.clone());
+                }
+
+                // Inject bar context bindings
+                for (name, ty) in builtins::market_data_bindings() {
+                    self.env.insert(name.to_string(), ty);
+                }
+                for (name, ty) in builtins::signal_function_bindings() {
+                    self.env.insert(name.to_string(), ty);
+                }
+                for (name, ty) in builtins::math_function_bindings() {
+                    self.env.insert(name.to_string(), ty);
+                }
+
+                // Check body statements
+                let mut typed_body = Vec::new();
+                for stmt in &method.body {
+                    typed_body.push(self.check_stmt(stmt.clone())?);
+                }
+
+                // Infer return type
+                let return_type = if let Some(ref declared) = declared_return_type {
+                    declared.clone()
+                } else {
+                    self.infer_fn_return_type(&typed_body)
+                };
+
+                self.current_fn_return_type = prev_fn_return_type;
+                self.in_function_body = false;
+                self.env.pop_scope();
+
+                // Build the full param name list (including "self" for TypedFnDef)
+                let full_param_names: Vec<String> = if has_self {
+                    std::iter::once("self".to_string())
+                        .chain(all_param_names)
+                        .collect()
+                } else {
+                    all_param_names
+                };
+
+                // Build the full param types list (including struct type for self)
+                let full_param_types: Vec<FluxType> = if has_self {
+                    std::iter::once(FluxType::Struct(target_type.clone()))
+                        .chain(param_types.clone())
+                        .collect()
+                } else {
+                    param_types.clone()
+                };
+
+                impl_method_infos.push(MethodInfo {
+                    name: method.name.clone(),
+                    param_types: param_types.clone(),
+                    return_type: return_type.clone(),
+                    is_static,
+                    body: typed_body.clone(),
+                    span: method.span,
+                });
+
+                typed_methods.push(TypedFnDef {
+                    name: method.name.clone(),
+                    params: full_param_names,
+                    param_types: full_param_types,
+                    body: typed_body,
+                    return_type,
+                    span: method.span,
+                });
+            }
+
+            // Verify all required trait methods are implemented
+            let missing_methods: Vec<&str> = trait_info
+                .methods
+                .iter()
+                .filter(|m| !impl_method_names.contains(&m.name))
+                .map(|m| m.name.as_str())
+                .collect();
+
+            if !missing_methods.is_empty() {
+                return Err(self.type_error(
+                    impl_block.span,
+                    format!(
+                        "Type '{}' does not implement all methods of trait '{}': missing [{}]",
+                        target_type,
+                        trait_name,
+                        missing_methods.join(", ")
+                    ),
+                ));
+            }
+
+            // Register trait impl in type environment
+            self.env
+                .register_trait_impl(&trait_name, target_type, impl_method_infos)
+                .map_err(|()| {
+                    self.type_error(
+                        impl_block.span,
+                        format!(
+                            "Trait '{}' already implemented for type '{}'",
+                            trait_name, target_type
+                        ),
+                    )
+                })?;
+
+            typed_impl_blocks.push(TypedImplBlock {
+                trait_name: Some(trait_name),
                 target_type: target_type.clone(),
                 methods: typed_methods,
                 span: impl_block.span,
@@ -1460,6 +1866,7 @@ impl TypeChecker {
 
         Ok(TypedFnDef {
             name: fn_def.name,
+            type_params: fn_def.type_params.into_iter().map(|tp| tp.name).collect(),
             params: fn_def.params.into_iter().map(|p| p.name).collect(),
             param_types,
             body: typed_body,
@@ -3950,6 +4357,7 @@ mod tests {
             imports,
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -4366,6 +4774,7 @@ mod tests {
             imports: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: Some(connector),
             strategy: Strategy {
@@ -4813,6 +5222,7 @@ strategy Test {
     fn make_struct_def(name: &str, fields: Vec<(&str, TypeAnnotation)>) -> StructDef {
         StructDef {
             name: name.to_string(),
+            type_params: vec![],
             fields: fields
                 .into_iter()
                 .enumerate()

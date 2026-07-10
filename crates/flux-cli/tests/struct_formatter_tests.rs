@@ -276,6 +276,7 @@ fn arb_struct_def() -> impl Strategy<Value = StructDef> {
             };
             StructDef {
                 name: struct_name,
+                type_params: vec![],
                 fields,
                 decorators,
                 span: Span::new(0, 0),

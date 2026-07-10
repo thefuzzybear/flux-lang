@@ -29,6 +29,8 @@ pub enum FluxType {
     FixedArray(Box<FluxType>, usize),
     /// An enum type, identified by name (Phase 1).
     Enum(String),
+    /// A generic type parameter (unresolved during definition, e.g. `T`).
+    TypeParam(String),
     /// A generic type: name + resolved type arguments (Phase 4).
     /// e.g., HashMap[String, Float] → Generic("HashMap", [String, Float])
     Generic(String, Vec<FluxType>),
@@ -53,11 +55,14 @@ impl FluxType {
 
     /// Returns true if `self` is assignable to `target` (with coercion).
     /// Int is assignable to Float. List(Null) is assignable to any List(T).
+    /// TypeParam matches any concrete type (for generic contexts).
     pub fn is_assignable_to(&self, target: &FluxType) -> bool {
         if self == target {
             return true;
         }
         match (self, target) {
+            // TypeParam is assignable to any type (unresolved generic placeholder)
+            (FluxType::TypeParam(_), _) | (_, FluxType::TypeParam(_)) => true,
             (FluxType::Int, FluxType::Float) => true,
             (FluxType::List(inner), FluxType::List(_)) if inner.as_ref() == &FluxType::Null => {
                 true
@@ -65,6 +70,12 @@ impl FluxType {
             (FluxType::Struct(a), FluxType::Struct(b)) => a == b,
             (FluxType::FixedArray(a_elem, a_size), FluxType::FixedArray(b_elem, b_size)) => {
                 a_size == b_size && a_elem.is_assignable_to(b_elem)
+            }
+            // Generic types are assignable if names match and all args are assignable
+            (FluxType::Generic(a_name, a_args), FluxType::Generic(b_name, b_args)) => {
+                a_name == b_name
+                    && a_args.len() == b_args.len()
+                    && a_args.iter().zip(b_args.iter()).all(|(a, b)| a.is_assignable_to(b))
             }
             _ => false,
         }
@@ -101,6 +112,7 @@ impl fmt::Display for FluxType {
             FluxType::Struct(name) => write!(f, "{}", name),
             FluxType::FixedArray(elem, size) => write!(f, "[{}; {}]", elem, size),
             FluxType::Enum(name) => write!(f, "{}", name),
+            FluxType::TypeParam(name) => write!(f, "{}", name),
             FluxType::Generic(name, args) => {
                 write!(f, "{}[", name)?;
                 for (i, arg) in args.iter().enumerate() {

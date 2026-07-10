@@ -275,6 +275,7 @@ mod tests {
                         imports,
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                         strategy,
@@ -447,6 +448,7 @@ mod tests {
                     imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                     strategy,
@@ -564,6 +566,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -654,6 +657,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -742,6 +746,7 @@ mod tests {
             imports: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: AstStrategy {
@@ -1312,6 +1317,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1470,6 +1476,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1529,6 +1536,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1600,6 +1608,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1665,6 +1674,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1724,6 +1734,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1798,6 +1809,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1840,6 +1852,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1883,6 +1896,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1958,6 +1972,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2030,6 +2045,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2102,6 +2118,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2172,6 +2189,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2239,6 +2257,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2318,6 +2337,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2385,6 +2405,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2451,6 +2472,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2532,6 +2554,7 @@ mod tests {
                 imports: vec![import],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2594,6 +2617,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2665,6 +2689,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2710,6 +2735,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2749,6 +2775,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2800,6 +2827,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2863,6 +2891,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2948,6 +2977,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3039,6 +3069,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3114,6 +3145,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3173,6 +3205,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3243,6 +3276,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3333,6 +3367,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3447,6 +3482,7 @@ mod tests {
                 imports: vec![],
                         functions: vec![],
                         impl_blocks: vec![],
+                        traits: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {

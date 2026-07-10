@@ -36,6 +36,12 @@ pub fn format_program(program: &Program) -> String {
         output.push('\n');
     }
 
+    // Format trait definitions
+    for trait_def in &program.traits {
+        format_trait_def(&mut output, trait_def);
+        output.push('\n');
+    }
+
     // Format impl blocks
     for impl_block in &program.impl_blocks {
         format_impl_block(&mut output, impl_block);
@@ -64,10 +70,28 @@ fn format_fn_def(output: &mut String, fn_def: &FnDef) {
     format_fn_def_indented(output, fn_def, 0);
 }
 
+fn format_type_params(output: &mut String, type_params: &[TypeParam]) {
+    if !type_params.is_empty() {
+        output.push('[');
+        for (i, param) in type_params.iter().enumerate() {
+            if i > 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&param.name);
+            if let Some(bound) = &param.bound {
+                output.push_str(": ");
+                output.push_str(bound);
+            }
+        }
+        output.push(']');
+    }
+}
+
 fn format_fn_def_indented(output: &mut String, fn_def: &FnDef, indent: usize) {
     write_indent(output, indent);
     output.push_str("fn ");
     output.push_str(&fn_def.name);
+    format_type_params(output, &fn_def.type_params);
     output.push('(');
     for (i, param) in fn_def.params.iter().enumerate() {
         if i > 0 {
@@ -144,6 +168,7 @@ fn format_struct_def(output: &mut String, struct_def: &StructDef) {
 
     output.push_str("struct ");
     output.push_str(&struct_def.name);
+    format_type_params(output, &struct_def.type_params);
     output.push_str(" {\n");
 
     for field in &struct_def.fields {
@@ -179,20 +204,7 @@ fn format_enum_def(output: &mut String, enum_def: &EnumDef) {
     output.push_str(&enum_def.name);
 
     // Format type parameters if present
-    if !enum_def.type_params.is_empty() {
-        output.push('[');
-        for (i, param) in enum_def.type_params.iter().enumerate() {
-            if i > 0 {
-                output.push_str(", ");
-            }
-            output.push_str(&param.name);
-            if let Some(bound) = &param.bound {
-                output.push_str(": ");
-                output.push_str(bound);
-            }
-        }
-        output.push(']');
-    }
+    format_type_params(output, &enum_def.type_params);
 
     output.push_str(" {\n");
 
@@ -223,6 +235,39 @@ fn format_enum_def(output: &mut String, enum_def: &EnumDef) {
     output.push_str("}\n");
 }
 
+// --- Trait definition formatting ---
+
+fn format_trait_def(output: &mut String, trait_def: &TraitDef) {
+    output.push_str("trait ");
+    output.push_str(&trait_def.name);
+    output.push_str(" {\n");
+
+    for method in &trait_def.methods {
+        write_indent(output, 1);
+        output.push_str("fn ");
+        output.push_str(&method.name);
+        output.push('(');
+        for (i, param) in method.params.iter().enumerate() {
+            if i > 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&param.name);
+            if let Some(ty) = &param.param_type {
+                output.push_str(": ");
+                format_type_annotation(output, ty);
+            }
+        }
+        output.push(')');
+        if let Some(ret) = &method.return_type {
+            output.push_str(" -> ");
+            format_type_annotation(output, ret);
+        }
+        output.push('\n');
+    }
+
+    output.push_str("}\n");
+}
+
 // --- Impl block formatting ---
 
 fn format_impl_block(output: &mut String, impl_block: &ImplBlock) {
@@ -232,6 +277,7 @@ fn format_impl_block(output: &mut String, impl_block: &ImplBlock) {
         output.push_str(" for ");
     }
     output.push_str(&impl_block.target_type);
+    format_type_params(output, &impl_block.type_params);
     output.push_str(" {\n");
 
     for method in &impl_block.methods {
@@ -885,6 +931,7 @@ mod tests {
             imports: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -928,6 +975,7 @@ mod tests {
             imports: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1007,6 +1055,7 @@ strategy MyStrategy {
             }],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1067,6 +1116,7 @@ strategy Test {
             }],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1127,6 +1177,7 @@ strategy Test {
             }],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1279,6 +1330,7 @@ strategy Test {
             imports: vec![],
             structs: vec![StructDef {
                 name: "Quote".to_string(),
+                type_params: vec![],
                 fields: vec![
                     StructField {
                         name: "bid".to_string(),
@@ -1299,6 +1351,7 @@ strategy Test {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1329,6 +1382,7 @@ strategy Test {
             imports: vec![],
             structs: vec![StructDef {
                 name: "Order".to_string(),
+                type_params: vec![],
                 fields: vec![
                     StructField {
                         name: "price".to_string(),
@@ -1351,6 +1405,7 @@ strategy Test {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {

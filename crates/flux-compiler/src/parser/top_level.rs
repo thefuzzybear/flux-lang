@@ -25,6 +25,7 @@ impl ParserState {
 
         let mut enums = Vec::new();
         let mut impl_blocks = Vec::new();
+        let mut traits = Vec::new();
 
         // Parse imports, structs, enums, impl blocks, functions, optional data block, and optional connector block (interleaved before strategy)
         loop {
@@ -40,6 +41,9 @@ impl ParserState {
                 }
                 Token::Impl => {
                     impl_blocks.push(self.parse_impl_block()?);
+                }
+                Token::Trait => {
+                    traits.push(self.parse_trait_def()?);
                 }
                 Token::Fn => {
                     functions.push(self.parse_fn_def()?);
@@ -87,6 +91,7 @@ impl ParserState {
                 enums,
                 functions,
                 impl_blocks,
+                traits,
                 data_block: None,
                 connector_block: None,
                 strategy: Strategy {
@@ -133,6 +138,7 @@ impl ParserState {
             enums,
             functions,
             impl_blocks,
+            traits,
             data_block,
             connector_block,
             strategy,
@@ -150,6 +156,7 @@ impl ParserState {
         let decorators = self.parse_decorators()?;
         self.expect(&Token::Struct)?;
         let (name, _) = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect(&Token::OpenBrace)?;
 
         let mut fields = Vec::new();
@@ -178,6 +185,7 @@ impl ParserState {
         let span = self.span_from(start_span);
         Ok(StructDef {
             name,
+            type_params,
             fields,
             decorators,
             span,
@@ -272,6 +280,9 @@ impl ParserState {
             (None, first_name)
         };
 
+        // Parse optional type parameters on the impl target type
+        let type_params = self.parse_type_params()?;
+
         self.expect(&Token::OpenBrace)?;
 
         let mut methods = Vec::new();
@@ -292,7 +303,70 @@ impl ParserState {
         Ok(ImplBlock {
             trait_name,
             target_type,
-            type_params: Vec::new(), // For Phase 4 (generics)
+            type_params,
+            methods,
+            span,
+        })
+    }
+
+    /// Parse a trait definition: `trait Name { fn method(self, ...) -> Type }`
+    ///
+    /// Each method is a signature only (no body). Parameters may optionally carry
+    /// type annotations, and the method may optionally declare a return type.
+    fn parse_trait_def(&mut self) -> Result<TraitDef> {
+        let start_span = self.current_span();
+        self.expect(&Token::Trait)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(&Token::OpenBrace)?;
+
+        let mut methods = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            if self.check(&Token::Fn) {
+                let method_start = self.current_span();
+                self.advance(); // consume `fn`
+                let (method_name, _) = self.expect_ident()?;
+                self.expect(&Token::OpenParen)?;
+
+                let mut params = Vec::new();
+                if !self.check(&Token::CloseParen) {
+                    params.push(self.parse_fn_param()?);
+                    while self.check(&Token::Comma) {
+                        self.advance(); // consume comma
+                        if self.check(&Token::CloseParen) {
+                            break; // trailing comma
+                        }
+                        params.push(self.parse_fn_param()?);
+                    }
+                }
+                self.expect(&Token::CloseParen)?;
+
+                let return_type = if self.check(&Token::Arrow) {
+                    self.advance(); // consume `->`
+                    Some(self.parse_type_annotation()?)
+                } else {
+                    None
+                };
+
+                let method_span = self.span_from(method_start);
+                methods.push(TraitMethodSig {
+                    name: method_name,
+                    params,
+                    return_type,
+                    span: method_span,
+                });
+            } else {
+                return Err(CompileError::Parser(format!(
+                    "at byte {}: expected method signature in trait body",
+                    self.current_span().start
+                )));
+            }
+        }
+
+        self.expect(&Token::CloseBrace)?;
+
+        let span = self.span_from(start_span);
+        Ok(TraitDef {
+            name,
             methods,
             span,
         })
@@ -308,6 +382,7 @@ impl ParserState {
         let start_span = self.current_span();
         self.expect(&Token::Fn)?;
         let (name, _) = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect(&Token::OpenParen)?;
 
         let mut params = Vec::new();
@@ -346,7 +421,7 @@ impl ParserState {
         self.expect(&Token::CloseBrace)?;
 
         let span = self.span_from(start_span);
-        Ok(FnDef { name, params, return_type, body, span })
+        Ok(FnDef { name, type_params, params, return_type, body, span })
     }
 
     /// Parse a single function parameter: `name` or `name: Type`.
@@ -2593,5 +2668,259 @@ strategy X {}
         assert_eq!(err_variant.fields[0].field_type, TypeAnnotation::Int);
         assert_eq!(err_variant.fields[1].name, "message");
         assert_eq!(err_variant.fields[1].field_type, TypeAnnotation::Str);
+    }
+
+    // ===== Trait definition parsing tests =====
+
+    #[test]
+    fn parse_trait_single_method_with_self() {
+        // trait DataFeed { fn next(self) -> f64 }
+        let program = parse_program(vec![
+            Token::Trait,
+            Token::Ident("DataFeed".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("next".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("f64".to_string()),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.traits.len(), 1);
+        let trait_def = &program.traits[0];
+        assert_eq!(trait_def.name, "DataFeed");
+        assert_eq!(trait_def.methods.len(), 1);
+
+        let method = &trait_def.methods[0];
+        assert_eq!(method.name, "next");
+        assert_eq!(method.params.len(), 1);
+        assert_eq!(method.params[0].name, "self");
+        assert_eq!(method.params[0].param_type, None);
+        assert_eq!(method.return_type, Some(TypeAnnotation::F64));
+    }
+
+    #[test]
+    fn parse_trait_multiple_methods() {
+        // trait DataFeed { fn next(self) -> f64  fn name(self) -> str }
+        let program = parse_program(vec![
+            Token::Trait,
+            Token::Ident("DataFeed".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("next".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("f64".to_string()),
+            Token::Fn,
+            Token::Ident("name".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("str".to_string()),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.traits.len(), 1);
+        let trait_def = &program.traits[0];
+        assert_eq!(trait_def.name, "DataFeed");
+        assert_eq!(trait_def.methods.len(), 2);
+
+        assert_eq!(trait_def.methods[0].name, "next");
+        assert_eq!(trait_def.methods[0].return_type, Some(TypeAnnotation::F64));
+
+        assert_eq!(trait_def.methods[1].name, "name");
+        assert_eq!(trait_def.methods[1].return_type, Some(TypeAnnotation::Str));
+    }
+
+    #[test]
+    fn parse_trait_method_with_typed_params() {
+        // trait Processor { fn process(self, value: f64, label: str) -> bool }
+        let program = parse_program(vec![
+            Token::Trait,
+            Token::Ident("Processor".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("process".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::Comma,
+            Token::Ident("value".to_string()),
+            Token::Colon,
+            Token::Ident("f64".to_string()),
+            Token::Comma,
+            Token::Ident("label".to_string()),
+            Token::Colon,
+            Token::Ident("str".to_string()),
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("bool".to_string()),
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.traits.len(), 1);
+        let trait_def = &program.traits[0];
+        assert_eq!(trait_def.name, "Processor");
+        assert_eq!(trait_def.methods.len(), 1);
+
+        let method = &trait_def.methods[0];
+        assert_eq!(method.name, "process");
+        assert_eq!(method.params.len(), 3);
+        assert_eq!(method.params[0].name, "self");
+        assert_eq!(method.params[0].param_type, None);
+        assert_eq!(method.params[1].name, "value");
+        assert_eq!(method.params[1].param_type, Some(TypeAnnotation::F64));
+        assert_eq!(method.params[2].name, "label");
+        assert_eq!(method.params[2].param_type, Some(TypeAnnotation::Str));
+        assert_eq!(method.return_type, Some(TypeAnnotation::Bool));
+    }
+
+    #[test]
+    fn parse_trait_method_no_return_type() {
+        // trait Logger { fn log(self, msg: str) }
+        let program = parse_program(vec![
+            Token::Trait,
+            Token::Ident("Logger".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("log".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::Comma,
+            Token::Ident("msg".to_string()),
+            Token::Colon,
+            Token::Ident("str".to_string()),
+            Token::CloseParen,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.traits.len(), 1);
+        let trait_def = &program.traits[0];
+        assert_eq!(trait_def.name, "Logger");
+        assert_eq!(trait_def.methods.len(), 1);
+
+        let method = &trait_def.methods[0];
+        assert_eq!(method.name, "log");
+        assert_eq!(method.return_type, None);
+    }
+
+    #[test]
+    fn parse_impl_trait_for_struct() {
+        // struct LiveFeed { url: str }
+        // impl DataFeed for LiveFeed { fn next(self) -> f64 { return 1.0 } }
+        let program = parse_program(vec![
+            Token::Struct,
+            Token::Ident("LiveFeed".to_string()),
+            Token::OpenBrace,
+            Token::Ident("url".to_string()),
+            Token::Colon,
+            Token::Ident("str".to_string()),
+            Token::CloseBrace,
+            Token::Impl,
+            Token::Ident("DataFeed".to_string()),
+            Token::For,
+            Token::Ident("LiveFeed".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("next".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("f64".to_string()),
+            Token::OpenBrace,
+            Token::Return,
+            Token::Float(1.0),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        assert_eq!(program.structs.len(), 1);
+        assert_eq!(program.impl_blocks.len(), 1);
+
+        let impl_block = &program.impl_blocks[0];
+        assert_eq!(impl_block.trait_name, Some("DataFeed".to_string()));
+        assert_eq!(impl_block.target_type, "LiveFeed");
+        assert_eq!(impl_block.methods.len(), 1);
+        assert_eq!(impl_block.methods[0].name, "next");
+        assert_eq!(impl_block.methods[0].params[0].name, "self");
+        assert_eq!(impl_block.methods[0].return_type, Some(TypeAnnotation::F64));
+    }
+
+    #[test]
+    fn parse_trait_and_impl_together() {
+        // trait DataFeed { fn next(self) -> f64 }
+        // struct LiveFeed { url: str }
+        // impl DataFeed for LiveFeed { fn next(self) -> f64 { return 42.0 } }
+        let program = parse_program(vec![
+            Token::Trait,
+            Token::Ident("DataFeed".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("next".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("f64".to_string()),
+            Token::CloseBrace,
+            Token::Struct,
+            Token::Ident("LiveFeed".to_string()),
+            Token::OpenBrace,
+            Token::Ident("url".to_string()),
+            Token::Colon,
+            Token::Ident("str".to_string()),
+            Token::CloseBrace,
+            Token::Impl,
+            Token::Ident("DataFeed".to_string()),
+            Token::For,
+            Token::Ident("LiveFeed".to_string()),
+            Token::OpenBrace,
+            Token::Fn,
+            Token::Ident("next".to_string()),
+            Token::OpenParen,
+            Token::SelfKw,
+            Token::CloseParen,
+            Token::Arrow,
+            Token::Ident("f64".to_string()),
+            Token::OpenBrace,
+            Token::Return,
+            Token::Float(42.0),
+            Token::CloseBrace,
+            Token::CloseBrace,
+            Token::Eof,
+        ])
+        .unwrap();
+
+        // Trait is parsed
+        assert_eq!(program.traits.len(), 1);
+        assert_eq!(program.traits[0].name, "DataFeed");
+        assert_eq!(program.traits[0].methods.len(), 1);
+        assert_eq!(program.traits[0].methods[0].name, "next");
+
+        // Struct is parsed
+        assert_eq!(program.structs.len(), 1);
+        assert_eq!(program.structs[0].name, "LiveFeed");
+
+        // Impl block is parsed with trait_name set
+        assert_eq!(program.impl_blocks.len(), 1);
+        assert_eq!(program.impl_blocks[0].trait_name, Some("DataFeed".to_string()));
+        assert_eq!(program.impl_blocks[0].target_type, "LiveFeed");
+        assert_eq!(program.impl_blocks[0].methods.len(), 1);
     }
 }

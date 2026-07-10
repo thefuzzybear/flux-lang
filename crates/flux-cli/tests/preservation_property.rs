@@ -134,6 +134,7 @@ fn build_single_sma_strategy(period: i64) -> TypedProgram {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -207,6 +208,7 @@ fn build_single_ema_strategy(period: i64) -> TypedProgram {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -275,6 +277,7 @@ fn build_no_signal_strategy() -> TypedProgram {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

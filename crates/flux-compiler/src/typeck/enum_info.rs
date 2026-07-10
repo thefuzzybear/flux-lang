@@ -204,6 +204,38 @@ pub struct MethodInfo {
     pub span: Span,
 }
 
+// --- TraitInfo for trait definition registration ---
+
+/// Information about a trait definition.
+///
+/// Stores the trait name, required method signatures, and the source span.
+/// Registered in the type environment when a trait is type-checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitInfo {
+    /// The trait name (e.g., "DataFeed")
+    pub name: String,
+    /// Required method signatures for this trait.
+    pub methods: Vec<TraitMethodInfo>,
+    /// Source span of the trait definition.
+    pub span: Span,
+}
+
+/// Information about a method signature within a trait definition.
+///
+/// Describes the expected parameter types (excluding `self`), return type,
+/// and whether the method takes a `self` parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethodInfo {
+    /// The method name (e.g., "next")
+    pub name: String,
+    /// Parameter types excluding `self`.
+    pub param_types: Vec<FluxType>,
+    /// The return type of the method.
+    pub return_type: FluxType,
+    /// Whether this method has a `self` parameter.
+    pub has_self: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -109,6 +109,7 @@ impl<'a> CodeEmitter<'a> {
         self.output.clear();
         self.emit_preamble();
         self.emit_enum_defs()?;
+        self.emit_trait_defs()?;
         self.emit_struct_definitions()?;
         self.emit_impl_blocks()?;
         self.emit_user_functions()?;
@@ -170,21 +171,84 @@ impl<'a> CodeEmitter<'a> {
         Ok(())
     }
 
-    /// Emit inherent `impl StructName { ... }` blocks with methods.
+    /// Emit all trait definitions from the typed program.
     ///
-    /// Skips trait impls (Phase 3) — only handles inherent impls where
-    /// `trait_name` is `None`. For each method, `self` as the first parameter
-    /// is emitted as `&self` in Rust.
+    /// Each trait is emitted as:
+    /// ```rust
+    /// trait TraitName {
+    ///     fn method(&self, ...) -> Type;
+    /// }
+    /// ```
+    /// Method signatures end with `;` (no body).
+    fn emit_trait_defs(&mut self) -> Result<()> {
+        if self.program.traits.is_empty() {
+            return Ok(());
+        }
+
+        for trait_def in &self.program.traits {
+            self.output
+                .push_str(&format!("trait {} {{\n", trait_def.name));
+
+            for method in &trait_def.methods {
+                self.output.push_str("    fn ");
+                self.output.push_str(&method.name);
+                self.output.push('(');
+
+                let mut first = true;
+                if method.has_self {
+                    self.output.push_str("&self");
+                    first = false;
+                }
+
+                for param_type in &method.param_types {
+                    if !first {
+                        self.output.push_str(", ");
+                    }
+                    first = false;
+                    let rust_type = map_type(param_type, trait_def.span.start)?;
+                    // Use generic parameter names for non-self params
+                    self.output.push_str(&format!("_: {}", rust_type));
+                }
+
+                self.output.push(')');
+
+                // Emit return type if not void/null
+                match &method.return_type {
+                    FluxType::Null | FluxType::Void => {}
+                    other => {
+                        let rust_type = map_type(other, trait_def.span.start)?;
+                        self.output.push_str(&format!(" -> {}", rust_type));
+                    }
+                }
+
+                self.output.push_str(";\n");
+            }
+
+            self.output.push_str("}\n\n");
+        }
+
+        Ok(())
+    }
+
+    /// Emit `impl` blocks for structs — both inherent and trait impls.
+    ///
+    /// For inherent impls (where `trait_name` is `None`), emits
+    /// `impl StructName { ... }`. For trait impls, emits
+    /// `impl TraitName for StructName { ... }`.
     fn emit_impl_blocks(&mut self) -> Result<()> {
         let impl_blocks = self.program.impl_blocks.clone();
         for impl_block in &impl_blocks {
-            // Skip trait impls for now (Phase 3)
-            if impl_block.trait_name.is_some() {
-                continue;
+            if let Some(trait_name) = &impl_block.trait_name {
+                // Trait impl: `impl TraitName for StructName { ... }`
+                self.output.push_str(&format!(
+                    "impl {} for {} {{\n",
+                    trait_name, impl_block.target_type
+                ));
+            } else {
+                // Inherent impl: `impl StructName { ... }`
+                self.output
+                    .push_str(&format!("impl {} {{\n", impl_block.target_type));
             }
-
-            self.output
-                .push_str(&format!("impl {} {{\n", impl_block.target_type));
 
             for method in &impl_block.methods {
                 self.emit_impl_method(method)?;
@@ -1822,6 +1886,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1845,6 +1910,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3181,6 +3247,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3249,6 +3316,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3289,6 +3357,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3414,6 +3483,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

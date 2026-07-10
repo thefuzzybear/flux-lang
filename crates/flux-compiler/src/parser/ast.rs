@@ -12,6 +12,7 @@ pub struct Program {
     pub enums: Vec<EnumDef>,
     pub functions: Vec<FnDef>,
     pub impl_blocks: Vec<ImplBlock>,
+    pub traits: Vec<TraitDef>,
     pub data_block: Option<DataBlock>,
     pub connector_block: Option<ConnectorBlock>,
     pub strategy: Strategy,
@@ -22,6 +23,7 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<StructField>,
     pub decorators: Vec<Decorator>,
     pub span: Span,
@@ -76,6 +78,7 @@ pub enum TypeAnnotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDef {
     pub name: String,
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<FnParam>,
     pub return_type: Option<TypeAnnotation>,
     pub body: Vec<Stmt>,
@@ -443,5 +446,22 @@ pub struct ImplBlock {
     pub type_params: Vec<TypeParam>,
     /// Methods defined in this impl block
     pub methods: Vec<FnDef>,
+    pub span: Span,
+}
+
+/// A trait definition: `trait Name { fn method(self, ...) -> Type }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDef {
+    pub name: String,
+    pub methods: Vec<TraitMethodSig>,
+    pub span: Span,
+}
+
+/// A method signature within a trait definition (no body).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethodSig {
+    pub name: String,
+    pub params: Vec<FnParam>,
+    pub return_type: Option<TypeAnnotation>,
     pub span: Span,
 }

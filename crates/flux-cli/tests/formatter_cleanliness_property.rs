@@ -362,6 +362,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
                 .collect(),
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: FluxStrategy {

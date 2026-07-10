@@ -3,7 +3,7 @@
 use crate::error::{CompileError, Result};
 use crate::lexer::{Span, SpannedToken, Token};
 
-use super::ast::{Decorator, DecoratorArg, TypeAnnotation};
+use super::ast::{Decorator, DecoratorArg, TypeAnnotation, TypeParam};
 
 /// Parser state: a cursor over the token stream with helper methods.
 pub(crate) struct ParserState {
@@ -213,12 +213,48 @@ impl ParserState {
         Ok(decorators)
     }
 
+    /// Parse optional type parameters in square brackets: `[T]`, `[T, U]`, `[T: Bound]`.
+    ///
+    /// Returns an empty `Vec` if the current token is not `[`.
+    /// Each type parameter is an identifier optionally followed by `: TraitBound`.
+    pub fn parse_type_params(&mut self) -> Result<Vec<TypeParam>> {
+        if !self.check(&Token::OpenBracket) {
+            return Ok(Vec::new());
+        }
+        self.advance(); // consume `[`
+
+        let mut params = Vec::new();
+        while !self.check(&Token::CloseBracket) && !self.at_eof() {
+            let start_span = self.current_span();
+            let (name, _) = self.expect_ident()?;
+
+            let bound = if self.check(&Token::Colon) {
+                self.advance(); // consume `:`
+                let (bound_name, _) = self.expect_ident()?;
+                Some(bound_name)
+            } else {
+                None
+            };
+
+            let span = self.span_from(start_span);
+            params.push(TypeParam { name, bound, span });
+
+            if self.check(&Token::Comma) {
+                self.advance(); // consume comma
+            } else {
+                break;
+            }
+        }
+        self.expect(&Token::CloseBracket)?;
+        Ok(params)
+    }
+
     /// Parse a type annotation used in struct fields and function signatures.
     ///
     /// Resolves:
     /// - `f64`, `int`, `bool`, `str` to their scalar `TypeAnnotation` variants
     /// - `int(N)` to `TypeAnnotation::BitInt(N)` (for `@bitfield` structs)
-    /// - any other identifier to `TypeAnnotation::Named(String)`
+    /// - any other identifier to `TypeAnnotation::Named(String)` or `TypeAnnotation::Generic(name, args)` if followed by `[`
     /// - `[Type; N]` to `TypeAnnotation::FixedArray(Box<Type>, N)`
     pub fn parse_type_annotation(&mut self) -> Result<TypeAnnotation> {
         match self.peek().clone() {
@@ -245,7 +281,25 @@ impl ParserState {
                     "f64" => Ok(TypeAnnotation::F64),
                     "bool" => Ok(TypeAnnotation::Bool),
                     "str" => Ok(TypeAnnotation::Str),
-                    _ => Ok(TypeAnnotation::Named(name)),
+                    _ => {
+                        // Check for generic type usage: `Vec[f64]`, `HashMap[K, V]`
+                        if self.check(&Token::OpenBracket) {
+                            self.advance(); // consume `[`
+                            let mut type_args = Vec::new();
+                            while !self.check(&Token::CloseBracket) && !self.at_eof() {
+                                type_args.push(self.parse_type_annotation()?);
+                                if self.check(&Token::Comma) {
+                                    self.advance(); // consume comma
+                                } else {
+                                    break;
+                                }
+                            }
+                            self.expect(&Token::CloseBracket)?;
+                            Ok(TypeAnnotation::Generic(name, type_args))
+                        } else {
+                            Ok(TypeAnnotation::Named(name))
+                        }
+                    }
                 }
             }
             Token::OpenBracket => {

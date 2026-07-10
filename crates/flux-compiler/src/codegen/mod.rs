@@ -67,6 +67,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -225,6 +226,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -294,6 +296,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -346,6 +349,7 @@ mod tests {
             enums: vec![],
             functions: vec![],
             impl_blocks: vec![],
+            traits: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

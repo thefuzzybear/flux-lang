@@ -153,6 +153,7 @@ fn convert_token(
         LogosToken::Match => Ok(Token::Match),
         LogosToken::SelfKw => Ok(Token::SelfKw),
         LogosToken::Impl => Ok(Token::Impl),
+        LogosToken::Trait => Ok(Token::Trait),
 
         // Operators
         LogosToken::ColonColon => Ok(Token::ColonColon),

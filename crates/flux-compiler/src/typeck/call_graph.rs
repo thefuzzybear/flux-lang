@@ -259,6 +259,7 @@ mod tests {
     fn make_fn_def(name: &str, body: Vec<Stmt>) -> FnDef {
         FnDef {
             name: name.to_string(),
+            type_params: vec![],
             params: vec![],
             return_type: None,
             body,
