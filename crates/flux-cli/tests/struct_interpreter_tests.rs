@@ -234,6 +234,7 @@ fn test_out_of_bounds_fixed_array_access_produces_error() {
         imports: vec![],
         structs: vec![TypedStructDef {
             name: "Data".to_string(),
+            type_params: vec![],
             fields: vec![TypedStructField {
                 name: "values".to_string(),
                 resolved_type: array_type,
@@ -342,6 +343,7 @@ fn test_valid_fixed_array_access_returns_correct_element() {
         imports: vec![],
         structs: vec![TypedStructDef {
             name: "Data".to_string(),
+            type_params: vec![],
             fields: vec![TypedStructField {
                 name: "values".to_string(),
                 resolved_type: array_type,

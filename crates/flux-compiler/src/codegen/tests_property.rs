@@ -112,8 +112,8 @@ mod tests {
             FluxType::Struct(_) | FluxType::FixedArray(_, _) => {
                 unreachable!("Generator excludes Struct/FixedArray")
             }
-            FluxType::Enum(_) | FluxType::Generic(_, _) => {
-                // Enums and generics are not yet supported in codegen tests
+            FluxType::Enum(_) | FluxType::Generic(_, _) | FluxType::TypeParam(_) => {
+                // Enums, generics, and type params are not yet supported in codegen tests
                 // Return a null literal placeholder
                 Just(TypedExpr {
                     kind: TypedExprKind::NullLiteral,
@@ -172,8 +172,8 @@ mod tests {
                 FluxType::Struct(_) | FluxType::FixedArray(_, _) => {
                     unreachable!("Generator excludes Struct/FixedArray")
                 }
-                FluxType::Enum(_) | FluxType::Generic(_, _) => {
-                    unreachable!("Generator excludes Enum/Generic")
+                FluxType::Enum(_) | FluxType::Generic(_, _) | FluxType::TypeParam(_) => {
+                    unreachable!("Generator excludes Enum/Generic/TypeParam")
                 }
             }
         }
@@ -1139,6 +1139,8 @@ mod tests {
             let body = build_fn_body(flavor, callee);
             functions.push(TypedFnDef {
                 name: fn_names[i].clone(),
+                type_params: vec![],
+                type_param_bounds: vec![],
                 params: vec!["x".to_string()],
                 param_types: vec![FluxType::Float],
                 body,

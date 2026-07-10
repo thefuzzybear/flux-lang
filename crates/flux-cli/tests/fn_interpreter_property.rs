@@ -111,6 +111,7 @@ fn build_scope_isolation_program(
     // User function: fn modify(x) { result = fn_value; local_var = x + 1.0 }
     let fn_def = TypedFnDef {
         name: "modify".to_string(),
+        type_params: vec![],
         params: vec!["x".to_string()],
         param_types: vec![FluxType::Float],
         body: vec![
@@ -231,6 +232,7 @@ fn build_param_leak_program(param_val: f64) -> TypedProgram {
     // fn side_effect(leaked_param) { leaked_local = leaked_param + 10.0 }
     let fn_def = TypedFnDef {
         name: "side_effect".to_string(),
+        type_params: vec![],
         params: vec!["leaked_param".to_string()],
         param_types: vec![FluxType::Float],
         body: vec![
@@ -339,6 +341,7 @@ fn build_return_value_program(return_value: f64) -> TypedProgram {
     // fn compute() { return return_value }
     let fn_def = TypedFnDef {
         name: "compute".to_string(),
+        type_params: vec![],
         params: vec![],
         param_types: vec![],
         body: vec![return_stmt(float_lit(return_value))],
@@ -428,6 +431,7 @@ fn build_no_return_program(internal_value: f64) -> TypedProgram {
     // fn no_ret(x) { local = x + 1.0 }  <-- no return statement
     let fn_def = TypedFnDef {
         name: "no_ret".to_string(),
+        type_params: vec![],
         params: vec!["x".to_string()],
         param_types: vec![FluxType::Float],
         body: vec![
@@ -526,6 +530,7 @@ fn build_return_expr_program(param_val: f64, offset: f64) -> TypedProgram {
     // fn double_plus(val) { return val * 2.0 + offset }
     let fn_def = TypedFnDef {
         name: "double_plus".to_string(),
+        type_params: vec![],
         params: vec!["val".to_string()],
         param_types: vec![FluxType::Float],
         body: vec![
@@ -635,6 +640,7 @@ fn build_early_return_program(ret_val: f64, after_val: f64) -> TypedProgram {
     // }
     let fn_def = TypedFnDef {
         name: "early".to_string(),
+        type_params: vec![],
         params: vec!["x".to_string()],
         param_types: vec![FluxType::Float],
         body: vec![

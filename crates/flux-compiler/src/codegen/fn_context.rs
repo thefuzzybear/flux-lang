@@ -456,6 +456,8 @@ mod tests {
     fn make_fn(name: &str, params: &[&str], body: Vec<TypedStmt>) -> TypedFnDef {
         TypedFnDef {
             name: name.to_string(),
+            type_params: vec![],
+            type_param_bounds: vec![],
             params: params.iter().map(|s| s.to_string()).collect(),
             param_types: params.iter().map(|_| FluxType::Float).collect(),
             body,

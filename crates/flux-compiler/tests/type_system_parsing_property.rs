@@ -5,8 +5,8 @@
 //! This file contains property tests validating that parsing produces ASTs
 //! that can be pretty-printed back to source and parsed again to equivalent ASTs.
 
-use flux_compiler::lexer::{lex_with_spans, Span};
-use flux_compiler::parser::{parse, pretty_print_program, MatchExpr, Pattern, Program, Expr, ExprKind, Stmt, TypeAnnotation};
+use flux_compiler::lexer::lex_with_spans;
+use flux_compiler::parser::{parse, pretty_print_program, MatchExpr, Pattern, Program, Expr, ExprKind, Stmt, TypeAnnotation, TypeParam};
 use proptest::prelude::*;
 
 // ============================================================================
@@ -963,5 +963,438 @@ fn assert_impl_blocks_equal(prog1: &Program, prog2: &Program) {
                 ),
             }
         }
+    }
+}
+
+
+// ============================================================================
+// Property 4: Generic Parameter Parsing Round-Trip
+// ============================================================================
+
+/// Feature: flux-type-system, Property 4: Generic Parameter Parsing Round-Trip
+///
+/// **Validates: Requirements 7.1, 8.1, 9.1, 12.3, 12.4**
+///
+/// For any valid generic struct definition, generic function definition, or
+/// trait-bounded type parameter source text, parsing to AST and pretty-printing
+/// back to source and parsing again SHALL produce an equivalent AST.
+
+// ============================================================================
+// Generators for Generic Parameters
+// ============================================================================
+
+/// Generate a valid type parameter name (single uppercase letter).
+fn arb_type_param_name() -> impl Strategy<Value = String> {
+    "[A-Z]".prop_map(|s| s.to_string())
+}
+
+/// Generate a valid trait bound name (capitalized, not a reserved keyword).
+fn arb_trait_bound_name() -> impl Strategy<Value = String> {
+    "[A-Z][a-z]{3,8}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// A type parameter with an optional trait bound.
+#[derive(Debug, Clone)]
+struct TestTypeParam {
+    name: String,
+    bound: Option<String>,
+}
+
+/// Generate a type parameter (with or without a bound).
+fn arb_type_param() -> impl Strategy<Value = TestTypeParam> {
+    (arb_type_param_name(), proptest::option::of(arb_trait_bound_name()))
+        .prop_map(|(name, bound)| TestTypeParam { name, bound })
+}
+
+/// Generate 1-3 type parameters with unique names.
+fn arb_type_params() -> impl Strategy<Value = Vec<TestTypeParam>> {
+    proptest::collection::vec(arb_type_param(), 1..=3)
+        .prop_filter("type param names must be unique", |params| {
+            let names: std::collections::HashSet<&str> =
+                params.iter().map(|p| p.name.as_str()).collect();
+            names.len() == params.len()
+        })
+}
+
+/// A generic struct test case.
+#[derive(Debug, Clone)]
+struct GenericStructTest {
+    name: String,
+    type_params: Vec<TestTypeParam>,
+    fields: Vec<(String, GenericFieldType)>,
+}
+
+/// Field types that can reference type parameters.
+#[derive(Debug, Clone)]
+enum GenericFieldType {
+    Concrete(FieldType),
+    TypeParam(String), // references a type parameter name like T
+}
+
+impl GenericFieldType {
+    fn to_source(&self) -> String {
+        match self {
+            GenericFieldType::Concrete(ft) => ft.type_str().to_string(),
+            GenericFieldType::TypeParam(name) => name.clone(),
+        }
+    }
+}
+
+/// Generate a field type that may reference one of the type parameters.
+fn arb_generic_field_type(type_param_names: Vec<String>) -> impl Strategy<Value = GenericFieldType> {
+    let concrete = arb_field_type().prop_map(GenericFieldType::Concrete);
+    if type_param_names.is_empty() {
+        concrete.boxed()
+    } else {
+        prop_oneof![
+            3 => concrete,
+            2 => proptest::sample::select(type_param_names).prop_map(GenericFieldType::TypeParam),
+        ].boxed()
+    }
+}
+
+/// Generate a generic struct test case.
+fn arb_generic_struct_test() -> impl Strategy<Value = GenericStructTest> {
+    (arb_struct_name(), arb_type_params()).prop_flat_map(|(name, type_params)| {
+        let param_names: Vec<String> = type_params.iter().map(|p| p.name.clone()).collect();
+        let fields_strategy = proptest::collection::vec(
+            (arb_field_name(), arb_generic_field_type(param_names)),
+            1..=3,
+        ).prop_filter("field names must be unique", |fields| {
+            let names: std::collections::HashSet<&str> =
+                fields.iter().map(|(n, _)| n.as_str()).collect();
+            names.len() == fields.len()
+        });
+
+        (Just(name), Just(type_params), fields_strategy)
+    }).prop_map(|(name, type_params, fields)| GenericStructTest {
+        name,
+        type_params,
+        fields,
+    })
+}
+
+/// A generic function test case.
+#[derive(Debug, Clone)]
+struct GenericFnTest {
+    name: String,
+    type_params: Vec<TestTypeParam>,
+    params: Vec<(String, GenericFieldType)>,
+    return_type: Option<GenericFieldType>,
+}
+
+/// Generate a generic function test case.
+fn arb_generic_fn_test() -> impl Strategy<Value = GenericFnTest> {
+    (arb_method_name(), arb_type_params()).prop_flat_map(|(name, type_params)| {
+        let param_names: Vec<String> = type_params.iter().map(|p| p.name.clone()).collect();
+        let param_names2 = param_names.clone();
+        let params_strategy = proptest::collection::vec(
+            (arb_param_name(), arb_generic_field_type(param_names)),
+            1..=3,
+        ).prop_filter("param names must be unique and not 'self'", |params| {
+            let names: std::collections::HashSet<&str> =
+                params.iter().map(|(n, _)| n.as_str()).collect();
+            names.len() == params.len() && !names.contains("self")
+        });
+
+        let ret_strategy = proptest::option::of(arb_generic_field_type(param_names2));
+
+        (Just(name), Just(type_params), params_strategy, ret_strategy)
+    }).prop_map(|(name, type_params, params, return_type)| GenericFnTest {
+        name,
+        type_params,
+        params,
+        return_type,
+    })
+}
+
+// ============================================================================
+// Source construction helpers for Generic Parameters
+// ============================================================================
+
+/// Format type params to source: `[T, U: MyTrait]`
+fn format_test_type_params(type_params: &[TestTypeParam]) -> String {
+    if type_params.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = type_params
+        .iter()
+        .map(|tp| {
+            if let Some(ref bound) = tp.bound {
+                format!("{}: {}", tp.name, bound)
+            } else {
+                tp.name.clone()
+            }
+        })
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
+
+/// Build a Flux source with a generic struct definition.
+fn build_generic_struct_source(test: &GenericStructTest) -> String {
+    let type_params_str = format_test_type_params(&test.type_params);
+    let field_strs: Vec<String> = test.fields
+        .iter()
+        .map(|(name, ftype)| format!("    {}: {}", name, ftype.to_source()))
+        .collect();
+
+    format!(
+        "struct {}{} {{\n{}\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}\n",
+        test.name,
+        type_params_str,
+        field_strs.join("\n")
+    )
+}
+
+/// Build a Flux source with a generic function definition.
+fn build_generic_fn_source(test: &GenericFnTest) -> String {
+    let type_params_str = format_test_type_params(&test.type_params);
+    let param_strs: Vec<String> = test.params
+        .iter()
+        .map(|(name, ftype)| format!("{}: {}", name, ftype.to_source()))
+        .collect();
+    let ret_str = match &test.return_type {
+        Some(rt) => format!(" -> {}", rt.to_source()),
+        None => String::new(),
+    };
+
+    format!(
+        "fn {}{} ({}){} {{\n    return 1.0\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}\n",
+        test.name,
+        type_params_str,
+        param_strs.join(", "),
+        ret_str
+    )
+}
+
+/// Build a Flux source with a trait-bounded generic function.
+fn build_bounded_generic_fn_source(test: &GenericFnTest) -> String {
+    // Force all type params to have bounds for this test variant
+    let bounded_params: Vec<TestTypeParam> = test.type_params.iter().map(|tp| {
+        TestTypeParam {
+            name: tp.name.clone(),
+            bound: Some(tp.bound.clone().unwrap_or_else(|| "MyTrait".to_string())),
+        }
+    }).collect();
+
+    let type_params_str = format_test_type_params(&bounded_params);
+    let param_strs: Vec<String> = test.params
+        .iter()
+        .map(|(name, ftype)| format!("{}: {}", name, ftype.to_source()))
+        .collect();
+    let ret_str = match &test.return_type {
+        Some(rt) => format!(" -> {}", rt.to_source()),
+        None => String::new(),
+    };
+
+    format!(
+        "fn {}{} ({}){} {{\n    return 1.0\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}\n",
+        test.name,
+        type_params_str,
+        param_strs.join(", "),
+        ret_str
+    )
+}
+
+// ============================================================================
+// Comparison helpers for Generic Parameters
+// ============================================================================
+
+/// Compare two TypeParam vectors for structural equality.
+fn assert_type_params_equal(params1: &[TypeParam], params2: &[TypeParam], context: &str) {
+    assert_eq!(
+        params1.len(),
+        params2.len(),
+        "Type param count mismatch in {}: {} vs {}",
+        context,
+        params1.len(),
+        params2.len()
+    );
+
+    for (p1, p2) in params1.iter().zip(params2.iter()) {
+        assert_eq!(
+            p1.name, p2.name,
+            "Type param name mismatch in {}: '{}' vs '{}'",
+            context, p1.name, p2.name
+        );
+        assert_eq!(
+            p1.bound, p2.bound,
+            "Type param bound mismatch in {} for param '{}': {:?} vs {:?}",
+            context, p1.name, p1.bound, p2.bound
+        );
+    }
+}
+
+/// Compare two programs for structural equality of their generic struct definitions.
+fn assert_generic_structs_equal(prog1: &Program, prog2: &Program) {
+    assert_eq!(
+        prog1.structs.len(),
+        prog2.structs.len(),
+        "Struct count mismatch: {} vs {}",
+        prog1.structs.len(),
+        prog2.structs.len()
+    );
+
+    for (s1, s2) in prog1.structs.iter().zip(prog2.structs.iter()) {
+        assert_eq!(s1.name, s2.name, "Struct name mismatch");
+
+        // Compare type parameters
+        assert_type_params_equal(
+            &s1.type_params,
+            &s2.type_params,
+            &format!("struct {}", s1.name),
+        );
+
+        // Compare fields
+        assert_eq!(
+            s1.fields.len(),
+            s2.fields.len(),
+            "Field count mismatch for struct {}",
+            s1.name
+        );
+        for (f1, f2) in s1.fields.iter().zip(s2.fields.iter()) {
+            assert_eq!(
+                f1.name, f2.name,
+                "Field name mismatch in struct {}",
+                s1.name
+            );
+            assert_type_annotations_equal(
+                &f1.field_type,
+                &f2.field_type,
+                &format!("struct {}.{}", s1.name, f1.name),
+            );
+        }
+    }
+}
+
+/// Compare two programs for structural equality of their generic function definitions.
+fn assert_generic_fns_equal(prog1: &Program, prog2: &Program) {
+    assert_eq!(
+        prog1.functions.len(),
+        prog2.functions.len(),
+        "Function count mismatch: {} vs {}",
+        prog1.functions.len(),
+        prog2.functions.len()
+    );
+
+    for (f1, f2) in prog1.functions.iter().zip(prog2.functions.iter()) {
+        assert_eq!(f1.name, f2.name, "Function name mismatch");
+
+        // Compare type parameters
+        assert_type_params_equal(
+            &f1.type_params,
+            &f2.type_params,
+            &format!("fn {}", f1.name),
+        );
+
+        // Compare params
+        assert_eq!(
+            f1.params.len(),
+            f2.params.len(),
+            "Param count mismatch for fn {}",
+            f1.name
+        );
+        for (p1, p2) in f1.params.iter().zip(f2.params.iter()) {
+            assert_eq!(
+                p1.name, p2.name,
+                "Param name mismatch in fn {}",
+                f1.name
+            );
+            match (&p1.param_type, &p2.param_type) {
+                (Some(t1), Some(t2)) => {
+                    assert_type_annotations_equal(t1, t2, &format!("fn {}.{}", f1.name, p1.name));
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "Param type presence mismatch for '{}' in fn {}",
+                    p1.name, f1.name
+                ),
+            }
+        }
+
+        // Compare return types
+        match (&f1.return_type, &f2.return_type) {
+            (Some(t1), Some(t2)) => {
+                assert_type_annotations_equal(t1, t2, &format!("fn {} return type", f1.name));
+            }
+            (None, None) => {}
+            _ => panic!("Return type presence mismatch for fn {}", f1.name),
+        }
+    }
+}
+
+// ============================================================================
+// Property Tests for Generic Parameters
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property 4a: Generic struct definition parse → pretty-print → parse round-trip.
+    #[test]
+    fn prop_generic_struct_round_trip(
+        test in arb_generic_struct_test()
+    ) {
+        let source = build_generic_struct_source(&test);
+
+        // Parse the source
+        let tokens1 = lex_with_spans(&source).expect("first lex should succeed");
+        let ast1 = parse(tokens1).expect("first parse should succeed");
+
+        // Pretty-print the AST back to source
+        let pretty = pretty_print_program(&ast1);
+
+        // Parse the pretty-printed source
+        let tokens2 = lex_with_spans(&pretty).expect("second lex should succeed");
+        let ast2 = parse(tokens2).expect("second parse should succeed");
+
+        // Compare the ASTs structurally (ignoring spans)
+        assert_generic_structs_equal(&ast1, &ast2);
+    }
+
+    /// Property 4b: Generic function definition parse → pretty-print → parse round-trip.
+    #[test]
+    fn prop_generic_fn_round_trip(
+        test in arb_generic_fn_test()
+    ) {
+        let source = build_generic_fn_source(&test);
+
+        // Parse the source
+        let tokens1 = lex_with_spans(&source).expect("first lex should succeed");
+        let ast1 = parse(tokens1).expect("first parse should succeed");
+
+        // Pretty-print the AST back to source
+        let pretty = pretty_print_program(&ast1);
+
+        // Parse the pretty-printed source
+        let tokens2 = lex_with_spans(&pretty).expect("second lex should succeed");
+        let ast2 = parse(tokens2).expect("second parse should succeed");
+
+        // Compare the ASTs structurally (ignoring spans)
+        assert_generic_fns_equal(&ast1, &ast2);
+    }
+
+    /// Property 4c: Trait-bounded generic function parse → pretty-print → parse round-trip.
+    #[test]
+    fn prop_bounded_generic_fn_round_trip(
+        test in arb_generic_fn_test()
+    ) {
+        let source = build_bounded_generic_fn_source(&test);
+
+        // Parse the source
+        let tokens1 = lex_with_spans(&source).expect("first lex should succeed");
+        let ast1 = parse(tokens1).expect("first parse should succeed");
+
+        // Pretty-print the AST back to source
+        let pretty = pretty_print_program(&ast1);
+
+        // Parse the pretty-printed source
+        let tokens2 = lex_with_spans(&pretty).expect("second lex should succeed");
+        let ast2 = parse(tokens2).expect("second parse should succeed");
+
+        // Compare the ASTs structurally (ignoring spans)
+        assert_generic_fns_equal(&ast1, &ast2);
     }
 }

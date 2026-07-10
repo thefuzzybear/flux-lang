@@ -166,6 +166,12 @@ impl TypeEnvironment {
         }
         None
     }
+
+    /// Check if a type has an implementation for a specific trait.
+    pub fn has_trait_impl(&self, type_name: &str, trait_name: &str) -> bool {
+        let key = (trait_name.to_string(), type_name.to_string());
+        self.trait_impls.contains_key(&key)
+    }
 }
 
 #[cfg(test)]

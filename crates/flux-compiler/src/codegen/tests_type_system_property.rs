@@ -467,6 +467,8 @@ mod tests {
 
             TypedFnDef {
                 name,
+                type_params: vec![],
+                type_param_bounds: vec![],
                 params,
                 param_types,
                 body,
@@ -510,6 +512,7 @@ mod tests {
                 // Create a corresponding struct definition (needed for valid program)
                 let struct_def = TypedStructDef {
                     name: struct_name,
+                    type_params: vec![],
                     fields: vec![TypedStructField {
                         name: "value".to_string(),
                         resolved_type: FluxType::Float,

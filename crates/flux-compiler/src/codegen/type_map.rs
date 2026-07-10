@@ -40,6 +40,7 @@ pub fn map_type(ty: &FluxType, span_start: usize) -> Result<String> {
         }
         // Enum and Generic types will be properly implemented in Phase 1B and Phase 4
         FluxType::Enum(name) => Ok(name.clone()),
+        FluxType::TypeParam(name) => Ok(name.clone()),
         FluxType::Generic(name, args) => {
             let args_str: Vec<String> = args
                 .iter()

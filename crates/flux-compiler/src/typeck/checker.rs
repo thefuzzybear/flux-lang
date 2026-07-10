@@ -39,6 +39,10 @@ pub(crate) struct TypeChecker {
     struct_registry: HashMap<String, StructDefInfo>,
     /// The declared return type of the function currently being checked (if any).
     current_fn_return_type: Option<FluxType>,
+    /// Type parameters currently in scope (from generic struct or function being checked).
+    current_type_params: HashSet<String>,
+    /// Trait bounds on function type parameters: fn_name → [(type_param_name, trait_name)]
+    fn_trait_bounds: HashMap<String, Vec<(String, String)>>,
     /// Warnings collected during type checking (non-fatal diagnostics).
     pub(crate) warnings: Vec<String>,
 }
@@ -53,6 +57,8 @@ impl TypeChecker {
             state_var_names: HashSet::new(),
             struct_registry: HashMap::new(),
             current_fn_return_type: None,
+            current_type_params: HashSet::new(),
+            fn_trait_bounds: HashMap::new(),
             warnings: Vec::new(),
         }
     }
@@ -464,6 +470,12 @@ impl TypeChecker {
         let mut seen_fields: HashSet<String> = HashSet::new();
         let mut resolved_fields: Vec<(String, FluxType)> = Vec::new();
 
+        // Set type parameters in scope for resolving fields of generic structs
+        let prev_type_params = std::mem::take(&mut self.current_type_params);
+        for tp in &struct_def.type_params {
+            self.current_type_params.insert(tp.name.clone());
+        }
+
         for field in &struct_def.fields {
             // Check for duplicate field names
             if !seen_fields.insert(field.name.clone()) {
@@ -641,6 +653,9 @@ impl TypeChecker {
 
         // Validate decorator compatibility matrix
         self.validate_decorator_compatibility(struct_def)?;
+
+        // Restore previous type params scope
+        self.current_type_params = prev_type_params;
 
         Ok(())
     }
@@ -823,6 +838,10 @@ impl TypeChecker {
             TypeAnnotation::Bool => Ok(FluxType::Bool),
             TypeAnnotation::Str => Ok(FluxType::String),
             TypeAnnotation::Named(name) => {
+                // Check if it's a type parameter in scope (e.g., T in a generic struct/fn)
+                if self.current_type_params.contains(name) {
+                    return Ok(FluxType::TypeParam(name.clone()));
+                }
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
                 } else {
@@ -860,22 +879,29 @@ impl TypeChecker {
                 Ok(FluxType::Int)
             }
             TypeAnnotation::Generic(name, type_args) => {
-                // Generic types like Vec[T], HashMap[K, V] - stub for Phase 4
-                // For now, just check that the name exists or is a built-in
-                match name.as_str() {
-                    "Vec" | "HashMap" => {
-                        // Built-in generic types - return a placeholder for now
-                        let resolved_args: Result<Vec<_>> = type_args
-                            .iter()
-                            .map(|arg| self.resolve_type_annotation(arg, struct_name, field_name, span))
-                            .collect();
-                        Ok(FluxType::Generic(name.clone(), resolved_args?))
-                    }
-                    _ => {
-                        // Unknown generic type - for now, just treat as named
-                        Ok(FluxType::Generic(name.clone(), vec![]))
+                // Resolve generic types: built-in (Vec, HashMap) or user-defined generic structs
+                // Validate type argument count matches type parameter count
+                let resolved_args: Result<Vec<_>> = type_args
+                    .iter()
+                    .map(|arg| self.resolve_type_annotation(arg, struct_name, field_name, span))
+                    .collect();
+                let resolved_args = resolved_args?;
+
+                // Check if it's a known generic struct with type params
+                if let Some(info) = self.struct_registry.get(name) {
+                    let expected = info.type_params.len();
+                    if expected > 0 && resolved_args.len() != expected {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "expected {} type arguments for '{}', got {}",
+                                expected, name, resolved_args.len()
+                            ),
+                        ));
                     }
                 }
+
+                Ok(FluxType::Generic(name.clone(), resolved_args))
             }
         }
     }
@@ -897,6 +923,10 @@ impl TypeChecker {
             TypeAnnotation::Bool => Ok(FluxType::Bool),
             TypeAnnotation::Str => Ok(FluxType::String),
             TypeAnnotation::Named(name) => {
+                // Check if it's a type parameter in scope (e.g., T in a generic function)
+                if self.current_type_params.contains(name) {
+                    return Ok(FluxType::TypeParam(name.clone()));
+                }
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
                 } else {
@@ -933,19 +963,29 @@ impl TypeChecker {
                 Ok(FluxType::Int)
             }
             TypeAnnotation::Generic(name, type_args) => {
-                // Generic types like Vec[T], HashMap[K, V] - stub for Phase 4
-                match name.as_str() {
-                    "Vec" | "HashMap" => {
-                        let resolved_args: Result<Vec<_>> = type_args
-                            .iter()
-                            .map(|arg| self.resolve_fn_type_annotation(arg, fn_name, context, span))
-                            .collect();
-                        Ok(FluxType::Generic(name.clone(), resolved_args?))
-                    }
-                    _ => {
-                        Ok(FluxType::Generic(name.clone(), vec![]))
+                // Resolve generic types: built-in (Vec, HashMap) or user-defined generic structs
+                // Validate type argument count matches type parameter count
+                let resolved_args: Result<Vec<_>> = type_args
+                    .iter()
+                    .map(|arg| self.resolve_fn_type_annotation(arg, fn_name, context, span))
+                    .collect();
+                let resolved_args = resolved_args?;
+
+                // Check if it's a known generic struct with type params
+                if let Some(info) = self.struct_registry.get(name) {
+                    let expected = info.type_params.len();
+                    if expected > 0 && resolved_args.len() != expected {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "expected {} type arguments for '{}', got {}",
+                                expected, name, resolved_args.len()
+                            ),
+                        ));
                     }
                 }
+
+                Ok(FluxType::Generic(name.clone(), resolved_args))
             }
         }
     }
@@ -962,6 +1002,33 @@ impl TypeChecker {
                     fn_def.span,
                     format!("duplicate function definition '{}'", fn_def.name),
                 ));
+            }
+
+            // Set type parameters in scope for resolving generic function signatures
+            let prev_type_params = std::mem::take(&mut self.current_type_params);
+            for tp in &fn_def.type_params {
+                self.current_type_params.insert(tp.name.clone());
+            }
+            #[cfg(test)]
+            eprintln!(
+                "[register_functions] fn '{}' type_params={:?}, current_type_params={:?}",
+                fn_def.name,
+                fn_def.type_params.iter().map(|tp| &tp.name).collect::<Vec<_>>(),
+                self.current_type_params
+            );
+
+            // Collect trait bounds for this function's type parameters
+            let bounds: Vec<(String, String)> = fn_def
+                .type_params
+                .iter()
+                .filter_map(|tp| {
+                    tp.bound
+                        .as_ref()
+                        .map(|b| (tp.name.clone(), b.clone()))
+                })
+                .collect();
+            if !bounds.is_empty() {
+                self.fn_trait_bounds.insert(fn_def.name.clone(), bounds);
             }
 
             // Resolve parameter types: use annotation if present, default to Float
@@ -991,6 +1058,9 @@ impl TypeChecker {
             } else {
                 FluxType::Float
             };
+
+            // Restore previous type params scope
+            self.current_type_params = prev_type_params;
 
             self.env.insert(
                 fn_def.name.clone(),
@@ -1035,6 +1105,12 @@ impl TypeChecker {
             let mut variants = Vec::new();
             let mut typed_variants = Vec::new();
 
+            // Set type parameters in scope for resolving variant field types
+            let prev_type_params = std::mem::take(&mut self.current_type_params);
+            for tp in &enum_def.type_params {
+                self.current_type_params.insert(tp.name.clone());
+            }
+
             for variant in &enum_def.variants {
                 // Detect duplicate variant name
                 if !seen_variants.insert(variant.name.clone()) {
@@ -1072,6 +1148,9 @@ impl TypeChecker {
                     variant.span,
                 ));
             }
+
+            // Restore previous type params scope
+            self.current_type_params = prev_type_params;
 
             // Extract type parameter names (for generic enums - Phase 4)
             let type_params: Vec<String> = enum_def
@@ -1122,6 +1201,10 @@ impl TypeChecker {
             TypeAnnotation::Bool => Ok(FluxType::Bool),
             TypeAnnotation::Str => Ok(FluxType::String),
             TypeAnnotation::Named(name) => {
+                // Check if it's a type parameter in scope (e.g., T in a generic enum)
+                if self.current_type_params.contains(name) {
+                    return Ok(FluxType::TypeParam(name.clone()));
+                }
                 // Check if it's a struct type
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
@@ -1161,21 +1244,32 @@ impl TypeChecker {
             }
             TypeAnnotation::BitInt(_) => Ok(FluxType::Int),
             TypeAnnotation::Generic(name, type_args) => {
-                // Generic types like Vec[T], HashMap[K, V]
-                match name.as_str() {
-                    "Vec" | "HashMap" => {
-                        let resolved_args: Result<Vec<_>> = type_args
-                            .iter()
-                            .map(|arg| {
-                                self.resolve_enum_field_type(
-                                    arg, enum_name, variant_name, field_name, span,
-                                )
-                            })
-                            .collect();
-                        Ok(FluxType::Generic(name.clone(), resolved_args?))
+                // Resolve generic types in enum field context
+                let resolved_args: Result<Vec<_>> = type_args
+                    .iter()
+                    .map(|arg| {
+                        self.resolve_enum_field_type(
+                            arg, enum_name, variant_name, field_name, span,
+                        )
+                    })
+                    .collect();
+                let resolved_args = resolved_args?;
+
+                // Validate type argument count for known generic structs
+                if let Some(info) = self.struct_registry.get(name) {
+                    let expected = info.type_params.len();
+                    if expected > 0 && resolved_args.len() != expected {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "expected {} type arguments for '{}', got {}",
+                                expected, name, resolved_args.len()
+                            ),
+                        ));
                     }
-                    _ => Ok(FluxType::Generic(name.clone(), vec![])),
                 }
+
+                Ok(FluxType::Generic(name.clone(), resolved_args))
             }
         }
     }
@@ -1355,6 +1449,7 @@ impl TypeChecker {
                 typed_methods.push(TypedFnDef {
                     name: method.name.clone(),
                     type_params: method.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                    type_param_bounds: method.type_params.iter().map(|tp| tp.bound.clone()).collect(),
                     params: full_param_names,
                     param_types: full_param_types,
                     body: typed_body,
@@ -1706,6 +1801,8 @@ impl TypeChecker {
 
                 typed_methods.push(TypedFnDef {
                     name: method.name.clone(),
+                    type_params: method.type_params.iter().map(|tp| tp.name.clone()).collect(),
+                    type_param_bounds: method.type_params.iter().map(|tp| tp.bound.clone()).collect(),
                     params: full_param_names,
                     param_types: full_param_types,
                     body: typed_body,
@@ -1799,6 +1896,12 @@ impl TypeChecker {
         self.env.push_scope();
         self.in_function_body = true;
 
+        // Set type parameters in scope for resolving generic function signatures
+        let prev_type_params = std::mem::take(&mut self.current_type_params);
+        for tp in &fn_def.type_params {
+            self.current_type_params.insert(tp.name.clone());
+        }
+
         // Resolve declared return type if present
         let declared_return_type = if let Some(ref annotation) = fn_def.return_type {
             Some(self.resolve_fn_type_annotation(
@@ -1866,7 +1969,8 @@ impl TypeChecker {
 
         Ok(TypedFnDef {
             name: fn_def.name,
-            type_params: fn_def.type_params.into_iter().map(|tp| tp.name).collect(),
+            type_params: fn_def.type_params.iter().map(|tp| tp.name.clone()).collect(),
+            type_param_bounds: fn_def.type_params.iter().map(|tp| tp.bound.clone()).collect(),
             params: fn_def.params.into_iter().map(|p| p.name).collect(),
             param_types,
             body: typed_body,
@@ -2705,7 +2809,22 @@ impl TypeChecker {
                     args,
                     span,
                 )?;
-                let ret_type = ret.as_ref().clone();
+                // Infer concrete types for type parameters from argument types
+                let ret_type = self.infer_generic_return_type(
+                    params,
+                    &typed_args,
+                    ret.as_ref(),
+                );
+
+                // Check trait bounds on type parameters at this call site
+                let fn_name = match &typed_function.kind {
+                    TypedExprKind::Ident(n) => Some(n.clone()),
+                    _ => None,
+                };
+                if let Some(ref name) = fn_name {
+                    self.check_trait_bounds_at_call_site(name, params, &typed_args, span)?;
+                }
+
                 Ok(TypedExpr {
                     kind: TypedExprKind::FunctionCall {
                         function: Box::new(typed_function),
@@ -2726,6 +2845,178 @@ impl TypeChecker {
                     format!("'{}' is not a function (type: {})", name, fn_type),
                 ))
             }
+        }
+    }
+
+    /// Infer concrete types for type parameters at a generic function call site.
+    ///
+    /// Given the declared parameter types and the actual argument types, builds a
+    /// substitution map (TypeParam name → concrete FluxType) and applies it to
+    /// the declared return type.
+    fn infer_generic_return_type(
+        &self,
+        params: &FnParams,
+        typed_args: &[TypedExpr],
+        declared_ret: &FluxType,
+    ) -> FluxType {
+        // Only attempt inference for fixed params (not variadic/overloaded)
+        let param_types = match params {
+            FnParams::Fixed(types) => types,
+            _ => return declared_ret.clone(),
+        };
+
+        // Build substitution map by matching param types to arg types
+        let mut substitutions: HashMap<String, FluxType> = HashMap::new();
+        for (param_ty, arg) in param_types.iter().zip(typed_args.iter()) {
+            Self::collect_type_param_bindings(param_ty, &arg.resolved_type, &mut substitutions);
+        }
+
+        // If no type params found, return type as-is
+        if substitutions.is_empty() {
+            return declared_ret.clone();
+        }
+
+        // Substitute type params in the return type
+        Self::substitute_type_params(declared_ret, &substitutions)
+    }
+
+    /// Check that concrete types inferred at a generic function call site satisfy
+    /// the declared trait bounds on the function's type parameters.
+    ///
+    /// For example, given `fn process[T: DataFeed](feed: T)` called with a `LiveFeed`,
+    /// this verifies that `LiveFeed` has a registered trait impl for `DataFeed`.
+    ///
+    /// Requirements: 9.2, 9.3, 13.5
+    fn check_trait_bounds_at_call_site(
+        &self,
+        fn_name: &str,
+        params: &FnParams,
+        typed_args: &[TypedExpr],
+        span: Span,
+    ) -> Result<()> {
+        // Look up trait bounds for this function
+        let bounds = match self.fn_trait_bounds.get(fn_name) {
+            Some(b) => b,
+            None => return Ok(()), // No bounds to check
+        };
+
+        // Build substitution map: type param name → concrete type
+        let param_types = match params {
+            FnParams::Fixed(types) => types,
+            _ => return Ok(()),
+        };
+
+        let mut substitutions: HashMap<String, FluxType> = HashMap::new();
+        for (param_ty, arg) in param_types.iter().zip(typed_args.iter()) {
+            Self::collect_type_param_bindings(param_ty, &arg.resolved_type, &mut substitutions);
+        }
+
+        // For each bound, check that the concrete type implements the required trait
+        for (type_param_name, trait_name) in bounds {
+            if let Some(concrete_type) = substitutions.get(type_param_name) {
+                let type_name = Self::flux_type_to_name(concrete_type);
+                if let Some(ref name) = type_name {
+                    if !self.env.has_trait_impl(name, trait_name) {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "Type '{}' does not implement trait '{}' required by bound on '{}'",
+                                name, trait_name, type_param_name
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract a type name string from a FluxType for trait bound checking.
+    /// Returns the struct/enum name for nominal types, None for primitives or
+    /// types that can't implement user-defined traits.
+    fn flux_type_to_name(ty: &FluxType) -> Option<String> {
+        match ty {
+            FluxType::Struct(name) => Some(name.clone()),
+            FluxType::Enum(name) => Some(name.clone()),
+            FluxType::Generic(name, _) => Some(name.clone()),
+            FluxType::Int => Some("Int".to_string()),
+            FluxType::Float => Some("Float".to_string()),
+            FluxType::String => Some("String".to_string()),
+            FluxType::Bool => Some("Bool".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Recursively collect type parameter → concrete type bindings by matching
+    /// a declared type (which may contain TypeParam) against an actual type.
+    fn collect_type_param_bindings(
+        declared: &FluxType,
+        actual: &FluxType,
+        bindings: &mut HashMap<String, FluxType>,
+    ) {
+        match declared {
+            FluxType::TypeParam(name) => {
+                // First binding wins (don't overwrite with conflicting info)
+                bindings.entry(name.clone()).or_insert_with(|| actual.clone());
+            }
+            FluxType::Generic(name, decl_args) => {
+                if let FluxType::Generic(actual_name, actual_args) = actual {
+                    if name == actual_name && decl_args.len() == actual_args.len() {
+                        for (d, a) in decl_args.iter().zip(actual_args.iter()) {
+                            Self::collect_type_param_bindings(d, a, bindings);
+                        }
+                    }
+                }
+            }
+            FluxType::List(inner) => {
+                if let FluxType::List(actual_inner) = actual {
+                    Self::collect_type_param_bindings(inner, actual_inner, bindings);
+                }
+            }
+            FluxType::FixedArray(elem, _) => {
+                if let FluxType::FixedArray(actual_elem, _) = actual {
+                    Self::collect_type_param_bindings(elem, actual_elem, bindings);
+                }
+            }
+            _ => {} // Concrete types don't contribute bindings
+        }
+    }
+
+    /// Substitute type parameters with concrete types in a FluxType.
+    fn substitute_type_params(
+        ty: &FluxType,
+        substitutions: &HashMap<String, FluxType>,
+    ) -> FluxType {
+        match ty {
+            FluxType::TypeParam(name) => {
+                substitutions.get(name).cloned().unwrap_or_else(|| ty.clone())
+            }
+            FluxType::Generic(name, args) => {
+                let resolved_args: Vec<FluxType> = args
+                    .iter()
+                    .map(|a| Self::substitute_type_params(a, substitutions))
+                    .collect();
+                FluxType::Generic(name.clone(), resolved_args)
+            }
+            FluxType::List(inner) => {
+                FluxType::List(Box::new(Self::substitute_type_params(inner, substitutions)))
+            }
+            FluxType::FixedArray(elem, size) => {
+                FluxType::FixedArray(
+                    Box::new(Self::substitute_type_params(elem, substitutions)),
+                    *size,
+                )
+            }
+            FluxType::Fn { params, ret } => {
+                let new_ret = Self::substitute_type_params(ret, substitutions);
+                FluxType::Fn {
+                    params: params.clone(),
+                    ret: Box::new(new_ret),
+                }
+            }
+            // All other types are concrete and don't need substitution
+            _ => ty.clone(),
         }
     }
 
@@ -5569,5 +5860,241 @@ strategy Test {
         assert!(msg.contains("field 'price'"), "got: {}", msg);
         assert!(msg.contains("expects Float"), "got: {}", msg);
         assert!(msg.contains("got Str"), "got: {}", msg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Trait Bound Checking (Requirements 9.2, 9.3, 13.5)
+    // -----------------------------------------------------------------------
+
+    /// Helper: lex → parse → typecheck a source string.
+    fn check_source(source: &str) -> Result<TypedProgram> {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let tokens = lex_with_spans(source).expect("lexing failed");
+        let program = parse(tokens).expect("parsing failed");
+        crate::typeck::check(program)
+    }
+
+    #[test]
+    fn test_debug_generic_fn_type_params() {
+        // Verify parser sets type_params on FnDef correctly
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+        use crate::parser::ast::TypeAnnotation;
+
+        // Test without struct to isolate the function issue
+        let source = "fn identity[T](val: T) -> f64 {\n    return 1.0\n}\n\nstrategy Test {\n    on bar {\n        x = 1.0\n    }\n}\n";
+        let tokens = lex_with_spans(source).unwrap();
+        let program = parse(tokens).unwrap();
+
+        assert_eq!(program.functions.len(), 1, "Expected 1 function");
+        let f = &program.functions[0];
+        assert_eq!(f.type_params.len(), 1, "Expected 1 type param");
+        assert_eq!(f.type_params[0].name, "T");
+
+        // Verify the param type annotation
+        let param = &f.params[0];
+        assert_eq!(param.name, "val");
+        let param_type = param.param_type.as_ref().unwrap();
+        assert_eq!(
+            *param_type,
+            TypeAnnotation::Named("T".to_string()),
+            "Expected Named('T'), got {:?}",
+            param_type
+        );
+
+        // Full pipeline typecheck should work (no struct interference)
+        let tokens2 = lex_with_spans(source).unwrap();
+        let program2 = parse(tokens2).unwrap();
+        let result = crate::typeck::check(program2);
+        assert!(result.is_ok(), "Full pipeline (no struct) should succeed, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_trait_bound_satisfied() {
+        // Define a trait, a struct implementing it, and a bounded generic function.
+        // Calling with the implementing type should succeed.
+        let source = r#"
+trait DataFeed {
+    fn next(self) -> f64
+}
+
+struct LiveFeed {
+    price: f64
+}
+
+impl DataFeed for LiveFeed {
+    fn next(self) -> f64 {
+        return 42.0
+    }
+}
+
+fn process[T: DataFeed](feed: T) -> f64 {
+    return 1.0
+}
+
+strategy Test {
+    on bar {
+        lf = LiveFeed { price = 42.0 }
+        result = process(lf)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_trait_bound_violated() {
+        // Define a trait, a struct that does NOT implement it, and a bounded generic fn.
+        // Calling with the non-implementing type should produce an error.
+        let source = r#"
+trait DataFeed {
+    fn next(self) -> f64
+}
+
+struct BadFeed {
+    price: f64
+}
+
+fn process[T: DataFeed](feed: T) -> f64 {
+    return 1.0
+}
+
+strategy Test {
+    on bar {
+        bf = BadFeed { price = 10.0 }
+        result = process(bf)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected a trait bound violation error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("does not implement trait"),
+            "Expected 'does not implement trait' in error, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("BadFeed"),
+            "Expected type name 'BadFeed' in error, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("DataFeed"),
+            "Expected trait name 'DataFeed' in error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_trait_bound_error_includes_type_param_name() {
+        // Verify the error message mentions the type parameter name ('T').
+        let source = r#"
+trait Printable {
+    fn show(self) -> f64
+}
+
+struct Widget {
+    id: int
+}
+
+fn display[T: Printable](item: T) -> f64 {
+    return 0.0
+}
+
+strategy Test {
+    on bar {
+        w = Widget { id = 1 }
+        display(w)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("'T'"),
+            "Expected type param name 'T' in error, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("Widget"),
+            "Expected 'Widget' in error, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("Printable"),
+            "Expected 'Printable' in error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_trait_bound_no_bound_no_error() {
+        // A generic function without trait bounds should not produce trait errors.
+        let source = r#"
+struct Point {
+    x: f64
+}
+
+fn identity[T](val: T) -> T {
+    return 1.0
+}
+
+strategy Test {
+    on bar {
+        p = Point { x = 1.0 }
+        result = identity(p)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "Expected Ok for unbounded generic, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_trait_bound_multiple_type_params() {
+        // Multiple type params with different bounds: one satisfied, one not.
+        let source = r#"
+trait Readable {
+    fn read(self) -> f64
+}
+
+trait Writable {
+    fn write(self) -> f64
+}
+
+struct Reader {
+    val: f64
+}
+
+impl Readable for Reader {
+    fn read(self) -> f64 {
+        return 1.0
+    }
+}
+
+fn transfer[R: Readable, W: Writable](src: R, dst: W) -> f64 {
+    return 1.0
+}
+
+strategy Test {
+    on bar {
+        r = Reader { val = 5.0 }
+        transfer(r, r)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected trait bound violation for Writable");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Writable"),
+            "Expected 'Writable' in error, got: {}",
+            err_msg
+        );
     }
 }

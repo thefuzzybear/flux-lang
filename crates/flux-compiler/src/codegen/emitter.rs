@@ -125,6 +125,39 @@ impl<'a> CodeEmitter<'a> {
     // Top-level structure emission
     // ========================================================================
 
+    /// Format type parameters with optional trait bounds as angle-bracket syntax.
+    ///
+    /// Translates Flux square-bracket generics `[T]` and `[T: Trait]` to
+    /// Rust angle-bracket syntax `<T>` and `<T: Trait>`.
+    ///
+    /// Returns an empty string if `type_params` is empty.
+    fn format_type_params(type_params: &[String], bounds: &[Option<String>]) -> String {
+        if type_params.is_empty() {
+            return String::new();
+        }
+        let params: Vec<String> = type_params
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                if let Some(Some(bound)) = bounds.get(i) {
+                    format!("{}: {}", name, bound)
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
+        format!("<{}>", params.join(", "))
+    }
+
+    /// Format type parameters without bounds (for structs and enums that only
+    /// carry type parameter names without trait constraints).
+    fn format_type_params_no_bounds(type_params: &[String]) -> String {
+        if type_params.is_empty() {
+            return String::new();
+        }
+        format!("<{}>", type_params.join(", "))
+    }
+
     /// Emit the preamble: `use flux_runtime::*;\n\n`
     fn emit_preamble(&mut self) {
         self.output.push_str("use flux_runtime::*;\n\n");
@@ -142,8 +175,9 @@ impl<'a> CodeEmitter<'a> {
         for enum_def in &self.program.enums {
             self.output
                 .push_str("#[derive(Debug, Clone, PartialEq)]\n");
+            let generics = Self::format_type_params_no_bounds(&enum_def.type_params);
             self.output
-                .push_str(&format!("enum {} {{\n", enum_def.name));
+                .push_str(&format!("enum {}{} {{\n", enum_def.name, generics));
 
             for variant in &enum_def.variants {
                 if variant.fields.is_empty() {
@@ -237,17 +271,33 @@ impl<'a> CodeEmitter<'a> {
     /// `impl TraitName for StructName { ... }`.
     fn emit_impl_blocks(&mut self) -> Result<()> {
         let impl_blocks = self.program.impl_blocks.clone();
+        // Look up type params from struct definitions to emit generic impl blocks
+        let struct_type_params: HashMap<String, Vec<String>> = self
+            .program
+            .structs
+            .iter()
+            .filter(|s| !s.type_params.is_empty())
+            .map(|s| (s.name.clone(), s.type_params.clone()))
+            .collect();
+
         for impl_block in &impl_blocks {
+            // Determine if the target type is generic
+            let target_generics = struct_type_params
+                .get(&impl_block.target_type)
+                .cloned()
+                .unwrap_or_default();
+            let generics_str = Self::format_type_params_no_bounds(&target_generics);
+
             if let Some(trait_name) = &impl_block.trait_name {
-                // Trait impl: `impl TraitName for StructName { ... }`
+                // Trait impl: `impl<T> TraitName for StructName<T> { ... }`
                 self.output.push_str(&format!(
-                    "impl {} for {} {{\n",
-                    trait_name, impl_block.target_type
+                    "impl{} {} for {}{} {{\n",
+                    generics_str, trait_name, impl_block.target_type, generics_str
                 ));
             } else {
-                // Inherent impl: `impl StructName { ... }`
+                // Inherent impl: `impl<T> StructName<T> { ... }`
                 self.output
-                    .push_str(&format!("impl {} {{\n", impl_block.target_type));
+                    .push_str(&format!("impl{} {}{} {{\n", generics_str, impl_block.target_type, generics_str));
             }
 
             for method in &impl_block.methods {
@@ -280,7 +330,8 @@ impl<'a> CodeEmitter<'a> {
         // Emit signature
         self.indent_level = 1;
         self.write_indent();
-        self.output.push_str(&format!("fn {}(", method.name));
+        let generics = Self::format_type_params(&method.type_params, &method.type_param_bounds);
+        self.output.push_str(&format!("fn {}{}(", method.name, generics));
 
         let mut first = true;
         for (i, param) in method.params.iter().enumerate() {
@@ -431,6 +482,7 @@ impl<'a> CodeEmitter<'a> {
             FluxType::Fn { .. } => "/* unsupported */".to_string(),
             // Enum and Generic types will be properly implemented in Phase 1B and Phase 4
             FluxType::Enum(_) => "/* enum zero-init not yet supported */".to_string(),
+            FluxType::TypeParam(_) => "/* type param zero-init not yet supported */".to_string(),
             FluxType::Generic(_, _) => "/* generic zero-init not yet supported */".to_string(),
         }
     }
@@ -446,6 +498,7 @@ impl<'a> CodeEmitter<'a> {
         // Collect struct info to release the borrow on self
         struct StructEmitInfo {
             name: String,
+            type_params: Vec<String>,
             fields: Vec<(String, String)>,
             /// Original FluxType for each field (used for zero-init value generation).
             field_types: Vec<(String, FluxType)>,
@@ -513,6 +566,7 @@ impl<'a> CodeEmitter<'a> {
                 let is_immutable = s.decorators.iter().any(|d| d.kind == DecoratorKind::Immutable);
                 fields.map(|fs| StructEmitInfo {
                     name: s.name.clone(),
+                    type_params: s.type_params.clone(),
                     fields: fs,
                     field_types,
                     bit_widths,
@@ -581,11 +635,12 @@ impl<'a> CodeEmitter<'a> {
 
             if info.is_bitfield {
                 // --- @bitfield: emit packed u64 storage with bitwise accessors ---
-                self.output.push_str(&format!("pub struct {} {{\n", info.name));
+                let generics = Self::format_type_params_no_bounds(&info.type_params);
+                self.output.push_str(&format!("pub struct {}{} {{\n", info.name, generics));
                 self.output.push_str("    _bits: u64,\n");
                 self.output.push_str("}\n\n");
 
-                self.output.push_str(&format!("impl {} {{\n", info.name));
+                self.output.push_str(&format!("impl{} {}{} {{\n", generics, info.name, generics));
                 let mut bit_offset: usize = 0;
                 for (field_name, width) in &info.bit_widths {
                     let mask = (1u64 << width) - 1;
@@ -639,7 +694,8 @@ impl<'a> CodeEmitter<'a> {
                 self.output.push_str("}\n\n");
             } else {
                 // --- Normal struct emission ---
-                self.output.push_str(&format!("pub struct {} {{\n", info.name));
+                let generics = Self::format_type_params_no_bounds(&info.type_params);
+                self.output.push_str(&format!("pub struct {}{} {{\n", info.name, generics));
                 for (field_name, rust_type) in &info.fields {
                     self.output
                         .push_str(&format!("    pub {}: {},\n", field_name, rust_type));
@@ -1053,7 +1109,8 @@ impl<'a> CodeEmitter<'a> {
         }
 
         // Emit signature
-        self.output.push_str(&format!("fn {}(", fn_def.name));
+        let generics = Self::format_type_params(&fn_def.type_params, &fn_def.type_param_bounds);
+        self.output.push_str(&format!("fn {}{}(", fn_def.name, generics));
         for (i, param) in fn_def.params.iter().enumerate() {
             if i > 0 {
                 self.output.push_str(", ");
@@ -3674,6 +3731,7 @@ mod tests {
         let mut prog = minimal_program();
         prog.structs = vec![TypedStructDef {
             name: "MarketTick".to_string(),
+            type_params: vec![],
             fields: vec![
                 TypedStructField {
                     name: "price".to_string(),
@@ -3745,6 +3803,7 @@ mod tests {
         let mut prog = minimal_program();
         prog.structs = vec![TypedStructDef {
             name: "Plain".to_string(),
+            type_params: vec![],
             fields: vec![
                 TypedStructField {
                     name: "x".to_string(),
@@ -3778,6 +3837,7 @@ mod tests {
         let mut prog = minimal_program();
         prog.structs = vec![TypedStructDef {
             name: "Tick".to_string(),
+            type_params: vec![],
             fields: vec![
                 TypedStructField {
                     name: "price".to_string(),

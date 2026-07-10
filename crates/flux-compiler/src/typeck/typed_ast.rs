@@ -44,6 +44,9 @@ pub struct TypedFnDef {
     /// Type parameters for generic functions (e.g., ["T"] for `fn push[T](...)`).
     /// Empty for non-generic functions.
     pub type_params: Vec<String>,
+    /// Trait bounds for each type parameter (parallel to `type_params`).
+    /// `None` means unbounded, `Some("TraitName")` means `T: TraitName`.
+    pub type_param_bounds: Vec<Option<String>>,
     pub params: Vec<String>,
     pub param_types: Vec<FluxType>,
     pub body: Vec<TypedStmt>,
