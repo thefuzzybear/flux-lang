@@ -181,7 +181,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::Struct
         | Token::Enum
         | Token::Match
-        | Token::SelfKw => TokenCategory::Keyword,
+        | Token::SelfKw
+        | Token::Impl => TokenCategory::Keyword,
 
         // Boolean/Null literals
         Token::True | Token::False | Token::Null => TokenCategory::BooleanLiteral,

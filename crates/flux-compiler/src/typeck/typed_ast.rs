@@ -77,7 +77,11 @@ pub struct TypedProgram {
     pub imports: Vec<Import>,
     /// Struct definitions in dependency-sorted order (referenced structs appear first).
     pub structs: Vec<TypedStructDef>,
+    /// Enum definitions with resolved variant field types.
+    pub enums: Vec<TypedEnumDef>,
     pub functions: Vec<TypedFnDef>,
+    /// Impl blocks with typechecked method bodies.
+    pub impl_blocks: Vec<TypedImplBlock>,
     pub data_block: Option<TypedDataBlock>,
     pub connector_block: Option<TypedConnectorBlock>,
     pub strategy: TypedStrategy,
@@ -295,4 +299,79 @@ pub enum TypedExprKind {
         struct_name: String,
         fields: Vec<(String, TypedExpr)>,
     },
+    /// Enum variant construction: EnumName.Variant or EnumName.Variant(args)
+    EnumConstruction {
+        enum_name: String,
+        variant_name: String,
+        args: Vec<TypedExpr>,
+    },
+    /// Match expression
+    Match(TypedMatchExpr),
+}
+
+// --- Enum Typed AST Nodes ---
+
+/// A typed enum definition with resolved variant field types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEnumDef {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub variants: Vec<TypedEnumVariant>,
+    pub span: Span,
+}
+
+/// A typed enum variant with resolved field types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedEnumVariant {
+    pub name: String,
+    pub fields: Vec<(String, FluxType)>,
+    pub span: Span,
+}
+
+/// A typed match expression with resolved types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedMatchExpr {
+    pub scrutinee: Box<TypedExpr>,
+    pub arms: Vec<TypedMatchArm>,
+    pub result_type: FluxType,
+    pub span: Span,
+}
+
+/// A typed match arm with pattern and body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedMatchArm {
+    pub pattern: TypedPattern,
+    pub body: Vec<TypedStmt>,
+    pub span: Span,
+}
+
+/// Typed patterns used in match arms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedPattern {
+    /// Variant pattern with bindings and their resolved types.
+    Variant {
+        enum_name: String,
+        variant_name: String,
+        bindings: Vec<(String, FluxType)>,
+        span: Span,
+    },
+    /// Wildcard pattern `_`
+    Wildcard { span: Span },
+}
+
+// --- Impl Block Typed AST Nodes ---
+
+/// A typed impl block with typechecked method bodies.
+///
+/// Represents either an inherent impl (`impl StructName { ... }`) or a
+/// trait impl (`impl TraitName for StructName { ... }`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedImplBlock {
+    /// If present, this is a trait impl (e.g., `impl TraitName for StructName`).
+    pub trait_name: Option<String>,
+    /// The target struct type name.
+    pub target_type: String,
+    /// Typechecked method definitions.
+    pub methods: Vec<TypedFnDef>,
+    pub span: Span,
 }

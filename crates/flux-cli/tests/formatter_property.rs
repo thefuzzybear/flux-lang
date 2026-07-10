@@ -329,6 +329,7 @@ fn arb_program() -> impl Strategy<Value = Program> {
             structs: vec![], enums: vec![],
             imports,
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: AstStrategy {

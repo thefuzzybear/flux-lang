@@ -36,6 +36,12 @@ pub fn format_program(program: &Program) -> String {
         output.push('\n');
     }
 
+    // Format impl blocks
+    for impl_block in &program.impl_blocks {
+        format_impl_block(&mut output, impl_block);
+        output.push('\n');
+    }
+
     // Format strategy
     format_strategy(&mut output, &program.strategy);
     output
@@ -55,6 +61,11 @@ fn format_import(output: &mut String, import: &Import) {
 }
 
 fn format_fn_def(output: &mut String, fn_def: &FnDef) {
+    format_fn_def_indented(output, fn_def, 0);
+}
+
+fn format_fn_def_indented(output: &mut String, fn_def: &FnDef, indent: usize) {
+    write_indent(output, indent);
     output.push_str("fn ");
     output.push_str(&fn_def.name);
     output.push('(');
@@ -75,8 +86,9 @@ fn format_fn_def(output: &mut String, fn_def: &FnDef) {
     }
     output.push_str(" {\n");
     for stmt in &fn_def.body {
-        format_stmt(output, stmt, 1);
+        format_stmt(output, stmt, indent + 1);
     }
+    write_indent(output, indent);
     output.push_str("}\n");
 }
 
@@ -211,6 +223,24 @@ fn format_enum_def(output: &mut String, enum_def: &EnumDef) {
     output.push_str("}\n");
 }
 
+// --- Impl block formatting ---
+
+fn format_impl_block(output: &mut String, impl_block: &ImplBlock) {
+    output.push_str("impl ");
+    if let Some(trait_name) = &impl_block.trait_name {
+        output.push_str(trait_name);
+        output.push_str(" for ");
+    }
+    output.push_str(&impl_block.target_type);
+    output.push_str(" {\n");
+
+    for method in &impl_block.methods {
+        format_fn_def_indented(output, method, 1);
+    }
+
+    output.push_str("}\n");
+}
+
 // --- Match expression formatting ---
 
 fn format_match_expr(output: &mut String, match_expr: &MatchExpr) {
@@ -221,7 +251,7 @@ fn format_match_expr(output: &mut String, match_expr: &MatchExpr) {
     for arm in &match_expr.arms {
         write_indent(output, 1);
         format_pattern(output, &arm.pattern);
-        output.push_str(" {\n");
+        output.push_str(" => {\n");
 
         for stmt in &arm.body {
             format_stmt(output, stmt, 2);
@@ -854,6 +884,7 @@ mod tests {
             structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -896,6 +927,7 @@ mod tests {
             structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -974,6 +1006,7 @@ strategy MyStrategy {
                 span: dummy_span(),
             }],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1033,6 +1066,7 @@ strategy Test {
                 span: dummy_span(),
             }],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1092,6 +1126,7 @@ strategy Test {
                 span: dummy_span(),
             }],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1181,7 +1216,7 @@ strategy Test {
         };
 
         let expr = make_expr(ExprKind::Match(match_expr));
-        assert_eq!(format_single_expr(&expr), "match order {\n    OrderType.Market {\n        buy\n    }\n    OrderType.Limit(price) {\n        place_limit\n    }\n}\n");
+        assert_eq!(format_single_expr(&expr), "match order {\n    OrderType.Market => {\n        buy\n    }\n    OrderType.Limit(price) => {\n        place_limit\n    }\n}\n");
     }
 
     // 24. Match expression with wildcard pattern
@@ -1205,7 +1240,7 @@ strategy Test {
         };
 
         let expr = make_expr(ExprKind::Match(match_expr));
-        assert_eq!(format_single_expr(&expr), "match x {\n    _ {\n        default\n    }\n}\n");
+        assert_eq!(format_single_expr(&expr), "match x {\n    _ => {\n        default\n    }\n}\n");
     }
 
     // 25. Round-trip: enum definition
@@ -1263,6 +1298,7 @@ strategy Test {
             }],
             enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -1314,6 +1350,7 @@ strategy Test {
             }],
             enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {

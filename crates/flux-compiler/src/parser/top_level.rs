@@ -24,8 +24,9 @@ impl ParserState {
         let mut connector_block: Option<ConnectorBlock> = None;
 
         let mut enums = Vec::new();
+        let mut impl_blocks = Vec::new();
 
-        // Parse imports, structs, enums, functions, optional data block, and optional connector block (interleaved before strategy)
+        // Parse imports, structs, enums, impl blocks, functions, optional data block, and optional connector block (interleaved before strategy)
         loop {
             match self.peek().clone() {
                 Token::From => {
@@ -36,6 +37,9 @@ impl ParserState {
                 }
                 Token::Enum => {
                     enums.push(self.parse_enum_def()?);
+                }
+                Token::Impl => {
+                    impl_blocks.push(self.parse_impl_block()?);
                 }
                 Token::Fn => {
                     functions.push(self.parse_fn_def()?);
@@ -82,6 +86,7 @@ impl ParserState {
                 structs,
                 enums,
                 functions,
+                impl_blocks,
                 data_block: None,
                 connector_block: None,
                 strategy: Strategy {
@@ -127,6 +132,7 @@ impl ParserState {
             structs,
             enums,
             functions,
+            impl_blocks,
             data_block,
             connector_block,
             strategy,
@@ -247,6 +253,51 @@ impl ParserState {
         })
     }
 
+    /// Parse an impl block: `impl StructName { fn ... }` or `impl TraitName for StructName { fn ... }`
+    ///
+    /// Methods with `self` as the first parameter are instance methods; those without are static.
+    fn parse_impl_block(&mut self) -> Result<ImplBlock> {
+        let start_span = self.current_span();
+        self.expect(&Token::Impl)?;
+
+        // Parse the first identifier — could be struct name or trait name
+        let (first_name, _) = self.expect_ident()?;
+
+        // Check if next token is `for` → trait impl form
+        let (trait_name, target_type) = if self.check(&Token::For) {
+            self.advance(); // consume `for`
+            let (struct_name, _) = self.expect_ident()?;
+            (Some(first_name), struct_name)
+        } else {
+            (None, first_name)
+        };
+
+        self.expect(&Token::OpenBrace)?;
+
+        let mut methods = Vec::new();
+        while !self.check(&Token::CloseBrace) && !self.at_eof() {
+            if self.check(&Token::Fn) {
+                methods.push(self.parse_fn_def()?);
+            } else {
+                return Err(CompileError::Parser(format!(
+                    "at byte {}: expected `fn` inside impl block",
+                    self.current_span().start
+                )));
+            }
+        }
+
+        self.expect(&Token::CloseBrace)?;
+
+        let span = self.span_from(start_span);
+        Ok(ImplBlock {
+            trait_name,
+            target_type,
+            type_params: Vec::new(), // For Phase 4 (generics)
+            methods,
+            span,
+        })
+    }
+
     /// Parse a function definition: `fn name(params) { body }`
     ///
     /// Each parameter may optionally carry a type annotation (`p: Type`), and the
@@ -301,7 +352,15 @@ impl ParserState {
     /// Parse a single function parameter: `name` or `name: Type`.
     fn parse_fn_param(&mut self) -> Result<FnParam> {
         let start_span = self.current_span();
-        let (name, _) = self.expect_ident()?;
+
+        // Handle `self` keyword as a parameter (for methods in impl blocks)
+        let name = if self.check(&Token::SelfKw) {
+            self.advance(); // consume `self`
+            "self".to_string()
+        } else {
+            let (n, _) = self.expect_ident()?;
+            n
+        };
 
         let param_type = if self.check(&Token::Colon) {
             self.advance(); // consume `:`

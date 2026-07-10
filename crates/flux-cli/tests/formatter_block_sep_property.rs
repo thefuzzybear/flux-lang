@@ -143,6 +143,7 @@ fn arb_multi_block_program() -> impl Strategy<Value = Program> {
             structs: vec![], enums: vec![],
             imports: Vec::new(),
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: FluxStrategy {

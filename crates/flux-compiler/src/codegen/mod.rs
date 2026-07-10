@@ -7,6 +7,9 @@ mod type_map;
 #[cfg(test)]
 mod tests_property;
 
+#[cfg(test)]
+mod tests_type_system_property;
+
 use crate::error::Result;
 use crate::typeck::typed_ast::TypedProgram;
 
@@ -61,7 +64,9 @@ mod tests {
                 span: Span::new(0, 30),
             }],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -217,7 +222,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -284,7 +291,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -334,7 +343,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

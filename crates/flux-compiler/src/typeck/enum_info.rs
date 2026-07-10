@@ -1,11 +1,12 @@
-//! Enum type information for the Flux type system.
+//! Type information for the Flux type system.
 //!
-//! These structures store metadata about enum definitions for use by the
-//! typechecker during enum construction validation and match exhaustiveness
-//! checking.
+//! These structures store metadata about enum definitions and impl block methods
+//! for use by the typechecker during enum construction validation, match
+//! exhaustiveness checking, and method resolution.
 
 use std::collections::HashMap;
 
+use super::typed_ast::TypedStmt;
 use super::types::FluxType;
 use crate::lexer::Span;
 
@@ -179,6 +180,28 @@ impl EnumRegistry {
     pub fn is_empty(&self) -> bool {
         self.enums.is_empty()
     }
+}
+
+// --- MethodInfo for impl block method registration ---
+
+/// Information about a method defined in an impl block.
+///
+/// Stores the method signature (parameter types excluding `self`, return type),
+/// whether it is static (no `self` parameter), and the typed body for codegen/interpreter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodInfo {
+    /// The method name (e.g., "best_bid")
+    pub name: String,
+    /// Parameter types excluding `self`.
+    pub param_types: Vec<FluxType>,
+    /// The return type of the method.
+    pub return_type: FluxType,
+    /// True if this is a static/associated method (no `self` parameter).
+    pub is_static: bool,
+    /// The typed method body statements.
+    pub body: Vec<TypedStmt>,
+    /// Source span of the method definition.
+    pub span: Span,
 }
 
 #[cfg(test)]

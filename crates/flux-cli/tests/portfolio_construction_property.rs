@@ -25,7 +25,9 @@ fn build_empty_strategy() -> TypedProgram {
     TypedProgram {
         imports: vec![],
             structs: vec![],
+            enums: vec![],
         functions: vec![],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

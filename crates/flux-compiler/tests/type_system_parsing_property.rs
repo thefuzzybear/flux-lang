@@ -1,0 +1,967 @@
+//! Property-based tests for type system parsing round-trip.
+//!
+//! Feature: flux-type-system
+//!
+//! This file contains property tests validating that parsing produces ASTs
+//! that can be pretty-printed back to source and parsed again to equivalent ASTs.
+
+use flux_compiler::lexer::{lex_with_spans, Span};
+use flux_compiler::parser::{parse, pretty_print_program, MatchExpr, Pattern, Program, Expr, ExprKind, Stmt, TypeAnnotation};
+use proptest::prelude::*;
+
+// ============================================================================
+// Property 1: Enum Definition Parsing Round-Trip
+// ============================================================================
+
+/// Feature: flux-type-system, Property 1: Enum Definition Parsing Round-Trip
+///
+/// **Validates: Requirements 1.2, 1.3, 12.1**
+///
+/// For any valid enum definition source text (with any combination of unit
+/// and data variants, arbitrary valid identifiers, and supported type annotations),
+/// parsing to AST and pretty-printing back to source and parsing again SHALL
+/// produce an equivalent AST.
+
+// ============================================================================
+// Generators for Enum Definition
+// ============================================================================
+
+/// Reserved keywords in Flux that cannot be used as identifiers.
+const FLUX_RESERVED: &[&str] = &[
+    "strategy", "params", "state", "on", "if", "elif", "else", "for", "while",
+    "return", "fn", "from", "import", "and", "or", "not", "true", "false", "null",
+    "data", "connector", "struct", "bar", "in", "f64", "int", "bool", "str",
+    "enum", "match", "self", "impl", "trait",
+];
+
+/// Generate a valid enum name (capitalized, not a reserved keyword).
+fn arb_enum_name() -> impl Strategy<Value = String> {
+    "[A-Z][a-z]{2,7}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// Generate a valid variant name (capitalized, not a reserved keyword).
+fn arb_variant_name() -> impl Strategy<Value = String> {
+    "[A-Z][a-z]{2,7}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// Generate a valid field name (lowercase, not a reserved keyword).
+fn arb_field_name() -> impl Strategy<Value = String> {
+    "[a-z]{2,8}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// Supported field types for enum variants.
+#[derive(Debug, Clone, PartialEq)]
+enum FieldType {
+    F64,
+    Int,
+    Bool,
+    Str,
+}
+
+impl FieldType {
+    fn type_annotation(&self) -> TypeAnnotation {
+        match self {
+            FieldType::F64 => TypeAnnotation::F64,
+            FieldType::Int => TypeAnnotation::Int,
+            FieldType::Bool => TypeAnnotation::Bool,
+            FieldType::Str => TypeAnnotation::Str,
+        }
+    }
+    
+    fn type_str(&self) -> &'static str {
+        match self {
+            FieldType::F64 => "f64",
+            FieldType::Int => "int",
+            FieldType::Bool => "bool",
+            FieldType::Str => "str",
+        }
+    }
+}
+
+/// Generate a random field type.
+fn arb_field_type() -> impl Strategy<Value = FieldType> {
+    prop_oneof![
+        Just(FieldType::F64),
+        Just(FieldType::Int),
+        Just(FieldType::Bool),
+        Just(FieldType::Str),
+    ]
+}
+
+/// Generate an enum field definition.
+fn arb_enum_field() -> impl Strategy<Value = (String, FieldType)> {
+    (arb_field_name(), arb_field_type())
+}
+
+/// Generate an enum variant with 0-3 fields.
+fn arb_enum_variant() -> impl Strategy<Value = (String, Vec<(String, FieldType)>)> {
+    (arb_variant_name(), proptest::collection::vec(arb_enum_field(), 0..=3))
+}
+
+/// Generate an enum definition with 1-5 variants.
+fn arb_enum_def() -> impl Strategy<Value = (String, Vec<(String, Vec<(String, FieldType)>)>)> {
+    (arb_enum_name(), proptest::collection::vec(arb_enum_variant(), 1..=5))
+        .prop_filter("variant names must be unique", |(_, variants)| {
+            let names: std::collections::HashSet<&str> =
+                variants.iter().map(|(n, _)| n.as_str()).collect();
+            names.len() == variants.len()
+        })
+}
+
+// ============================================================================
+// Source construction helpers for Enum Definition
+// ============================================================================
+
+/// Build a Flux source string with an enum definition.
+fn build_enum_source(enum_name: &str, variants: &[(String, Vec<(String, FieldType)>)]) -> String {
+    let variant_strs: Vec<String> = variants
+        .iter()
+        .map(|(variant_name, fields)| {
+            if fields.is_empty() {
+                variant_name.clone()
+            } else {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(fname, ftype)| format!("{}: {}", fname, ftype.type_str()))
+                    .collect();
+                format!("{}({})", variant_name, field_strs.join(", "))
+            }
+        })
+        .collect();
+
+    format!(
+        "enum {} {{\n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}\n",
+        enum_name,
+        variant_strs.join(",\n    ")
+    )
+}
+
+// ============================================================================
+// Property Tests for Enum Definition
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property 1: Enum definition parse → pretty-print → parse round-trip.
+    #[test]
+    fn prop_enum_def_round_trip(
+        (enum_name, variants) in arb_enum_def()
+    ) {
+        let source = build_enum_source(&enum_name, &variants);
+        
+        // Parse the source
+        let tokens1 = lex_with_spans(&source).expect("first lex should succeed");
+        let ast1 = parse(tokens1).expect("first parse should succeed");
+        
+        // Pretty-print the AST back to source
+        let pretty = pretty_print_program(&ast1);
+        
+        // Parse the pretty-printed source
+        let tokens2 = lex_with_spans(&pretty).expect("second lex should succeed");
+        let ast2 = parse(tokens2).expect("second parse should succeed");
+        
+        // Compare the ASTs structurally (ignoring spans)
+        assert_enums_equal(&ast1, &ast2);
+    }
+}
+
+/// Compare two programs for structural equality of their enum definitions.
+fn assert_enums_equal(prog1: &Program, prog2: &Program) {
+    assert_eq!(
+        prog1.enums.len(),
+        prog2.enums.len(),
+        "Enum count mismatch: {} vs {}",
+        prog1.enums.len(),
+        prog2.enums.len()
+    );
+
+    for (e1, e2) in prog1.enums.iter().zip(prog2.enums.iter()) {
+        assert_eq!(e1.name, e2.name, "Enum name mismatch");
+        assert_eq!(
+            e1.variants.len(),
+            e2.variants.len(),
+            "Variant count mismatch for enum {}",
+            e1.name
+        );
+
+        for (v1, v2) in e1.variants.iter().zip(e2.variants.iter()) {
+            assert_eq!(v1.name, v2.name, "Variant name mismatch in enum {}", e1.name);
+            assert_eq!(
+                v1.fields.len(),
+                v2.fields.len(),
+                "Field count mismatch for variant {}.{}",
+                e1.name,
+                v1.name
+            );
+
+            for (f1, f2) in v1.fields.iter().zip(v2.fields.iter()) {
+                assert_eq!(
+                    f1.name, f2.name,
+                    "Field name mismatch in enum {}.{}",
+                    e1.name, v1.name
+                );
+                // Compare type annotations structurally
+                assert_type_annotations_equal(&f1.field_type, &f2.field_type, &format!("{}.{}", e1.name, v1.name));
+            }
+        }
+    }
+}
+
+/// Compare two type annotations for structural equality.
+fn assert_type_annotations_equal(t1: &TypeAnnotation, t2: &TypeAnnotation, context: &str) {
+    match (t1, t2) {
+        (TypeAnnotation::F64, TypeAnnotation::F64) => {}
+        (TypeAnnotation::Int, TypeAnnotation::Int) => {}
+        (TypeAnnotation::Bool, TypeAnnotation::Bool) => {}
+        (TypeAnnotation::Str, TypeAnnotation::Str) => {}
+        (TypeAnnotation::Named(n1), TypeAnnotation::Named(n2)) => {
+            assert_eq!(n1, n2, "Named type mismatch in {}", context);
+        }
+        (TypeAnnotation::Generic(n1, args1), TypeAnnotation::Generic(n2, args2)) => {
+            assert_eq!(n1, n2, "Generic type name mismatch in {}", context);
+            assert_eq!(args1.len(), args2.len(), "Generic arg count mismatch in {}", context);
+            for (a1, a2) in args1.iter().zip(args2.iter()) {
+                assert_type_annotations_equal(a1, a2, context);
+            }
+        }
+        _ => panic!("Type annotation mismatch in {}: {:?} vs {:?}", context, t1, t2),
+    }
+}
+
+// ============================================================================
+// Property 2: Match Expression Parsing Round-Trip
+// ============================================================================
+
+/// Feature: flux-type-system, Property 2: Match Expression Parsing Round-Trip
+///
+/// **Validates: Requirements 3.2, 3.3, 3.4, 12.2**
+///
+/// For any valid match expression source text (with any number of arms,
+/// variant patterns with bindings, and wildcard patterns), parsing to AST
+/// and pretty-printing back to source and parsing again SHALL produce an
+/// equivalent AST.
+
+// ============================================================================
+// Generators for Match Expression
+// ============================================================================
+
+/// Generate a binding variable name (lowercase).
+fn arb_binding_name() -> impl Strategy<Value = String> {
+    "[a-z]{1,3}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// A pattern for a match arm.
+#[derive(Debug, Clone)]
+enum TestPattern {
+    /// Variant pattern: EnumName.VariantName(binding1, binding2)
+    Variant {
+        enum_name: String,
+        variant_name: String,
+        bindings: Vec<String>,
+    },
+    /// Wildcard pattern: _
+    Wildcard,
+}
+
+/// Generate a pattern for a match arm.
+fn arb_pattern(enum_name: String, variant_name: String, max_bindings: usize) -> impl Strategy<Value = TestPattern> {
+    // 70% variant patterns, 30% wildcard
+    prop_oneof![
+        7 => (proptest::collection::vec(arb_binding_name(), 0..=max_bindings))
+            .prop_map(move |bindings| TestPattern::Variant {
+                enum_name: enum_name.clone(),
+                variant_name: variant_name.clone(),
+                bindings,
+            }),
+        3 => Just(TestPattern::Wildcard),
+    ]
+}
+
+/// Generate a match arm pattern given enum info.
+fn arb_match_arm_pattern(
+    enum_name: String,
+    variants: Vec<(String, usize)>, // (variant_name, field_count)
+) -> impl Strategy<Value = TestPattern> {
+    // Pick a random variant
+    let variants_clone = variants.clone();
+    let enum_name_clone = enum_name.clone();
+    
+    proptest::sample::select(variants)
+        .prop_flat_map(move |(variant_name, field_count)| {
+            let enum_name_inner = enum_name.clone();
+            arb_pattern(enum_name_inner, variant_name, field_count)
+        })
+        .prop_map(move |p| p)
+}
+
+/// A match arm with pattern and body statements.
+#[derive(Debug, Clone)]
+struct TestMatchArm {
+    pattern: TestPattern,
+    body: Vec<String>, // Simple expressions as strings
+}
+
+/// Generate a match arm.
+fn arb_match_arm(
+    enum_name: String,
+    variants: Vec<(String, usize)>,
+) -> impl Strategy<Value = TestMatchArm> {
+    let body_exprs = vec!["x = 1.0".to_string(), "y = 2.0".to_string()];
+    
+    arb_match_arm_pattern(enum_name, variants)
+        .prop_map(move |pattern| TestMatchArm {
+            pattern,
+            body: body_exprs.clone(),
+        })
+}
+
+/// Generate a match expression test case.
+fn arb_match_test() -> impl Strategy<Value = (String, Vec<(String, usize)>, Vec<TestMatchArm>)> {
+    // First generate an enum
+    arb_enum_def().prop_flat_map(|(enum_name, variants)| {
+        // Convert to (variant_name, field_count) pairs
+        let variant_info: Vec<(String, usize)> = variants
+            .iter()
+            .map(|(vname, fields)| (vname.clone(), fields.len()))
+            .collect();
+        
+        // Generate 1-5 match arms
+        let enum_name_clone = enum_name.clone();
+        let variant_info_clone = variant_info.clone();
+        
+        proptest::collection::vec(
+            arb_match_arm(enum_name_clone, variant_info_clone),
+            1..=5
+        ).prop_map(move |arms| (enum_name.clone(), variant_info.clone(), arms))
+    })
+}
+
+// ============================================================================
+// Source construction helpers for Match Expression
+// ============================================================================
+
+/// Build a Flux source string with an enum definition and a match expression.
+fn build_match_source(
+    enum_name: &str,
+    variants: &[(String, Vec<(String, FieldType)>)],
+    arms: &[TestMatchArm],
+) -> String {
+    // Build enum definition
+    let variant_strs: Vec<String> = variants
+        .iter()
+        .map(|(variant_name, fields)| {
+            if fields.is_empty() {
+                variant_name.clone()
+            } else {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(fname, ftype)| format!("{}: {}", fname, ftype.type_str()))
+                    .collect();
+                format!("{}({})", variant_name, field_strs.join(", "))
+            }
+        })
+        .collect();
+
+    let enum_def = format!(
+        "enum {} {{\n    {}\n}}",
+        enum_name,
+        variant_strs.join(",\n    ")
+    );
+
+    // Build match expression
+    let arm_strs: Vec<String> = arms
+        .iter()
+        .map(|arm| {
+            let pattern_str = match &arm.pattern {
+                TestPattern::Variant { enum_name, variant_name, bindings } => {
+                    if bindings.is_empty() {
+                        format!("{}.{}", enum_name, variant_name)
+                    } else {
+                        format!("{}.{}({})", enum_name, variant_name, bindings.join(", "))
+                    }
+                }
+                TestPattern::Wildcard => "_".to_string(),
+            };
+            
+            let body_str = arm.body.join("\n        ");
+            format!("    {} => {{\n        {}\n    }}", pattern_str, body_str)
+        })
+        .collect();
+
+    let match_expr = format!(
+        "match value {{\n{}\n}}",
+        arm_strs.join("\n")
+    );
+
+    format!(
+        "{}\n\nstrategy Test {{\n    on bar {{\n        {}\n    }}\n}}\n",
+        enum_def, match_expr
+    )
+}
+
+// ============================================================================
+// Property Tests for Match Expression
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property 2: Match expression parse → pretty-print → parse round-trip.
+    #[test]
+    fn prop_match_expr_round_trip(
+        (enum_name, variants_with_fields) in arb_enum_def()
+    ) {
+        // Generate match arms based on the enum variants
+        let variant_info: Vec<(String, usize)> = variants_with_fields
+            .iter()
+            .map(|(vname, fields)| (vname.clone(), fields.len()))
+            .collect();
+        
+        // Generate 1-5 match arms with wildcard at the end
+        let mut arms: Vec<TestMatchArm> = vec![];
+        
+        // Add a few variant patterns
+        for (vname, field_count) in variant_info.iter().take(3) {
+            arms.push(TestMatchArm {
+                pattern: TestPattern::Variant {
+                    enum_name: enum_name.clone(),
+                    variant_name: vname.clone(),
+                    bindings: (0..*field_count).map(|i| format!("b{}", i)).collect(),
+                },
+                body: vec!["x = 1.0".to_string()],
+            });
+        }
+        
+        // Add wildcard at the end for exhaustiveness
+        arms.push(TestMatchArm {
+            pattern: TestPattern::Wildcard,
+            body: vec!["x = 0.0".to_string()],
+        });
+        
+        let source = build_match_source(&enum_name, &variants_with_fields, &arms);
+        
+        // Parse the source
+        let tokens1 = lex_with_spans(&source).expect("first lex should succeed");
+        let ast1 = parse(tokens1).expect("first parse should succeed");
+        
+        // Pretty-print the AST back to source
+        let pretty = pretty_print_program(&ast1);
+        
+        // Parse the pretty-printed source
+        let tokens2 = lex_with_spans(&pretty).expect("second lex should succeed");
+        let ast2 = parse(tokens2).expect("second parse should succeed");
+        
+        // Compare the ASTs structurally (ignoring spans)
+        assert_match_exprs_equal(&ast1, &ast2);
+    }
+}
+
+/// Compare two programs for structural equality of their match expressions.
+fn assert_match_exprs_equal(prog1: &Program, prog2: &Program) {
+    // First compare enums
+    assert_enums_equal(prog1, prog2);
+    
+    // Then compare match expressions in the strategy bodies
+    // We need to extract match expressions from the strategy bodies
+    let match_exprs1 = extract_match_exprs(prog1);
+    let match_exprs2 = extract_match_exprs(prog2);
+    
+    assert_eq!(
+        match_exprs1.len(),
+        match_exprs2.len(),
+        "Match expression count mismatch"
+    );
+    
+    for (m1, m2) in match_exprs1.iter().zip(match_exprs2.iter()) {
+        compare_match_exprs(m1, m2);
+    }
+}
+
+/// Extract match expressions from a program's strategy body.
+fn extract_match_exprs(prog: &Program) -> Vec<MatchExpr> {
+    let mut matches = vec![];
+    
+    for item in &prog.strategy.body {
+        if let flux_compiler::parser::StrategyItem::EventHandler(handler) = item {
+            for stmt in &handler.body {
+                extract_match_from_stmt(stmt, &mut matches);
+            }
+        }
+    }
+    
+    matches
+}
+
+/// Recursively extract match expressions from statements.
+fn extract_match_from_stmt(stmt: &Stmt, matches: &mut Vec<MatchExpr>) {
+    match stmt {
+        Stmt::Expr(expr_stmt) => {
+            extract_match_from_expr(&expr_stmt.expr, matches);
+        }
+        Stmt::Assignment(assign) => {
+            extract_match_from_expr(&assign.value, matches);
+        }
+        Stmt::If(if_stmt) => {
+            for s in &if_stmt.body {
+                extract_match_from_stmt(s, matches);
+            }
+            for s in if_stmt.else_body.iter().flatten() {
+                extract_match_from_stmt(s, matches);
+            }
+        }
+        Stmt::For(for_loop) => {
+            for s in &for_loop.body {
+                extract_match_from_stmt(s, matches);
+            }
+        }
+        Stmt::While(while_loop) => {
+            for s in &while_loop.body {
+                extract_match_from_stmt(s, matches);
+            }
+        }
+        Stmt::Return(ret) => {
+            if let Some(expr) = &ret.value {
+                extract_match_from_expr(expr, matches);
+            }
+        }
+    }
+}
+
+/// Recursively extract match expressions from expressions.
+fn extract_match_from_expr(expr: &Expr, matches: &mut Vec<MatchExpr>) {
+    match &expr.kind {
+        ExprKind::Match(m) => {
+            matches.push(m.clone());
+        }
+        ExprKind::BinaryOp { left, right, .. } => {
+            extract_match_from_expr(left, matches);
+            extract_match_from_expr(right, matches);
+        }
+        ExprKind::UnaryOp { operand, .. } => {
+            extract_match_from_expr(operand, matches);
+        }
+        ExprKind::FunctionCall { function, args } => {
+            extract_match_from_expr(function, matches);
+            for arg in args {
+                extract_match_from_expr(arg, matches);
+            }
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            extract_match_from_expr(receiver, matches);
+            for arg in args {
+                extract_match_from_expr(arg, matches);
+            }
+        }
+        ExprKind::MemberAccess { object, .. } => {
+            extract_match_from_expr(object, matches);
+        }
+        ExprKind::IndexAccess { object, index } => {
+            extract_match_from_expr(object, matches);
+            extract_match_from_expr(index, matches);
+        }
+        ExprKind::ListLiteral(elems) => {
+            for e in elems {
+                extract_match_from_expr(e, matches);
+            }
+        }
+        ExprKind::StructLiteral { fields, .. } => {
+            for (_, v) in fields {
+                extract_match_from_expr(v, matches);
+            }
+        }
+        ExprKind::EnumConstruction { args, .. } => {
+            for arg in args {
+                extract_match_from_expr(arg, matches);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Compare two match expressions for structural equality.
+fn compare_match_exprs(m1: &MatchExpr, m2: &MatchExpr) {
+    // Compare scrutinee expressions
+    compare_exprs(&m1.scrutinee, &m2.scrutinee);
+    
+    // Compare arm count
+    assert_eq!(
+        m1.arms.len(),
+        m2.arms.len(),
+        "Match arm count mismatch"
+    );
+    
+    // Compare each arm
+    for (arm1, arm2) in m1.arms.iter().zip(m2.arms.iter()) {
+        compare_patterns(&arm1.pattern, &arm2.pattern);
+        compare_stmts(&arm1.body, &arm2.body);
+    }
+}
+
+/// Compare two expressions for structural equality.
+fn compare_exprs(e1: &Expr, e2: &Expr) {
+    match (&e1.kind, &e2.kind) {
+        (ExprKind::IntLiteral(n1), ExprKind::IntLiteral(n2)) => {
+            assert_eq!(n1, n2, "Int literal mismatch");
+        }
+        (ExprKind::FloatLiteral(f1), ExprKind::FloatLiteral(f2)) => {
+            assert!((f1 - f2).abs() < 1e-10, "Float literal mismatch: {} vs {}", f1, f2);
+        }
+        (ExprKind::StringLiteral(s1), ExprKind::StringLiteral(s2)) => {
+            assert_eq!(s1, s2, "String literal mismatch");
+        }
+        (ExprKind::BoolLiteral(b1), ExprKind::BoolLiteral(b2)) => {
+            assert_eq!(b1, b2, "Bool literal mismatch");
+        }
+        (ExprKind::Ident(n1), ExprKind::Ident(n2)) => {
+            assert_eq!(n1, n2, "Identifier mismatch");
+        }
+        (ExprKind::MemberAccess { object: o1, field: f1 }, ExprKind::MemberAccess { object: o2, field: f2 }) => {
+            compare_exprs(o1, o2);
+            assert_eq!(f1, f2, "Field name mismatch");
+        }
+        (ExprKind::EnumConstruction { enum_name: en1, variant_name: vn1, args: a1 },
+         ExprKind::EnumConstruction { enum_name: en2, variant_name: vn2, args: a2 }) => {
+            assert_eq!(en1, en2, "Enum name mismatch in construction");
+            assert_eq!(vn1, vn2, "Variant name mismatch in construction");
+            assert_eq!(a1.len(), a2.len(), "Enum construction arg count mismatch");
+            for (arg1, arg2) in a1.iter().zip(a2.iter()) {
+                compare_exprs(arg1, arg2);
+            }
+        }
+        (ExprKind::Match(m1), ExprKind::Match(m2)) => {
+            compare_match_exprs(m1, m2);
+        }
+        _ => {
+            // For other expression types, just check they're the same variant
+            assert_eq!(
+                std::mem::discriminant(&e1.kind),
+                std::mem::discriminant(&e2.kind),
+                "Expression kind mismatch: {:?} vs {:?}",
+                e1.kind,
+                e2.kind
+            );
+        }
+    }
+}
+
+/// Compare two patterns for structural equality.
+fn compare_patterns(p1: &Pattern, p2: &Pattern) {
+    match (p1, p2) {
+        (Pattern::Variant { enum_name: en1, variant_name: vn1, bindings: b1, .. },
+         Pattern::Variant { enum_name: en2, variant_name: vn2, bindings: b2, .. }) => {
+            assert_eq!(en1, en2, "Pattern enum name mismatch");
+            assert_eq!(vn1, vn2, "Pattern variant name mismatch");
+            assert_eq!(b1, b2, "Pattern bindings mismatch");
+        }
+        (Pattern::Wildcard { .. }, Pattern::Wildcard { .. }) => {}
+        _ => panic!("Pattern kind mismatch: {:?} vs {:?}", p1, p2),
+    }
+}
+
+/// Compare two statement vectors for structural equality.
+fn compare_stmts(s1: &[Stmt], s2: &[Stmt]) {
+    assert_eq!(s1.len(), s2.len(), "Statement count mismatch");
+    
+    for (stmt1, stmt2) in s1.iter().zip(s2.iter()) {
+        match (stmt1, stmt2) {
+            (Stmt::Assignment(a1), Stmt::Assignment(a2)) => {
+                compare_exprs(&a1.value, &a2.value);
+            }
+            (Stmt::Expr(e1), Stmt::Expr(e2)) => {
+                compare_exprs(&e1.expr, &e2.expr);
+            }
+            (Stmt::Return(r1), Stmt::Return(r2)) => {
+                assert_eq!(r1.value.is_some(), r2.value.is_some(), "Return value presence mismatch");
+                if let (Some(v1), Some(v2)) = (&r1.value, &r2.value) {
+                    compare_exprs(v1, v2);
+                }
+            }
+            _ => {
+                assert_eq!(
+                    std::mem::discriminant(stmt1),
+                    std::mem::discriminant(stmt2),
+                    "Statement kind mismatch"
+                );
+            }
+        }
+    }
+}
+
+
+// ============================================================================
+// Property 3: Impl Block Parsing Round-Trip (impl portion)
+// ============================================================================
+
+/// Feature: flux-type-system, Property 3: Impl Block and Trait Definition Parsing Round-Trip
+///
+/// **Validates: Requirements 4.2, 4.3, 4.4, 12.3**
+///
+/// For any valid impl block source text (with any number of methods,
+/// self/static classification, and varying parameters), parsing to AST
+/// and pretty-printing back to source and parsing again SHALL produce an
+/// equivalent AST.
+
+// ============================================================================
+// Generators for Impl Block
+// ============================================================================
+
+/// Generate a valid struct/type name for impl block target (capitalized).
+fn arb_struct_name() -> impl Strategy<Value = String> {
+    "[A-Z][a-z]{2,7}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// Generate a valid method name (lowercase).
+fn arb_method_name() -> impl Strategy<Value = String> {
+    "[a-z][a-z0-9]{1,6}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// Generate a valid parameter name (lowercase).
+fn arb_param_name() -> impl Strategy<Value = String> {
+    "[a-z]{2,5}".prop_filter("must not be a reserved keyword", |name| {
+        !FLUX_RESERVED.contains(&name.as_str())
+    })
+}
+
+/// Whether a method has self as its first parameter.
+#[derive(Debug, Clone)]
+enum MethodKind {
+    Instance, // has `self` parameter
+    Static,   // no `self` parameter
+}
+
+/// A generated method definition.
+#[derive(Debug, Clone)]
+struct TestMethod {
+    name: String,
+    kind: MethodKind,
+    params: Vec<(String, FieldType)>, // params other than self
+    return_type: Option<FieldType>,
+}
+
+/// Generate a method definition.
+fn arb_method() -> impl Strategy<Value = TestMethod> {
+    (
+        arb_method_name(),
+        prop_oneof![Just(MethodKind::Instance), Just(MethodKind::Static)],
+        proptest::collection::vec((arb_param_name(), arb_field_type()), 0..=2),
+        proptest::option::of(arb_field_type()),
+    )
+        .prop_filter("param names must be unique", |(_, _, params, _)| {
+            let names: std::collections::HashSet<&str> =
+                params.iter().map(|(n, _)| n.as_str()).collect();
+            names.len() == params.len()
+        })
+        .prop_map(|(name, kind, params, return_type)| TestMethod {
+            name,
+            kind,
+            params,
+            return_type,
+        })
+}
+
+/// Generate an impl block test case: struct name + 1-3 methods with unique names.
+fn arb_impl_block_test() -> impl Strategy<Value = (String, Vec<TestMethod>)> {
+    (
+        arb_struct_name(),
+        proptest::collection::vec(arb_method(), 1..=3),
+    )
+        .prop_filter("method names must be unique", |(_, methods)| {
+            let names: std::collections::HashSet<&str> =
+                methods.iter().map(|m| m.name.as_str()).collect();
+            names.len() == methods.len()
+        })
+}
+
+// ============================================================================
+// Source construction helpers for Impl Block
+// ============================================================================
+
+/// Build a Flux source string with a struct definition and an impl block.
+fn build_impl_source(struct_name: &str, methods: &[TestMethod]) -> String {
+    // Build struct definition (simple single field)
+    let struct_def = format!(
+        "struct {} {{\n    field: f64\n}}\n",
+        struct_name
+    );
+
+    // Build impl block
+    let method_strs: Vec<String> = methods
+        .iter()
+        .map(|method| {
+            // Build parameter list
+            let mut params = Vec::new();
+            if matches!(method.kind, MethodKind::Instance) {
+                params.push("self".to_string());
+            }
+            for (pname, ptype) in &method.params {
+                params.push(format!("{}: {}", pname, ptype.type_str()));
+            }
+            let params_str = params.join(", ");
+
+            // Build return type
+            let ret_str = match &method.return_type {
+                Some(rt) => format!(" -> {}", rt.type_str()),
+                None => String::new(),
+            };
+
+            // Build method body (simple return statement)
+            let body = if method.params.is_empty() {
+                "        return 1.0".to_string()
+            } else {
+                format!("        return {}", method.params[0].0)
+            };
+
+            format!(
+                "    fn {}({}){} {{\n{}\n    }}",
+                method.name, params_str, ret_str, body
+            )
+        })
+        .collect();
+
+    let impl_block = format!(
+        "impl {} {{\n{}\n}}\n",
+        struct_name,
+        method_strs.join("\n")
+    );
+
+    format!(
+        "{}\n{}\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}\n",
+        struct_def, impl_block
+    )
+}
+
+// ============================================================================
+// Property Tests for Impl Block
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property 3: Impl block parse → pretty-print → parse round-trip.
+    #[test]
+    fn prop_impl_block_round_trip(
+        (struct_name, methods) in arb_impl_block_test()
+    ) {
+        let source = build_impl_source(&struct_name, &methods);
+
+        // Parse the source
+        let tokens1 = lex_with_spans(&source).expect("first lex should succeed");
+        let ast1 = parse(tokens1).expect("first parse should succeed");
+
+        // Pretty-print the AST back to source
+        let pretty = pretty_print_program(&ast1);
+
+        // Parse the pretty-printed source
+        let tokens2 = lex_with_spans(&pretty).expect("second lex should succeed");
+        let ast2 = parse(tokens2).expect("second parse should succeed");
+
+        // Compare the ASTs structurally (ignoring spans)
+        assert_impl_blocks_equal(&ast1, &ast2);
+    }
+}
+
+/// Compare two programs for structural equality of their impl blocks.
+fn assert_impl_blocks_equal(prog1: &Program, prog2: &Program) {
+    assert_eq!(
+        prog1.impl_blocks.len(),
+        prog2.impl_blocks.len(),
+        "Impl block count mismatch: {} vs {}",
+        prog1.impl_blocks.len(),
+        prog2.impl_blocks.len()
+    );
+
+    for (ib1, ib2) in prog1.impl_blocks.iter().zip(prog2.impl_blocks.iter()) {
+        // Same target type
+        assert_eq!(
+            ib1.target_type, ib2.target_type,
+            "Impl block target type mismatch"
+        );
+
+        // Same trait name (both None for inherent impls)
+        assert_eq!(
+            ib1.trait_name, ib2.trait_name,
+            "Impl block trait name mismatch"
+        );
+
+        // Same method count
+        assert_eq!(
+            ib1.methods.len(),
+            ib2.methods.len(),
+            "Method count mismatch for impl {}",
+            ib1.target_type
+        );
+
+        // Compare each method
+        for (m1, m2) in ib1.methods.iter().zip(ib2.methods.iter()) {
+            assert_eq!(
+                m1.name, m2.name,
+                "Method name mismatch in impl {}",
+                ib1.target_type
+            );
+
+            // Same parameter count
+            assert_eq!(
+                m1.params.len(),
+                m2.params.len(),
+                "Param count mismatch for method {}.{}",
+                ib1.target_type,
+                m1.name
+            );
+
+            // Compare parameter names and types
+            for (p1, p2) in m1.params.iter().zip(m2.params.iter()) {
+                assert_eq!(
+                    p1.name, p2.name,
+                    "Param name mismatch in method {}.{}",
+                    ib1.target_type,
+                    m1.name
+                );
+
+                // Compare param type annotations (both should be present or absent)
+                match (&p1.param_type, &p2.param_type) {
+                    (Some(t1), Some(t2)) => {
+                        assert_type_annotations_equal(
+                            t1,
+                            t2,
+                            &format!("{}.{}", ib1.target_type, m1.name),
+                        );
+                    }
+                    (None, None) => {} // both have no type annotation (e.g., `self`)
+                    _ => panic!(
+                        "Param type presence mismatch for param '{}' in method {}.{}",
+                        p1.name, ib1.target_type, m1.name
+                    ),
+                }
+            }
+
+            // Compare return types
+            match (&m1.return_type, &m2.return_type) {
+                (Some(t1), Some(t2)) => {
+                    assert_type_annotations_equal(
+                        t1,
+                        t2,
+                        &format!("{}.{} return type", ib1.target_type, m1.name),
+                    );
+                }
+                (None, None) => {}
+                _ => panic!(
+                    "Return type presence mismatch for method {}.{}",
+                    ib1.target_type, m1.name
+                ),
+            }
+        }
+    }
+}

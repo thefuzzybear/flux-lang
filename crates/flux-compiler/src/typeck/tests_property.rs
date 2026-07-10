@@ -274,6 +274,7 @@ mod tests {
                         structs: vec![], enums: vec![],
                         imports,
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                         strategy,
@@ -445,6 +446,7 @@ mod tests {
                     structs: vec![], enums: vec![],
                     imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                     strategy,
@@ -561,6 +563,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -650,6 +653,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -737,6 +741,7 @@ mod tests {
             structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: AstStrategy {
@@ -1306,6 +1311,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1463,6 +1469,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1521,6 +1528,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1591,6 +1599,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1655,6 +1664,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1713,6 +1723,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1786,6 +1797,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1827,6 +1839,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1869,6 +1882,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -1943,6 +1957,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2014,6 +2029,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2085,6 +2101,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2154,6 +2171,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2220,6 +2238,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2298,6 +2317,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2364,6 +2384,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2429,6 +2450,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2509,6 +2531,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![import],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2570,6 +2593,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2640,6 +2664,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2684,6 +2709,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2722,6 +2748,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2772,6 +2799,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2834,6 +2862,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -2918,6 +2947,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3008,6 +3038,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3082,6 +3113,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3140,6 +3172,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3209,6 +3242,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3298,6 +3332,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {
@@ -3411,6 +3446,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                         functions: vec![],
+                        impl_blocks: vec![],
                         data_block: None,
                         connector_block: None,
                 strategy: AstStrategy {

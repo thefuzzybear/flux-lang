@@ -23,6 +23,8 @@ pub enum Value {
     MatFloat { data: Vec<f64>, rows: usize, cols: usize },
     /// A struct instance with a type name and named fields.
     Struct { type_name: String, fields: HashMap<String, Value> },
+    /// An enum value with enum name, variant name, and named field values.
+    Enum { enum_name: String, variant_name: String, fields: Vec<(String, Value)> },
 }
 
 impl fmt::Display for Value {
@@ -68,6 +70,20 @@ impl fmt::Display for Value {
                     write!(f, "{}: {}", name, value)?;
                 }
                 write!(f, " }}")
+            }
+            Value::Enum { enum_name, variant_name, fields } => {
+                if fields.is_empty() {
+                    write!(f, "{}.{}", enum_name, variant_name)
+                } else {
+                    write!(f, "{}.{}(", enum_name, variant_name)?;
+                    for (i, (name, value)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}: {}", name, value)?;
+                    }
+                    write!(f, ")")
+                }
             }
         }
     }
@@ -152,6 +168,9 @@ pub struct Interpreter {
     pub current_closes: HashMap<String, f64>,
     /// Registry of user-defined functions, keyed by function name.
     pub functions: HashMap<String, TypedFnDef>,
+    /// Registry of enum definitions, keyed by enum name.
+    /// Each entry maps to its list of typed variants.
+    pub enum_defs: HashMap<String, Vec<TypedEnumVariant>>,
     /// Current call stack depth (for detecting stack overflow).
     pub call_depth: usize,
     /// Maximum allowed call stack depth (default 64).
@@ -163,6 +182,9 @@ pub struct Interpreter {
     /// Used to propagate struct (and other complex) values through the
     /// sentinel error mechanism without lossy string encoding.
     pub pending_return: Option<Value>,
+    /// Registry of impl block methods, keyed by type name → method name → TypedFnDef.
+    /// Used to resolve method calls on struct instances.
+    pub impl_methods: HashMap<String, HashMap<String, TypedFnDef>>,
 }
 
 impl Interpreter {
@@ -205,6 +227,22 @@ impl Interpreter {
             functions.insert(fn_def.name.clone(), fn_def.clone());
         }
 
+        let mut enum_defs = HashMap::new();
+        for enum_def in &program.enums {
+            enum_defs.insert(enum_def.name.clone(), enum_def.variants.clone());
+        }
+
+        // Build impl method registry from typed impl blocks
+        let mut impl_methods: HashMap<String, HashMap<String, TypedFnDef>> = HashMap::new();
+        for impl_block in &program.impl_blocks {
+            let type_methods = impl_methods
+                .entry(impl_block.target_type.clone())
+                .or_default();
+            for method in &impl_block.methods {
+                type_methods.insert(method.name.clone(), method.clone());
+            }
+        }
+
         Interpreter {
             params,
             state,
@@ -214,10 +252,12 @@ impl Interpreter {
             prev_closes: HashMap::new(),
             current_closes: HashMap::new(),
             functions,
+            enum_defs,
             call_depth: 0,
             max_call_depth: 64,
             fn_signals: Vec::new(),
             pending_return: None,
+            impl_methods,
         }
     }
 
@@ -680,8 +720,89 @@ impl Interpreter {
             }
 
             // --- Method call ---
-            TypedExprKind::MethodCall { receiver: _, method, args: _ } => {
-                Err(format!("method call '{}' is not supported in the interpreter", method))
+            TypedExprKind::MethodCall { receiver, method, args } => {
+                let receiver_val = self.eval_expr(receiver, locals)?;
+
+                // Evaluate arguments eagerly
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_expr(a, locals))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                // Handle built-in list methods
+                match (&receiver_val, method.as_str()) {
+                    (Value::List(_), "len") => {
+                        if let Value::List(items) = &receiver_val {
+                            return Ok(Value::Int(items.len() as i64));
+                        }
+                    }
+                    (Value::List(_), "pop") => {
+                        // pop returns the last element (non-mutating in this interpreter)
+                        if let Value::List(items) = &receiver_val {
+                            return items.last().cloned().ok_or_else(|| {
+                                "runtime error: pop on empty list".to_string()
+                            });
+                        }
+                    }
+                    (Value::Str(_), "len") => {
+                        if let Value::Str(s) = &receiver_val {
+                            return Ok(Value::Int(s.len() as i64));
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Check if receiver is a struct with user-defined impl methods
+                if let Value::Struct { ref type_name, .. } = receiver_val {
+                    if let Some(method_def) = self
+                        .impl_methods
+                        .get(type_name)
+                        .and_then(|methods| methods.get(method))
+                        .cloned()
+                    {
+                        // Check call depth for recursion safety
+                        if self.call_depth >= self.max_call_depth {
+                            return Err(format!(
+                                "stack overflow: maximum call depth ({}) exceeded",
+                                self.max_call_depth
+                            ));
+                        }
+                        self.call_depth += 1;
+
+                        // Create a new scope for the method body
+                        let mut method_locals = HashMap::new();
+
+                        // Bind parameters: first param is "self" for instance methods
+                        let mut arg_idx = 0;
+                        for param_name in &method_def.params {
+                            if param_name == "self" {
+                                method_locals.insert("self".to_string(), receiver_val.clone());
+                            } else {
+                                if arg_idx < evaluated_args.len() {
+                                    method_locals.insert(param_name.clone(), evaluated_args[arg_idx].clone());
+                                    arg_idx += 1;
+                                }
+                            }
+                        }
+
+                        // Inject bar context from caller's locals
+                        for name in &["close", "open", "high", "low", "volume", "symbol", "in_position"] {
+                            if let Some(val) = locals.get(*name) {
+                                method_locals.insert(name.to_string(), val.clone());
+                            }
+                        }
+
+                        let result = self.exec_fn_body(&method_def.body, &mut method_locals);
+                        self.call_depth -= 1;
+                        return result;
+                    }
+                }
+
+                // Fall through: method not found in impl blocks
+                Err(format!("No method '{}' on type '{}'", method, match &receiver_val {
+                    Value::Struct { type_name, .. } => type_name.clone(),
+                    other => format!("{}", other),
+                }))
             }
 
             // --- Index access ---
@@ -736,6 +857,106 @@ impl Interpreter {
                     type_name: struct_name.clone(),
                     fields: field_map,
                 })
+            }
+
+            // --- Enum construction ---
+            TypedExprKind::EnumConstruction {
+                enum_name,
+                variant_name,
+                args,
+            } => {
+                // Look up field names from the enum definition
+                let field_names: Vec<String> = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|variants| {
+                        variants.iter().find(|v| v.name == *variant_name)
+                    })
+                    .map(|variant| {
+                        variant.fields.iter().map(|(name, _)| name.clone()).collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut field_values = Vec::new();
+                for (i, arg) in args.iter().enumerate() {
+                    let val = self.eval_expr(arg, locals)?;
+                    let name = field_names
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| format!("_{}", i));
+                    field_values.push((name, val));
+                }
+                Ok(Value::Enum {
+                    enum_name: enum_name.clone(),
+                    variant_name: variant_name.clone(),
+                    fields: field_values,
+                })
+            }
+            TypedExprKind::Match(match_expr) => {
+                // Evaluate the scrutinee
+                let scrutinee_val = self.eval_expr(&match_expr.scrutinee, locals)?;
+
+                // Try to match against each arm in order
+                for arm in &match_expr.arms {
+                    match &arm.pattern {
+                        flux_compiler::typeck::TypedPattern::Variant {
+                            variant_name: pat_variant,
+                            bindings,
+                            ..
+                        } => {
+                            // Check if scrutinee matches this variant
+                            if let Value::Enum {
+                                variant_name: ref val_variant,
+                                ref fields,
+                                ..
+                            } = scrutinee_val
+                            {
+                                if val_variant == pat_variant {
+                                    // Bind fields to local variables by position
+                                    let mut arm_locals = locals.clone();
+                                    for (i, (binding_name, _)) in bindings.iter().enumerate() {
+                                        if let Some((_, value)) = fields.get(i) {
+                                            arm_locals.insert(
+                                                binding_name.clone(),
+                                                value.clone(),
+                                            );
+                                        }
+                                    }
+                                    // Execute arm body, return value of last expression
+                                    let mut result = Value::Null;
+                                    for stmt in &arm.body {
+                                        // Execute the statement for side effects + signals
+                                        let _signals = self.exec_stmt(stmt, &mut arm_locals)?;
+                                        // If the last statement is an expression, capture its value
+                                        if let TypedStmt::Expr(expr_stmt) = stmt {
+                                            result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
+                                        } else {
+                                            result = Value::Null;
+                                        }
+                                    }
+                                    return Ok(result);
+                                }
+                            }
+                        }
+                        flux_compiler::typeck::TypedPattern::Wildcard { .. } => {
+                            // Wildcard matches anything
+                            let mut arm_locals = locals.clone();
+                            let mut result = Value::Null;
+                            for stmt in &arm.body {
+                                let _signals = self.exec_stmt(stmt, &mut arm_locals)?;
+                                if let TypedStmt::Expr(expr_stmt) = stmt {
+                                    result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
+                                } else {
+                                    result = Value::Null;
+                                }
+                            }
+                            return Ok(result);
+                        }
+                    }
+                }
+
+                // No arm matched (shouldn't happen with exhaustiveness checking)
+                Ok(Value::Null)
             }
         }
     }
@@ -1171,7 +1392,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1263,7 +1486,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1305,10 +1530,12 @@ mod tests {
             prev_closes: HashMap::new(),
             current_closes: HashMap::new(),
             functions: HashMap::new(),
+            enum_defs: HashMap::new(),
             call_depth: 0,
             max_call_depth: 64,
             fn_signals: Vec::new(),
             pending_return: None,
+            impl_methods: HashMap::new(),
         }
     }
 
@@ -2039,7 +2266,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2113,7 +2342,9 @@ mod tests {
         let program = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

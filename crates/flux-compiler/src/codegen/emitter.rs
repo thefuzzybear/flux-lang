@@ -108,7 +108,9 @@ impl<'a> CodeEmitter<'a> {
         self.local_vars.clear();
         self.output.clear();
         self.emit_preamble();
+        self.emit_enum_defs()?;
         self.emit_struct_definitions()?;
+        self.emit_impl_blocks()?;
         self.emit_user_functions()?;
         self.emit_struct()?;
         self.output.push('\n');
@@ -125,6 +127,147 @@ impl<'a> CodeEmitter<'a> {
     /// Emit the preamble: `use flux_runtime::*;\n\n`
     fn emit_preamble(&mut self) {
         self.output.push_str("use flux_runtime::*;\n\n");
+    }
+
+    /// Emit all enum definitions from the typed program.
+    /// Each enum gets `#[derive(Debug, Clone, PartialEq)]` and uses struct-style
+    /// variants for data variants (`Variant { field: Type }`) and unit variants
+    /// for variants with no fields.
+    fn emit_enum_defs(&mut self) -> Result<()> {
+        if self.program.enums.is_empty() {
+            return Ok(());
+        }
+
+        for enum_def in &self.program.enums {
+            self.output
+                .push_str("#[derive(Debug, Clone, PartialEq)]\n");
+            self.output
+                .push_str(&format!("enum {} {{\n", enum_def.name));
+
+            for variant in &enum_def.variants {
+                if variant.fields.is_empty() {
+                    // Unit variant
+                    self.output
+                        .push_str(&format!("    {},\n", variant.name));
+                } else {
+                    // Struct variant with named fields
+                    self.output
+                        .push_str(&format!("    {} {{\n", variant.name));
+                    for (field_name, field_type) in &variant.fields {
+                        let rust_type = map_type(field_type, variant.span.start)?;
+                        self.output.push_str(&format!(
+                            "        {}: {},\n",
+                            field_name, rust_type
+                        ));
+                    }
+                    self.output.push_str("    },\n");
+                }
+            }
+
+            self.output.push_str("}\n\n");
+        }
+
+        Ok(())
+    }
+
+    /// Emit inherent `impl StructName { ... }` blocks with methods.
+    ///
+    /// Skips trait impls (Phase 3) — only handles inherent impls where
+    /// `trait_name` is `None`. For each method, `self` as the first parameter
+    /// is emitted as `&self` in Rust.
+    fn emit_impl_blocks(&mut self) -> Result<()> {
+        let impl_blocks = self.program.impl_blocks.clone();
+        for impl_block in &impl_blocks {
+            // Skip trait impls for now (Phase 3)
+            if impl_block.trait_name.is_some() {
+                continue;
+            }
+
+            self.output
+                .push_str(&format!("impl {} {{\n", impl_block.target_type));
+
+            for method in &impl_block.methods {
+                self.emit_impl_method(method)?;
+                self.output.push('\n');
+            }
+
+            self.output.push_str("}\n\n");
+        }
+
+        Ok(())
+    }
+
+    /// Emit a single method inside an impl block.
+    ///
+    /// If the first parameter is "self", it is emitted as `&self` in Rust.
+    /// Remaining parameters are emitted with their type annotations.
+    fn emit_impl_method(&mut self, method: &TypedFnDef) -> Result<()> {
+        self.in_fn_body = true;
+        self.fn_params.clear();
+        self.local_vars.clear();
+
+        // Register non-self params so identifier resolution works
+        for param in &method.params {
+            if param != "self" {
+                self.fn_params.insert(param.clone());
+            }
+        }
+
+        // Emit signature
+        self.indent_level = 1;
+        self.write_indent();
+        self.output.push_str(&format!("fn {}(", method.name));
+
+        let mut first = true;
+        for (i, param) in method.params.iter().enumerate() {
+            if !first {
+                self.output.push_str(", ");
+            }
+            first = false;
+
+            if param == "self" {
+                // Map Flux `self` to Rust `&self`
+                self.output.push_str("&self");
+            } else {
+                let rust_type = if i < method.param_types.len() {
+                    map_type(&method.param_types[i], method.span.start)?
+                } else {
+                    "f64".to_string()
+                };
+                self.output.push_str(&format!("{}: {}", param, rust_type));
+            }
+        }
+
+        self.output.push(')');
+
+        // Emit return type annotation
+        match &method.return_type {
+            FluxType::Null | FluxType::Void => {}
+            other => {
+                let rust_type = map_type(other, method.span.start)?;
+                self.output.push_str(&format!(" -> {}", rust_type));
+            }
+        }
+
+        self.output.push_str(" {\n");
+
+        // Emit body statements
+        self.indent_level = 2;
+        for stmt in &method.body {
+            self.emit_stmt(stmt)?;
+        }
+
+        self.indent_level = 1;
+        self.write_indent();
+        self.output.push_str("}\n");
+
+        // Restore context
+        self.indent_level = 0;
+        self.in_fn_body = false;
+        self.fn_params.clear();
+        self.local_vars.clear();
+
+        Ok(())
     }
 
     /// Return struct definitions in dependency order (topological sort).
@@ -1301,6 +1444,82 @@ impl<'a> CodeEmitter<'a> {
                 }
                 self.output.push_str(" }");
             }
+            TypedExprKind::EnumConstruction {
+                enum_name,
+                variant_name,
+                args,
+            } => {
+                // Emit Rust enum variant construction: EnumName::Variant { field: val, ... }
+                // or EnumName::Variant for unit variants
+                self.output.push_str(enum_name);
+                self.output.push_str("::");
+                self.output.push_str(variant_name);
+                if !args.is_empty() {
+                    // Look up field names from the enum definition
+                    let field_names: Vec<String> = self
+                        .program
+                        .enums
+                        .iter()
+                        .find(|e| &e.name == enum_name)
+                        .and_then(|e| e.variants.iter().find(|v| &v.name == variant_name))
+                        .map(|v| v.fields.iter().map(|(name, _)| name.clone()).collect())
+                        .unwrap_or_default();
+
+                    self.output.push_str(" { ");
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            self.output.push_str(", ");
+                        }
+                        if let Some(field_name) = field_names.get(i) {
+                            self.output.push_str(field_name);
+                            self.output.push_str(": ");
+                        }
+                        self.emit_expr(arg)?;
+                    }
+                    self.output.push_str(" }");
+                }
+            }
+            TypedExprKind::Match(match_expr) => {
+                self.output.push_str("match ");
+                self.emit_expr(&match_expr.scrutinee)?;
+                self.output.push_str(" {\n");
+                let base_indent = "    ".repeat(self.indent_level);
+                let arm_indent = format!("{}    ", base_indent);
+                let body_indent = format!("{}        ", base_indent);
+                for arm in &match_expr.arms {
+                    self.output.push_str(&arm_indent);
+                    match &arm.pattern {
+                        TypedPattern::Variant { enum_name, variant_name, bindings, .. } => {
+                            self.output.push_str(enum_name);
+                            self.output.push_str("::");
+                            self.output.push_str(variant_name);
+                            if !bindings.is_empty() {
+                                self.output.push_str(" { ");
+                                for (i, (name, _)) in bindings.iter().enumerate() {
+                                    if i > 0 {
+                                        self.output.push_str(", ");
+                                    }
+                                    self.output.push_str(name);
+                                }
+                                self.output.push_str(" }");
+                            }
+                        }
+                        TypedPattern::Wildcard { .. } => {
+                            self.output.push('_');
+                        }
+                    }
+                    self.output.push_str(" => {\n");
+                    for stmt in &arm.body {
+                        self.output.push_str(&body_indent);
+                        self.emit_stmt(stmt)?;
+                        self.output.push('\n');
+                    }
+                    self.output.push_str(&arm_indent);
+                    self.output.push_str("}\n");
+                }
+                self.output.push_str(&base_indent);
+                self.output.push('}');
+            }
         }
         Ok(())
     }
@@ -1600,7 +1819,9 @@ mod tests {
         TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -1621,7 +1842,9 @@ mod tests {
                 span: Span::new(0, 30),
             }],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -2955,7 +3178,9 @@ mod tests {
         let prog = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3021,7 +3246,9 @@ mod tests {
         let prog = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3059,7 +3286,9 @@ mod tests {
         let prog = TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -3182,7 +3411,9 @@ mod tests {
                 span: Span::new(0, 30),
             }],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

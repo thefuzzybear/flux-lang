@@ -149,7 +149,9 @@ fn build_scope_isolation_program(
     TypedProgram {
         imports: vec![],
         structs: vec![],
+        enums: vec![],
         functions: vec![fn_def],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -261,7 +263,9 @@ fn build_param_leak_program(param_val: f64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         structs: vec![],
+        enums: vec![],
         functions: vec![fn_def],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -348,7 +352,9 @@ fn build_return_value_program(return_value: f64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         structs: vec![],
+        enums: vec![],
         functions: vec![fn_def],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -446,7 +452,9 @@ fn build_no_return_program(internal_value: f64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         structs: vec![],
+        enums: vec![],
         functions: vec![fn_def],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -545,7 +553,9 @@ fn build_return_expr_program(param_val: f64, offset: f64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         structs: vec![],
+        enums: vec![],
         functions: vec![fn_def],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {
@@ -644,7 +654,9 @@ fn build_early_return_program(ret_val: f64, after_val: f64) -> TypedProgram {
     TypedProgram {
         imports: vec![],
         structs: vec![],
+        enums: vec![],
         functions: vec![fn_def],
+        impl_blocks: vec![],
         data_block: None,
         connector_block: None,
         strategy: TypedStrategy {

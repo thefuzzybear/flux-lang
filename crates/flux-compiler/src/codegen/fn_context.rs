@@ -173,6 +173,22 @@ fn expr_references_market_data(expr: &TypedExpr, param_names: &HashSet<&str>) ->
         TypedExprKind::StructLiteral { fields, .. } => {
             fields.iter().any(|(_, expr)| expr_references_market_data(expr, param_names))
         }
+        TypedExprKind::EnumConstruction { args, .. } => {
+            args.iter().any(|a| expr_references_market_data(a, param_names))
+        }
+        TypedExprKind::Match(match_expr) => {
+            expr_references_market_data(&match_expr.scrutinee, param_names)
+                || match_expr.arms.iter().any(|arm| {
+                    arm.body.iter().any(|stmt| match stmt {
+                        TypedStmt::Expr(es) => expr_references_market_data(&es.expr, param_names),
+                        TypedStmt::Assignment(a) => {
+                            expr_references_market_data(&a.target, param_names)
+                                || expr_references_market_data(&a.value, param_names)
+                        }
+                        _ => false,
+                    })
+                })
+        }
     }
 }
 
@@ -268,6 +284,13 @@ fn expr_emits_signals(expr: &TypedExpr) -> bool {
         | TypedExprKind::NullLiteral => false,
         TypedExprKind::StructLiteral { fields, .. } => {
             fields.iter().any(|(_, expr)| expr_emits_signals(expr))
+        }
+        TypedExprKind::EnumConstruction { args, .. } => {
+            args.iter().any(|a| expr_emits_signals(a))
+        }
+        TypedExprKind::Match(match_expr) => {
+            expr_emits_signals(&match_expr.scrutinee)
+                || match_expr.arms.iter().any(|arm| stmts_emit_signals(&arm.body))
         }
     }
 }
@@ -388,6 +411,19 @@ fn extract_calls_from_expr(
         TypedExprKind::StructLiteral { fields, .. } => {
             for (_, field_expr) in fields {
                 extract_calls_from_expr(field_expr, fn_names, calls);
+            }
+        }
+        TypedExprKind::EnumConstruction { args, .. } => {
+            for arg in args {
+                extract_calls_from_expr(arg, fn_names, calls);
+            }
+        }
+        TypedExprKind::Match(match_expr) => {
+            extract_calls_from_expr(&match_expr.scrutinee, fn_names, calls);
+            for arm in &match_expr.arms {
+                for stmt in &arm.body {
+                    extract_calls_from_stmt(stmt, fn_names, calls);
+                }
             }
         }
     }

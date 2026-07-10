@@ -12,6 +12,7 @@ use crate::lexer::Span;
 use crate::parser::ast::*;
 
 use super::builtins;
+use super::enum_info::{EnumInfo, MethodInfo, VariantInfo};
 use super::env::TypeEnvironment;
 use super::typed_ast::*;
 use super::types::{FluxType, FnParams};
@@ -61,8 +62,14 @@ impl TypeChecker {
         // Register struct definitions (validates fields, resolves types, topological order)
         let typed_structs = self.register_structs(&program.structs)?;
 
+        // Register enum definitions (validates variants, checks for duplicates)
+        let typed_enums = self.register_enums(&program.enums)?;
+
         // Register user-defined functions into global scope (before strategy checking)
         self.register_functions(&program.functions)?;
+
+        // Register impl blocks (validates target type, checks method bodies, detects duplicates)
+        let typed_impl_blocks = self.register_impl_blocks(&program.impl_blocks)?;
 
         // Detect recursion via call graph analysis (before body checking)
         let call_graph = super::call_graph::build_call_graph(&program.functions);
@@ -95,7 +102,9 @@ impl TypeChecker {
         Ok(TypedProgram {
             imports: program.imports,
             structs: typed_structs,
+            enums: typed_enums,
             functions: typed_functions,
+            impl_blocks: typed_impl_blocks,
             data_block: typed_data_block,
             connector_block: typed_connector_block,
             strategy: typed_strategy,
@@ -973,6 +982,376 @@ impl TypeChecker {
         Ok(())
     }
 
+    /// Register enum definitions in the type environment.
+    ///
+    /// For each enum definition, this method:
+    /// - Validates that the enum name doesn't conflict with existing types (structs or other enums)
+    /// - Detects duplicate variant names within an enum
+    /// - Resolves field types for data variants
+    /// - Registers the enum in the type environment
+    ///
+    /// Requirements: 1.4, 1.5, 1.6
+    fn register_enums(&mut self, enums: &[EnumDef]) -> Result<Vec<TypedEnumDef>> {
+        let mut typed_enums = Vec::new();
+
+        for enum_def in enums {
+            // Check for enum name conflict with existing struct or enum
+            if self.struct_registry.contains_key(&enum_def.name) {
+                return Err(self.type_error(
+                    enum_def.span,
+                    format!("type name '{}' is already defined as a struct", enum_def.name),
+                ));
+            }
+            if self.env.has_enum(&enum_def.name) {
+                return Err(self.type_error(
+                    enum_def.span,
+                    format!("enum '{}' is already defined", enum_def.name),
+                ));
+            }
+
+            // Check for duplicate variant names within this enum
+            let mut seen_variants: HashSet<String> = HashSet::new();
+            let mut variants = Vec::new();
+            let mut typed_variants = Vec::new();
+
+            for variant in &enum_def.variants {
+                // Detect duplicate variant name
+                if !seen_variants.insert(variant.name.clone()) {
+                    return Err(self.type_error(
+                        variant.span,
+                        format!(
+                            "duplicate variant '{}' in enum '{}'",
+                            variant.name, enum_def.name
+                        ),
+                    ));
+                }
+
+                // Resolve field types for data variants
+                let mut resolved_fields = Vec::new();
+                for field in &variant.fields {
+                    let resolved_type = self.resolve_enum_field_type(
+                        &field.field_type,
+                        &enum_def.name,
+                        &variant.name,
+                        &field.name,
+                        field.span,
+                    )?;
+                    resolved_fields.push((field.name.clone(), resolved_type));
+                }
+
+                typed_variants.push(TypedEnumVariant {
+                    name: variant.name.clone(),
+                    fields: resolved_fields.clone(),
+                    span: variant.span,
+                });
+
+                variants.push(VariantInfo::with_fields(
+                    variant.name.clone(),
+                    resolved_fields,
+                    variant.span,
+                ));
+            }
+
+            // Extract type parameter names (for generic enums - Phase 4)
+            let type_params: Vec<String> = enum_def
+                .type_params
+                .iter()
+                .map(|tp| tp.name.clone())
+                .collect();
+
+            // Create and register the enum info
+            let enum_info = EnumInfo::with_type_params(
+                enum_def.name.clone(),
+                type_params.clone(),
+                variants,
+                enum_def.span,
+            );
+
+            // Register in the type environment
+            self.env
+                .register_enum(enum_info)
+                .expect("enum registration should succeed after duplicate check");
+
+            typed_enums.push(TypedEnumDef {
+                name: enum_def.name.clone(),
+                type_params,
+                variants: typed_variants,
+                span: enum_def.span,
+            });
+        }
+
+        Ok(typed_enums)
+    }
+
+    /// Resolve a type annotation in an enum variant field context.
+    ///
+    /// Similar to `resolve_type_annotation` for structs, but produces
+    /// enum-specific error messages.
+    fn resolve_enum_field_type(
+        &self,
+        annotation: &TypeAnnotation,
+        enum_name: &str,
+        variant_name: &str,
+        field_name: &str,
+        span: Span,
+    ) -> Result<FluxType> {
+        match annotation {
+            TypeAnnotation::F64 => Ok(FluxType::Float),
+            TypeAnnotation::Int => Ok(FluxType::Int),
+            TypeAnnotation::Bool => Ok(FluxType::Bool),
+            TypeAnnotation::Str => Ok(FluxType::String),
+            TypeAnnotation::Named(name) => {
+                // Check if it's a struct type
+                if self.struct_registry.contains_key(name) {
+                    Ok(FluxType::Struct(name.clone()))
+                } else if self.env.has_enum(name) {
+                    // Check if it's an enum type
+                    Ok(FluxType::Enum(name.clone()))
+                } else {
+                    let msg = if let Some(import_path) = Self::suggest_import_for_type(name) {
+                        format!(
+                            "type '{}' is not defined. Did you mean 'from {} import {{{}}}'?",
+                            name, import_path, name
+                        )
+                    } else {
+                        format!(
+                            "unknown type '{}' in enum '{}' variant '{}' field '{}'",
+                            name, enum_name, variant_name, field_name
+                        )
+                    };
+                    Err(self.type_error(span, msg))
+                }
+            }
+            TypeAnnotation::FixedArray(elem_type, size) => {
+                if *size == 0 {
+                    return Err(self.type_error(
+                        span,
+                        "array size must be positive, got 0".to_string(),
+                    ));
+                }
+                let resolved_elem = self.resolve_enum_field_type(
+                    elem_type,
+                    enum_name,
+                    variant_name,
+                    field_name,
+                    span,
+                )?;
+                Ok(FluxType::FixedArray(Box::new(resolved_elem), *size))
+            }
+            TypeAnnotation::BitInt(_) => Ok(FluxType::Int),
+            TypeAnnotation::Generic(name, type_args) => {
+                // Generic types like Vec[T], HashMap[K, V]
+                match name.as_str() {
+                    "Vec" | "HashMap" => {
+                        let resolved_args: Result<Vec<_>> = type_args
+                            .iter()
+                            .map(|arg| {
+                                self.resolve_enum_field_type(
+                                    arg, enum_name, variant_name, field_name, span,
+                                )
+                            })
+                            .collect();
+                        Ok(FluxType::Generic(name.clone(), resolved_args?))
+                    }
+                    _ => Ok(FluxType::Generic(name.clone(), vec![])),
+                }
+            }
+        }
+    }
+
+    /// Type-check impl blocks, registering methods and producing TypedImplBlock nodes.
+    ///
+    /// For each impl block:
+    /// 1. Verify the target struct exists in the type environment
+    /// 2. For each method, resolve parameter types and return type
+    /// 3. Detect duplicate method names on the same struct
+    /// 4. Typecheck method bodies with `self` bound to the struct type
+    /// 5. Register each method in the environment for later method call resolution
+    fn register_impl_blocks(&mut self, impl_blocks: &[ImplBlock]) -> Result<Vec<TypedImplBlock>> {
+        let mut typed_impl_blocks = Vec::new();
+
+        for impl_block in impl_blocks {
+            // Skip trait impls for now (Phase 3) — only process inherent impls
+            if impl_block.trait_name.is_some() {
+                continue;
+            }
+
+            // Verify the target struct exists
+            let target_type = &impl_block.target_type;
+            if !self.struct_registry.contains_key(target_type) {
+                return Err(self.type_error(
+                    impl_block.span,
+                    format!(
+                        "Cannot implement methods for unknown type '{}' at {:?}",
+                        target_type, impl_block.span
+                    ),
+                ));
+            }
+
+            let mut typed_methods = Vec::new();
+
+            for method in &impl_block.methods {
+                // Determine if the method has a `self` parameter
+                let has_self = method
+                    .params
+                    .first()
+                    .map_or(false, |p| p.name == "self");
+
+                let is_static = !has_self;
+
+                // Get the non-self parameters for type resolution
+                let non_self_params: Vec<&FnParam> = if has_self {
+                    method.params.iter().skip(1).collect()
+                } else {
+                    method.params.iter().collect()
+                };
+
+                // Resolve parameter types (excluding self)
+                let mut param_types = Vec::new();
+                for param in &non_self_params {
+                    let param_ty = if let Some(ref annotation) = param.param_type {
+                        self.resolve_fn_type_annotation(
+                            annotation,
+                            &method.name,
+                            &format!("parameter '{}'", param.name),
+                            param.span,
+                        )?
+                    } else {
+                        FluxType::Float
+                    };
+                    param_types.push(param_ty);
+                }
+
+                // Resolve declared return type
+                let declared_return_type = if let Some(ref annotation) = method.return_type {
+                    Some(self.resolve_fn_type_annotation(
+                        annotation,
+                        &method.name,
+                        "return type",
+                        method.span,
+                    )?)
+                } else {
+                    None
+                };
+
+                // Check for duplicate method name on this struct
+                if self.env.get_method(target_type, &method.name).is_some() {
+                    return Err(self.type_error(
+                        method.span,
+                        format!(
+                            "Method '{}' already defined for type '{}' at {:?}",
+                            method.name, target_type, method.span
+                        ),
+                    ));
+                }
+
+                // Typecheck the method body in a new scope
+                self.env.push_scope();
+                self.in_function_body = true;
+
+                // Store the declared return type for return-statement validation
+                let prev_fn_return_type = self.current_fn_return_type.take();
+                self.current_fn_return_type = declared_return_type.clone();
+
+                // Bind `self` as the struct type if this is an instance method
+                if has_self {
+                    self.env.insert("self".to_string(), FluxType::Struct(target_type.clone()));
+                }
+
+                // Bind non-self parameters
+                let mut all_param_names = Vec::new();
+                for (param, ty) in non_self_params.iter().zip(param_types.iter()) {
+                    self.env.insert(param.name.clone(), ty.clone());
+                    all_param_names.push(param.name.clone());
+                }
+
+                // Inject bar context bindings (same as function bodies)
+                for (name, ty) in builtins::market_data_bindings() {
+                    self.env.insert(name.to_string(), ty);
+                }
+                for (name, ty) in builtins::signal_function_bindings() {
+                    self.env.insert(name.to_string(), ty);
+                }
+                for (name, ty) in builtins::math_function_bindings() {
+                    self.env.insert(name.to_string(), ty);
+                }
+
+                // Check body statements
+                let mut typed_body = Vec::new();
+                for stmt in &method.body {
+                    typed_body.push(self.check_stmt(stmt.clone())?);
+                }
+
+                // Infer return type
+                let return_type = if let Some(ref declared) = declared_return_type {
+                    declared.clone()
+                } else {
+                    self.infer_fn_return_type(&typed_body)
+                };
+
+                self.current_fn_return_type = prev_fn_return_type;
+                self.in_function_body = false;
+                self.env.pop_scope();
+
+                // Build the full param name list (including "self" for TypedFnDef)
+                let full_param_names: Vec<String> = if has_self {
+                    std::iter::once("self".to_string())
+                        .chain(all_param_names)
+                        .collect()
+                } else {
+                    all_param_names
+                };
+
+                // Build the full param types list (including struct type for self)
+                let full_param_types: Vec<FluxType> = if has_self {
+                    std::iter::once(FluxType::Struct(target_type.clone()))
+                        .chain(param_types.clone())
+                        .collect()
+                } else {
+                    param_types.clone()
+                };
+
+                // Register the method in the type environment
+                let method_info = MethodInfo {
+                    name: method.name.clone(),
+                    param_types: param_types.clone(),
+                    return_type: return_type.clone(),
+                    is_static,
+                    body: typed_body.clone(),
+                    span: method.span,
+                };
+                self.env.register_method(target_type, method_info)
+                    .map_err(|()| {
+                        self.type_error(
+                            method.span,
+                            format!(
+                                "Method '{}' already defined for type '{}'",
+                                method.name, target_type
+                            ),
+                        )
+                    })?;
+
+                typed_methods.push(TypedFnDef {
+                    name: method.name.clone(),
+                    params: full_param_names,
+                    param_types: full_param_types,
+                    body: typed_body,
+                    return_type,
+                    span: method.span,
+                });
+            }
+
+            typed_impl_blocks.push(TypedImplBlock {
+                trait_name: None,
+                target_type: target_type.clone(),
+                methods: typed_methods,
+                span: impl_block.span,
+            });
+        }
+
+        Ok(typed_impl_blocks)
+    }
+
     /// Pre-scan the strategy's state block to collect state variable names.
     ///
     /// This is called before checking function bodies so that we can produce
@@ -1702,19 +2081,13 @@ impl TypeChecker {
                 struct_name,
                 fields,
             } => self.check_struct_literal(&struct_name, fields, span),
-            // EnumConstruction and Match will be implemented in Phase 1B (tasks 2.2 and 2.3)
-            // For now, return a placeholder error
-            ExprKind::EnumConstruction { .. } => {
-                Err(self.type_error(
-                    span,
-                    "enum construction not yet supported (coming in Phase 1B)".to_string(),
-                ))
-            }
-            ExprKind::Match(_) => {
-                Err(self.type_error(
-                    span,
-                    "match expressions not yet supported (coming in Phase 1B)".to_string(),
-                ))
+            ExprKind::EnumConstruction {
+                enum_name,
+                variant_name,
+                args,
+            } => self.check_enum_construction(&enum_name, &variant_name, args, span),
+            ExprKind::Match(match_expr) => {
+                self.check_match_expr(match_expr, span)
             }
         }
     }
@@ -2168,6 +2541,68 @@ impl TypeChecker {
                     )),
                 }
             }
+            FluxType::Struct(struct_name) => {
+                // Look up methods registered via impl blocks
+                // Clone the method info to avoid borrow conflicts with check_expr
+                let method_info_opt = self.env.get_method(struct_name, method).cloned();
+                if let Some(method_info) = method_info_opt {
+                    let expected_params = method_info.param_types;
+                    let return_type = method_info.return_type;
+                    let is_static = method_info.is_static;
+
+                    if is_static {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "Method '{}' on type '{}' is static and cannot be called on an instance",
+                                method, struct_name
+                            ),
+                        ));
+                    }
+
+                    // Check argument count
+                    if args.len() != expected_params.len() {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "Method '{}' on type '{}' expects {} arguments, found {}",
+                                method, struct_name, expected_params.len(), args.len()
+                            ),
+                        ));
+                    }
+
+                    // Typecheck arguments
+                    let mut typed_args = Vec::new();
+                    for (arg, expected_ty) in args.into_iter().zip(expected_params.iter()) {
+                        let typed_arg = self.check_expr(arg)?;
+                        if !typed_arg.resolved_type.is_assignable_to(expected_ty) {
+                            return Err(self.type_error(
+                                typed_arg.span,
+                                format!(
+                                    "Method '{}' argument expects {}, found {}",
+                                    method, expected_ty, typed_arg.resolved_type
+                                ),
+                            ));
+                        }
+                        typed_args.push(typed_arg);
+                    }
+
+                    Ok(TypedExpr {
+                        kind: TypedExprKind::MethodCall {
+                            receiver: Box::new(typed_receiver),
+                            method: method.to_string(),
+                            args: typed_args,
+                        },
+                        resolved_type: return_type,
+                        span,
+                    })
+                } else {
+                    Err(self.type_error(
+                        span,
+                        format!("No method '{}' on type '{}'", method, struct_name),
+                    ))
+                }
+            }
             _ => Err(self.type_error(
                 span,
                 format!("type {} does not have method '{}'", receiver_ty, method),
@@ -2472,6 +2907,320 @@ impl TypeChecker {
                 fields: typed_fields,
             },
             resolved_type: FluxType::Struct(struct_name.to_string()),
+            span,
+        })
+    }
+
+    /// Typecheck a match expression.
+    ///
+    /// Validates:
+    /// - The scrutinee type is an enum
+    /// - All patterns reference valid variants of the scrutinee's enum type
+    /// - Binding counts match variant field counts
+    /// - Pattern-bound variables are introduced with correct types into arm body scopes
+    /// - All arms produce compatible result types
+    ///
+    /// Note: Exhaustiveness checking validates all variants are covered or wildcard present.
+    /// Requirements: 3.5, 3.6, 3.7, 3.8, 13.3
+    fn check_match_expr(
+        &mut self,
+        match_expr: MatchExpr,
+        span: Span,
+    ) -> Result<TypedExpr> {
+        use super::exhaustiveness::{check_exhaustiveness, ExhaustivenessResult};
+
+        // 1. Typecheck the scrutinee expression
+        let typed_scrutinee = self.check_expr(*match_expr.scrutinee)?;
+
+        // 2. Verify scrutinee type is an enum
+        let enum_name = match &typed_scrutinee.resolved_type {
+            FluxType::Enum(name) => name.clone(),
+            other => {
+                return Err(self.type_error(
+                    typed_scrutinee.span,
+                    format!("match scrutinee must be an enum type, got {}", other),
+                ));
+            }
+        };
+
+        // 3. Look up the enum info
+        let enum_info = match self.env.get_enum(&enum_name) {
+            Some(info) => info.clone(),
+            None => {
+                return Err(self.type_error(
+                    span,
+                    format!("unknown enum type '{}' in match expression", enum_name),
+                ));
+            }
+        };
+
+        // 4. Collect patterns for exhaustiveness check
+        let patterns: Vec<_> = match_expr.arms.iter().map(|a| a.pattern.clone()).collect();
+
+        // 5. Typecheck each arm
+        let mut typed_arms = Vec::new();
+        let mut result_type: Option<FluxType> = None;
+
+        for arm in match_expr.arms {
+            let (typed_pattern, arm_bindings) = self.check_match_pattern(
+                &arm.pattern,
+                &enum_name,
+                &enum_info,
+            )?;
+
+            // Push a new scope for the arm body and add pattern bindings
+            self.env.push_scope();
+            for (binding_name, binding_type) in &arm_bindings {
+                self.env.insert(binding_name.clone(), binding_type.clone());
+            }
+
+            // Typecheck arm body statements
+            let mut typed_body = Vec::new();
+            for stmt in arm.body {
+                typed_body.push(self.check_stmt(stmt)?);
+            }
+
+            self.env.pop_scope();
+
+            // Infer result type from the arm body (last expression or Null)
+            let arm_result_type = self.infer_arm_result_type(&typed_body);
+
+            // Unify arm result types
+            match &result_type {
+                None => {
+                    result_type = Some(arm_result_type);
+                }
+                Some(existing) => {
+                    // Allow compatible types (e.g., Int/Float coercion)
+                    if !arm_result_type.is_assignable_to(existing)
+                        && !existing.is_assignable_to(&arm_result_type)
+                    {
+                        // If types differ but aren't compatible, use Null as the common type
+                        result_type = Some(FluxType::Null);
+                    }
+                }
+            }
+
+            typed_arms.push(TypedMatchArm {
+                pattern: typed_pattern,
+                body: typed_body,
+                span: arm.span,
+            });
+        }
+
+        // 6. Exhaustiveness check
+        match check_exhaustiveness(&enum_info, &patterns) {
+            ExhaustivenessResult::Exhaustive => {}
+            ExhaustivenessResult::NonExhaustive { missing_variants } => {
+                let variants_list = missing_variants.join(", ");
+                return Err(self.type_error(
+                    span,
+                    format!(
+                        "non-exhaustive match on '{}': missing variant{} {}",
+                        enum_name,
+                        if missing_variants.len() == 1 { "" } else { "s" },
+                        variants_list,
+                    ),
+                ));
+            }
+        }
+
+        let final_result_type = result_type.unwrap_or(FluxType::Null);
+
+        Ok(TypedExpr {
+            kind: TypedExprKind::Match(TypedMatchExpr {
+                scrutinee: Box::new(typed_scrutinee),
+                arms: typed_arms,
+                result_type: final_result_type.clone(),
+                span,
+            }),
+            resolved_type: final_result_type,
+            span,
+        })
+    }
+
+    /// Typecheck a match pattern and return the typed pattern with any bindings introduced.
+    fn check_match_pattern(
+        &self,
+        pattern: &Pattern,
+        enum_name: &str,
+        enum_info: &EnumInfo,
+    ) -> Result<(TypedPattern, Vec<(String, FluxType)>)> {
+        match pattern {
+            Pattern::Variant {
+                enum_name: pat_enum_name,
+                variant_name,
+                bindings,
+                span,
+            } => {
+                // Verify the enum name matches the scrutinee type
+                if pat_enum_name != enum_name {
+                    return Err(self.type_error(
+                        *span,
+                        format!(
+                            "pattern references enum '{}' but scrutinee is of type '{}'",
+                            pat_enum_name, enum_name
+                        ),
+                    ));
+                }
+
+                // Look up the variant
+                let variant_info = match enum_info.find_variant(variant_name) {
+                    Some(info) => info,
+                    None => {
+                        return Err(self.type_error(
+                            *span,
+                            format!(
+                                "enum '{}' has no variant '{}'",
+                                enum_name, variant_name
+                            ),
+                        ));
+                    }
+                };
+
+                // Verify binding count matches field count
+                let expected_count = variant_info.field_count();
+                let actual_count = bindings.len();
+                if actual_count != expected_count {
+                    return Err(self.type_error(
+                        *span,
+                        format!(
+                            "variant '{}.{}' has {} field{}, but pattern binds {}",
+                            enum_name,
+                            variant_name,
+                            expected_count,
+                            if expected_count == 1 { "" } else { "s" },
+                            actual_count
+                        ),
+                    ));
+                }
+
+                // Build typed bindings: pair each binding name with the corresponding field type
+                let typed_bindings: Vec<(String, FluxType)> = bindings
+                    .iter()
+                    .zip(variant_info.fields.iter())
+                    .map(|(name, (_, field_type))| (name.clone(), field_type.clone()))
+                    .collect();
+
+                let typed_pattern = TypedPattern::Variant {
+                    enum_name: enum_name.to_string(),
+                    variant_name: variant_name.clone(),
+                    bindings: typed_bindings.clone(),
+                    span: *span,
+                };
+
+                Ok((typed_pattern, typed_bindings))
+            }
+            Pattern::Wildcard { span } => {
+                let typed_pattern = TypedPattern::Wildcard { span: *span };
+                Ok((typed_pattern, Vec::new()))
+            }
+        }
+    }
+
+    /// Infer the result type of a match arm body.
+    ///
+    /// If the body ends with an expression statement, use that expression's type.
+    /// Otherwise, the arm produces Null.
+    fn infer_arm_result_type(&self, body: &[TypedStmt]) -> FluxType {
+        if let Some(last_stmt) = body.last() {
+            match last_stmt {
+                TypedStmt::Expr(expr_stmt) => expr_stmt.expr.resolved_type.clone(),
+                TypedStmt::Return(ret) => {
+                    ret.value.as_ref().map_or(FluxType::Null, |v| v.resolved_type.clone())
+                }
+                _ => FluxType::Null,
+            }
+        } else {
+            FluxType::Null
+        }
+    }
+
+    /// Typecheck an enum construction expression.
+    ///
+    /// Validates:
+    /// 1. The enum name exists in the type environment
+    /// 2. The variant name exists within that enum
+    /// 3. The number of arguments matches the variant's field count
+    /// 4. Each argument type matches the corresponding field type
+    ///
+    /// Requirements: 2.3, 2.4, 2.5
+    fn check_enum_construction(
+        &mut self,
+        enum_name: &str,
+        variant_name: &str,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<TypedExpr> {
+        // 1. Look up the enum in the type environment
+        let enum_info = match self.env.get_enum(enum_name) {
+            Some(info) => info.clone(),
+            None => {
+                return Err(self.type_error(
+                    span,
+                    format!("unknown enum type '{}'", enum_name),
+                ));
+            }
+        };
+
+        // 2. Look up the variant within the enum
+        let variant_info = match enum_info.find_variant(variant_name) {
+            Some(info) => info.clone(),
+            None => {
+                return Err(self.type_error(
+                    span,
+                    format!(
+                        "enum '{}' has no variant '{}'",
+                        enum_name, variant_name
+                    ),
+                ));
+            }
+        };
+
+        // 3. Check argument count matches field count
+        let expected_count = variant_info.field_count();
+        let actual_count = args.len();
+        if actual_count != expected_count {
+            return Err(self.type_error(
+                span,
+                format!(
+                    "variant '{}.{}' expects {} argument{}, got {}",
+                    enum_name,
+                    variant_name,
+                    expected_count,
+                    if expected_count == 1 { "" } else { "s" },
+                    actual_count
+                ),
+            ));
+        }
+
+        // 4. Typecheck each argument and verify it matches the field type
+        let mut typed_args = Vec::new();
+        for (i, arg_expr) in args.into_iter().enumerate() {
+            let typed_arg = self.check_expr(arg_expr)?;
+            let (field_name, expected_type) = &variant_info.fields[i];
+
+            if !typed_arg.resolved_type.is_assignable_to(expected_type) {
+                return Err(self.type_error(
+                    span,
+                    format!(
+                        "field '{}' of '{}.{}' expects {}, got {}",
+                        field_name, enum_name, variant_name, expected_type, typed_arg.resolved_type
+                    ),
+                ));
+            }
+
+            typed_args.push(typed_arg);
+        }
+
+        // Return the enum type
+        Ok(TypedExpr {
+            kind: TypedExprKind::EnumConstruction {
+                enum_name: enum_name.to_string(),
+                variant_name: variant_name.to_string(),
+                args: typed_args,
+            },
+            resolved_type: FluxType::Enum(enum_name.to_string()),
             span,
         })
     }
@@ -3200,6 +3949,7 @@ mod tests {
             structs: vec![], enums: vec![],
             imports,
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: Strategy {
@@ -3615,6 +4365,7 @@ mod tests {
             structs: vec![], enums: vec![],
             imports: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: Some(connector),
             strategy: Strategy {
@@ -4255,5 +5006,158 @@ strategy Test {
         let err = tc.register_structs(&structs).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("at byte"), "Error should contain 'at byte', got: {}", msg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Enum construction typechecking
+    // -----------------------------------------------------------------------
+
+    fn register_test_enum(tc: &mut TypeChecker) {
+        use crate::typeck::enum_info::{EnumInfo, VariantInfo};
+        let variants = vec![
+            VariantInfo::unit("Market".to_string(), Span::new(10, 16)),
+            VariantInfo::with_fields(
+                "Limit".to_string(),
+                vec![("price".to_string(), FluxType::Float)],
+                Span::new(20, 40),
+            ),
+            VariantInfo::with_fields(
+                "StopLimit".to_string(),
+                vec![
+                    ("stop".to_string(), FluxType::Float),
+                    ("limit".to_string(), FluxType::Float),
+                ],
+                Span::new(45, 80),
+            ),
+        ];
+        let enum_info = EnumInfo::new("OrderType".to_string(), variants, Span::new(0, 100));
+        tc.env.register_enum(enum_info).unwrap();
+    }
+
+    #[test]
+    fn test_enum_construction_unit_variant() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "Market".to_string(),
+            args: vec![],
+        });
+        let result = tc.check_expr(expr).unwrap();
+        assert_eq!(result.resolved_type, FluxType::Enum("OrderType".to_string()));
+    }
+
+    #[test]
+    fn test_enum_construction_data_variant_single_field() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "Limit".to_string(),
+            args: vec![make_expr(ExprKind::FloatLiteral(150.0))],
+        });
+        let result = tc.check_expr(expr).unwrap();
+        assert_eq!(result.resolved_type, FluxType::Enum("OrderType".to_string()));
+    }
+
+    #[test]
+    fn test_enum_construction_data_variant_multiple_fields() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "StopLimit".to_string(),
+            args: vec![
+                make_expr(ExprKind::FloatLiteral(100.0)),
+                make_expr(ExprKind::FloatLiteral(105.0)),
+            ],
+        });
+        let result = tc.check_expr(expr).unwrap();
+        assert_eq!(result.resolved_type, FluxType::Enum("OrderType".to_string()));
+    }
+
+    #[test]
+    fn test_enum_construction_int_coerced_to_float() {
+        // Int should be assignable to Float fields
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "Limit".to_string(),
+            args: vec![make_expr(ExprKind::IntLiteral(150))],
+        });
+        let result = tc.check_expr(expr).unwrap();
+        assert_eq!(result.resolved_type, FluxType::Enum("OrderType".to_string()));
+    }
+
+    #[test]
+    fn test_enum_construction_unknown_enum() {
+        let mut tc = TypeChecker::new();
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "NonExistent".to_string(),
+            variant_name: "Foo".to_string(),
+            args: vec![],
+        });
+        let err = tc.check_expr(expr).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown enum type 'NonExistent'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_enum_construction_unknown_variant() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "FillOrKill".to_string(),
+            args: vec![],
+        });
+        let err = tc.check_expr(expr).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("has no variant 'FillOrKill'"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_enum_construction_too_many_args() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "Market".to_string(),
+            args: vec![make_expr(ExprKind::FloatLiteral(1.0))],
+        });
+        let err = tc.check_expr(expr).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expects 0 arguments, got 1"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_enum_construction_too_few_args() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "StopLimit".to_string(),
+            args: vec![make_expr(ExprKind::FloatLiteral(100.0))],
+        });
+        let err = tc.check_expr(expr).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("expects 2 arguments, got 1"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_enum_construction_type_mismatch() {
+        let mut tc = TypeChecker::new();
+        register_test_enum(&mut tc);
+        let expr = make_expr(ExprKind::EnumConstruction {
+            enum_name: "OrderType".to_string(),
+            variant_name: "Limit".to_string(),
+            args: vec![make_expr(ExprKind::StringLiteral("bad".to_string()))],
+        });
+        let err = tc.check_expr(expr).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("field 'price'"), "got: {}", msg);
+        assert!(msg.contains("expects Float"), "got: {}", msg);
+        assert!(msg.contains("got Str"), "got: {}", msg);
     }
 }

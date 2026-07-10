@@ -338,6 +338,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports,
                 functions: vec![],
+                impl_blocks: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: AstStrategy {
@@ -638,6 +639,7 @@ mod tests {
                 structs: vec![], enums: vec![],
                 imports: vec![],
                 functions: vec![fn_def.clone()],
+                impl_blocks: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: AstStrategy {

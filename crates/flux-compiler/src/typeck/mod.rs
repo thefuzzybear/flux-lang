@@ -10,12 +10,16 @@ mod env;
 mod checker;
 mod builtins;
 pub(crate) mod call_graph;
+pub(crate) mod exhaustiveness;
 
 #[cfg(test)]
 mod tests_property;
 
 #[cfg(test)]
 mod tests_data_block_validation_property;
+
+#[cfg(test)]
+mod tests_type_system_property;
 
 pub use types::FluxType;
 pub use typed_ast::*;
@@ -219,6 +223,7 @@ mod integration_tests {
             imports: vec![import],
             enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy,
@@ -419,6 +424,7 @@ mod integration_tests {
             imports: vec![],
             enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy,

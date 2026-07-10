@@ -227,7 +227,9 @@ mod tests {
                     span: Span::new(0, 20),
                 }],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -384,7 +386,9 @@ mod tests {
         TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -570,7 +574,9 @@ mod tests {
         TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -633,7 +639,9 @@ mod tests {
         TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {
@@ -698,7 +706,9 @@ mod tests {
             let program = TypedProgram {
                 imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -810,7 +820,9 @@ mod tests {
             let program = TypedProgram {
                 imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -862,7 +874,9 @@ mod tests {
             let program = TypedProgram {
                 imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions: vec![],
+            impl_blocks: vec![],
                 data_block: None,
                 connector_block: None,
                 strategy: TypedStrategy {
@@ -1154,7 +1168,9 @@ mod tests {
         TypedProgram {
             imports: vec![],
             structs: vec![],
+            enums: vec![],
             functions,
+            impl_blocks: vec![],
             data_block: None,
             connector_block: None,
             strategy: TypedStrategy {

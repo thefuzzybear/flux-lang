@@ -11,6 +11,7 @@ pub struct Program {
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
     pub functions: Vec<FnDef>,
+    pub impl_blocks: Vec<ImplBlock>,
     pub data_block: Option<DataBlock>,
     pub connector_block: Option<ConnectorBlock>,
     pub strategy: Strategy,
@@ -427,5 +428,20 @@ pub enum Pattern {
 pub struct TypeParam {
     pub name: String,
     pub bound: Option<String>,
+    pub span: Span,
+}
+
+/// An impl block: `impl StructName { fn method(self, ...) { ... } }`
+/// or `impl TraitName for StructName { ... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplBlock {
+    /// If present, this is a trait impl (e.g., `impl TraitName for StructName`)
+    pub trait_name: Option<String>,
+    /// The target struct type name
+    pub target_type: String,
+    /// Type parameters (for future generic impls)
+    pub type_params: Vec<TypeParam>,
+    /// Methods defined in this impl block
+    pub methods: Vec<FnDef>,
     pub span: Span,
 }

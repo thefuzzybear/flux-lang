@@ -55,6 +55,8 @@ pub(crate) enum LogosToken {
     Match,
     #[token("self")]
     SelfKw,
+    #[token("impl")]
+    Impl,
 
     // Identifiers
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]

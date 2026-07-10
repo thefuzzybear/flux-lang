@@ -591,6 +591,7 @@ fn value_type_name(v: &Value) -> &'static str {
         Value::VecFloat(_) => "VecFloat",
         Value::MatFloat { .. } => "MatFloat",
         Value::Struct { .. } => "Struct",
+        Value::Enum { .. } => "Enum",
     }
 }
 

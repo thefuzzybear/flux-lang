@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::enum_info::EnumInfo;
+use super::enum_info::{EnumInfo, MethodInfo};
 use super::types::FluxType;
 
 /// A scoped type environment for identifier resolution.
@@ -11,6 +11,8 @@ pub(crate) struct TypeEnvironment {
     scopes: Vec<HashMap<String, FluxType>>,
     /// Registry of enum definitions: enum name → enum info
     enums: HashMap<String, EnumInfo>,
+    /// Registry of impl block methods: type name → method name → method info
+    impl_methods: HashMap<String, HashMap<String, MethodInfo>>,
 }
 
 impl TypeEnvironment {
@@ -19,6 +21,7 @@ impl TypeEnvironment {
         Self {
             scopes: vec![HashMap::new()], // Start with global scope
             enums: HashMap::new(),
+            impl_methods: HashMap::new(),
         }
     }
 
@@ -78,6 +81,29 @@ impl TypeEnvironment {
     /// Returns an iterator over all registered enum names.
     pub fn enum_names(&self) -> impl Iterator<Item = &str> {
         self.enums.keys().map(|s| s.as_str())
+    }
+
+    // --- Impl method registry ---
+
+    /// Register a method for a type. Returns `Err(())` if a method with that name
+    /// already exists on the given type.
+    pub fn register_method(&mut self, type_name: &str, info: MethodInfo) -> Result<(), ()> {
+        let methods = self.impl_methods.entry(type_name.to_string()).or_default();
+        if methods.contains_key(&info.name) {
+            return Err(());
+        }
+        methods.insert(info.name.clone(), info);
+        Ok(())
+    }
+
+    /// Look up a method on a type by name.
+    pub fn get_method(&self, type_name: &str, method_name: &str) -> Option<&MethodInfo> {
+        self.impl_methods.get(type_name)?.get(method_name)
+    }
+
+    /// Check if a type has any registered impl methods.
+    pub fn has_methods(&self, type_name: &str) -> bool {
+        self.impl_methods.contains_key(type_name)
     }
 }
 
