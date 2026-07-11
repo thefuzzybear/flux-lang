@@ -1807,12 +1807,37 @@ impl<'a> CodeEmitter<'a> {
     }
 
     /// Emit a method call: `receiver.method(args...)`.
+    ///
+    /// Handles HashMap specially:
+    /// - `HashMap.new()` → `std::collections::HashMap::new()`
+    /// - `map.insert(k, v)` → `map.insert(k, v)` (direct pass-through)
+    /// - `map.get(k)` → `map.get(&k).cloned().unwrap()`
+    /// - `map.contains_key(k)` → `map.contains_key(&k)`
+    /// - `map.remove(k)` → `map.remove(&k)`
     fn emit_method_call(
         &mut self,
         receiver: &TypedExpr,
         method: &str,
         args: &[TypedExpr],
     ) -> Result<()> {
+        // Handle HashMap.new() static constructor
+        if method == "new" {
+            if let TypedExprKind::Ident(ref name) = receiver.kind {
+                if name == "HashMap" {
+                    self.output.push_str("std::collections::HashMap::new()");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Handle method calls on HashMap receivers
+        if let FluxType::Generic(ref type_name, _) = receiver.resolved_type {
+            if type_name == "HashMap" {
+                return self.emit_hashmap_method_call(receiver, method, args);
+            }
+        }
+
+        // Default: receiver.method(args...)
         self.emit_expr(receiver)?;
         self.output.push('.');
         self.output.push_str(method);
@@ -1824,6 +1849,71 @@ impl<'a> CodeEmitter<'a> {
             self.emit_expr(arg)?;
         }
         self.output.push(')');
+        Ok(())
+    }
+
+    /// Emit a method call on a HashMap receiver with Rust-appropriate semantics.
+    fn emit_hashmap_method_call(
+        &mut self,
+        receiver: &TypedExpr,
+        method: &str,
+        args: &[TypedExpr],
+    ) -> Result<()> {
+        match method {
+            "insert" => {
+                // Rust: map.insert(key, value) — takes owned key and value
+                self.emit_expr(receiver)?;
+                self.output.push_str(".insert(");
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.emit_expr(arg)?;
+                }
+                self.output.push(')');
+            }
+            "get" => {
+                // Rust: map.get(&key) returns Option<&V>, so we unwrap with cloned
+                self.emit_expr(receiver)?;
+                self.output.push_str(".get(&");
+                if let Some(arg) = args.first() {
+                    self.emit_expr(arg)?;
+                }
+                self.output.push_str(").cloned().unwrap()");
+            }
+            "contains_key" => {
+                // Rust: map.contains_key(&key)
+                self.emit_expr(receiver)?;
+                self.output.push_str(".contains_key(&");
+                if let Some(arg) = args.first() {
+                    self.emit_expr(arg)?;
+                }
+                self.output.push(')');
+            }
+            "remove" => {
+                // Rust: map.remove(&key)
+                self.emit_expr(receiver)?;
+                self.output.push_str(".remove(&");
+                if let Some(arg) = args.first() {
+                    self.emit_expr(arg)?;
+                }
+                self.output.push(')');
+            }
+            _ => {
+                // Fallback for unknown HashMap methods
+                self.emit_expr(receiver)?;
+                self.output.push('.');
+                self.output.push_str(method);
+                self.output.push('(');
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        self.output.push_str(", ");
+                    }
+                    self.emit_expr(arg)?;
+                }
+                self.output.push(')');
+            }
+        }
         Ok(())
     }
 
@@ -3864,5 +3954,485 @@ mod tests {
         assert!(output.contains("pub struct Tick_Hot {"), "hot sub-struct missing");
         assert!(!output.contains("Tick_Cold"), "should not emit cold split when no cold fields");
         assert!(output.contains("pub fn split_hot(&self) -> Tick_Hot"), "split_hot method missing");
+    }
+
+    // ===== Generics codegen tests =====
+
+    /// Verifies: struct Container[T] { ... } → struct Container<T> { ... }
+    #[test]
+    fn emit_generic_struct_single_param() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "Container".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![TypedStructField {
+                name: "value".to_string(),
+                resolved_type: FluxType::TypeParam("T".to_string()),
+                bit_width: None,
+                field_decorator_names: vec![],
+                span: Span::new(5, 10),
+            }],
+            decorators: vec![],
+            span: Span::new(0, 20),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("pub struct Container<T>"),
+            "Generic struct should use angle brackets. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("value: T"),
+            "Field type should use type param T. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: struct Pair[K, V] { ... } → struct Pair<K, V> { ... }
+    #[test]
+    fn emit_generic_struct_multiple_params() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "Pair".to_string(),
+            type_params: vec!["K".to_string(), "V".to_string()],
+            fields: vec![
+                TypedStructField {
+                    name: "key".to_string(),
+                    resolved_type: FluxType::TypeParam("K".to_string()),
+                    bit_width: None,
+                    field_decorator_names: vec![],
+                    span: Span::new(5, 10),
+                },
+                TypedStructField {
+                    name: "val".to_string(),
+                    resolved_type: FluxType::TypeParam("V".to_string()),
+                    bit_width: None,
+                    field_decorator_names: vec![],
+                    span: Span::new(10, 15),
+                },
+            ],
+            decorators: vec![],
+            span: Span::new(0, 20),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("pub struct Pair<K, V>"),
+            "Multi-param generic struct should emit <K, V>. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("key: K"),
+            "Field should use type param K. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("val: V"),
+            "Field should use type param V. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: fn push[T](v: Vec[T], item: T) → fn push<T>(v: Vec<T>, item: T)
+    #[test]
+    fn emit_generic_function_no_bounds() {
+        let mut prog = minimal_program();
+        prog.functions = vec![TypedFnDef {
+            name: "push".to_string(),
+            type_params: vec!["T".to_string()],
+            type_param_bounds: vec![None],
+            params: vec!["v".to_string(), "item".to_string()],
+            param_types: vec![
+                FluxType::Generic("Vec".to_string(), vec![FluxType::TypeParam("T".to_string())]),
+                FluxType::TypeParam("T".to_string()),
+            ],
+            body: vec![],
+            return_type: FluxType::Generic("Vec".to_string(), vec![FluxType::TypeParam("T".to_string())]),
+            span: Span::new(0, 30),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("fn push<T>("),
+            "Generic function should emit <T>. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("v: Vec<T>"),
+            "Param type should be Vec<T>. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("item: T"),
+            "Param type should be T. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("-> Vec<T>"),
+            "Return type should be Vec<T>. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: fn process[T: DataFeed](feed: T) → fn process<T: DataFeed>(feed: T)
+    #[test]
+    fn emit_generic_function_with_trait_bound() {
+        let mut prog = minimal_program();
+        prog.functions = vec![TypedFnDef {
+            name: "process".to_string(),
+            type_params: vec!["T".to_string()],
+            type_param_bounds: vec![Some("DataFeed".to_string())],
+            params: vec!["feed".to_string()],
+            param_types: vec![FluxType::TypeParam("T".to_string())],
+            body: vec![],
+            return_type: FluxType::Float,
+            span: Span::new(0, 30),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("fn process<T: DataFeed>("),
+            "Trait-bounded generic should emit <T: DataFeed>. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("feed: T"),
+            "Param should be typed as T. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: fn transform[A, B: Clone](a: A, b: B) → fn transform<A, B: Clone>(a: A, b: B)
+    #[test]
+    fn emit_generic_function_mixed_bounds() {
+        let mut prog = minimal_program();
+        prog.functions = vec![TypedFnDef {
+            name: "transform".to_string(),
+            type_params: vec!["A".to_string(), "B".to_string()],
+            type_param_bounds: vec![None, Some("Clone".to_string())],
+            params: vec!["a".to_string(), "b".to_string()],
+            param_types: vec![
+                FluxType::TypeParam("A".to_string()),
+                FluxType::TypeParam("B".to_string()),
+            ],
+            body: vec![],
+            return_type: FluxType::Void,
+            span: Span::new(0, 30),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("fn transform<A, B: Clone>("),
+            "Mixed bounds should emit <A, B: Clone>. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: impl block on a generic struct emits impl<T> Name<T> { ... }
+    #[test]
+    fn emit_impl_block_on_generic_struct() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "Stack".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![TypedStructField {
+                name: "items".to_string(),
+                resolved_type: FluxType::Generic("Vec".to_string(), vec![FluxType::TypeParam("T".to_string())]),
+                bit_width: None,
+                field_decorator_names: vec![],
+                span: Span::new(5, 10),
+            }],
+            decorators: vec![],
+            span: Span::new(0, 20),
+        }];
+        prog.impl_blocks = vec![TypedImplBlock {
+            trait_name: None,
+            target_type: "Stack".to_string(),
+            methods: vec![TypedFnDef {
+                name: "peek".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["self".to_string()],
+                param_types: vec![FluxType::Struct("Stack".to_string())],
+                body: vec![],
+                return_type: FluxType::TypeParam("T".to_string()),
+                span: Span::new(0, 20),
+            }],
+            span: Span::new(0, 50),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("impl<T> Stack<T>"),
+            "Impl block should emit generic params. Got: {}",
+            output
+        );
+        assert!(
+            output.contains("-> T"),
+            "Return type should be T. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: impl Trait for generic struct emits impl<T> Trait for Name<T>
+    #[test]
+    fn emit_trait_impl_on_generic_struct() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "MyVec".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![],
+            decorators: vec![],
+            span: Span::new(0, 20),
+        }];
+        prog.impl_blocks = vec![TypedImplBlock {
+            trait_name: Some("Iterable".to_string()),
+            target_type: "MyVec".to_string(),
+            methods: vec![TypedFnDef {
+                name: "next".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["self".to_string()],
+                param_types: vec![FluxType::Struct("MyVec".to_string())],
+                body: vec![],
+                return_type: FluxType::TypeParam("T".to_string()),
+                span: Span::new(0, 20),
+            }],
+            span: Span::new(0, 50),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("impl<T> Iterable for MyVec<T>"),
+            "Trait impl on generic struct should include type params. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: non-generic function has no angle brackets
+    #[test]
+    fn emit_non_generic_function_no_angle_brackets() {
+        let mut prog = minimal_program();
+        prog.functions = vec![TypedFnDef {
+            name: "add".to_string(),
+            type_params: vec![],
+            type_param_bounds: vec![],
+            params: vec!["x".to_string(), "y".to_string()],
+            param_types: vec![FluxType::Float, FluxType::Float],
+            body: vec![],
+            return_type: FluxType::Float,
+            span: Span::new(0, 20),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("fn add("),
+            "Non-generic function should not have angle brackets. Got: {}",
+            output
+        );
+        assert!(
+            !output.contains("fn add<"),
+            "Non-generic function should NOT have <. Got: {}",
+            output
+        );
+    }
+
+    /// Verifies: field typed as Generic("Vec", [Float]) emits Vec<f64>
+    #[test]
+    fn emit_struct_field_with_concrete_generic_type() {
+        let mut prog = minimal_program();
+        prog.structs = vec![TypedStructDef {
+            name: "Portfolio".to_string(),
+            type_params: vec![],
+            fields: vec![TypedStructField {
+                name: "positions".to_string(),
+                resolved_type: FluxType::Generic("Vec".to_string(), vec![FluxType::Float]),
+                bit_width: None,
+                field_decorator_names: vec![],
+                span: Span::new(5, 15),
+            }],
+            decorators: vec![],
+            span: Span::new(0, 30),
+        }];
+
+        let mut emitter = CodeEmitter::new(&prog);
+        let output = emitter.emit().unwrap();
+
+        assert!(
+            output.contains("positions: Vec<f64>"),
+            "Concrete generic field should emit Vec<f64>. Got: {}",
+            output
+        );
+    }
+
+    // ===== HashMap codegen tests =====
+
+    /// Verifies: HashMap.new() emits std::collections::HashMap::new()
+    #[test]
+    fn emit_hashmap_new() {
+        let prog = minimal_program();
+        let mut emitter = CodeEmitter::new(&prog);
+        let expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("HashMap".to_string()),
+                    FluxType::Void,
+                )),
+                method: "new".to_string(),
+                args: vec![],
+            },
+            FluxType::Generic(
+                "HashMap".to_string(),
+                vec![FluxType::String, FluxType::Float],
+            ),
+        );
+        emitter.emit_expr(&expr).unwrap();
+        assert_eq!(emitter.output, "std::collections::HashMap::new()");
+    }
+
+    /// Verifies: map.insert(k, v) emits map.insert(k, v)
+    #[test]
+    fn emit_hashmap_insert() {
+        let prog = minimal_program();
+        let mut emitter = CodeEmitter::new(&prog);
+        emitter.local_vars.insert("registry".to_string());
+        let expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("registry".to_string()),
+                    FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::String, FluxType::Float],
+                    ),
+                )),
+                method: "insert".to_string(),
+                args: vec![
+                    typed_expr(
+                        TypedExprKind::StringLiteral("AAPL".to_string()),
+                        FluxType::String,
+                    ),
+                    typed_expr(TypedExprKind::FloatLiteral(150.0), FluxType::Float),
+                ],
+            },
+            FluxType::Generic(
+                "HashMap".to_string(),
+                vec![FluxType::String, FluxType::Float],
+            ),
+        );
+        emitter.emit_expr(&expr).unwrap();
+        assert_eq!(
+            emitter.output,
+            "registry.insert(String::from(\"AAPL\"), 150.0)"
+        );
+    }
+
+    /// Verifies: map.get(k) emits map.get(&k).cloned().unwrap()
+    #[test]
+    fn emit_hashmap_get() {
+        let prog = minimal_program();
+        let mut emitter = CodeEmitter::new(&prog);
+        emitter.local_vars.insert("registry".to_string());
+        let expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("registry".to_string()),
+                    FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::String, FluxType::Float],
+                    ),
+                )),
+                method: "get".to_string(),
+                args: vec![typed_expr(
+                    TypedExprKind::StringLiteral("AAPL".to_string()),
+                    FluxType::String,
+                )],
+            },
+            FluxType::Float,
+        );
+        emitter.emit_expr(&expr).unwrap();
+        assert_eq!(
+            emitter.output,
+            "registry.get(&String::from(\"AAPL\")).cloned().unwrap()"
+        );
+    }
+
+    /// Verifies: map.contains_key(k) emits map.contains_key(&k)
+    #[test]
+    fn emit_hashmap_contains_key() {
+        let prog = minimal_program();
+        let mut emitter = CodeEmitter::new(&prog);
+        emitter.local_vars.insert("registry".to_string());
+        let expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("registry".to_string()),
+                    FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::String, FluxType::Float],
+                    ),
+                )),
+                method: "contains_key".to_string(),
+                args: vec![typed_expr(
+                    TypedExprKind::StringLiteral("AAPL".to_string()),
+                    FluxType::String,
+                )],
+            },
+            FluxType::Bool,
+        );
+        emitter.emit_expr(&expr).unwrap();
+        assert_eq!(
+            emitter.output,
+            "registry.contains_key(&String::from(\"AAPL\"))"
+        );
+    }
+
+    /// Verifies: map.remove(k) emits map.remove(&k)
+    #[test]
+    fn emit_hashmap_remove() {
+        let prog = minimal_program();
+        let mut emitter = CodeEmitter::new(&prog);
+        emitter.local_vars.insert("registry".to_string());
+        let expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("registry".to_string()),
+                    FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::String, FluxType::Float],
+                    ),
+                )),
+                method: "remove".to_string(),
+                args: vec![typed_expr(
+                    TypedExprKind::StringLiteral("AAPL".to_string()),
+                    FluxType::String,
+                )],
+            },
+            FluxType::Generic(
+                "HashMap".to_string(),
+                vec![FluxType::String, FluxType::Float],
+            ),
+        );
+        emitter.emit_expr(&expr).unwrap();
+        assert_eq!(
+            emitter.output,
+            "registry.remove(&String::from(\"AAPL\"))"
+        );
     }
 }

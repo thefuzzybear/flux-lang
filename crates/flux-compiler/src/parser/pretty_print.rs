@@ -171,7 +171,7 @@ fn format_struct_def(output: &mut String, struct_def: &StructDef) {
     format_type_params(output, &struct_def.type_params);
     output.push_str(" {\n");
 
-    for field in &struct_def.fields {
+    for (i, field) in struct_def.fields.iter().enumerate() {
         // Format field-level decorators
         for decorator in &field.field_decorators {
             write_indent(output, 1);
@@ -191,6 +191,9 @@ fn format_struct_def(output: &mut String, struct_def: &StructDef) {
         output.push_str(&field.name);
         output.push_str(": ");
         format_type_annotation(output, &field.field_type);
+        if i < struct_def.fields.len() - 1 {
+            output.push(',');
+        }
         output.push('\n');
     }
 
@@ -1365,7 +1368,7 @@ strategy Test {
         let output = format_program(&program);
         let expected = "\
 struct Quote {
-    bid: f64
+    bid: f64,
     ask: f64
 }
 

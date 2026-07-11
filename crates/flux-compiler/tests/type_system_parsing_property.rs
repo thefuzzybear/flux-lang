@@ -1144,7 +1144,7 @@ fn build_generic_struct_source(test: &GenericStructTest) -> String {
         "struct {}{} {{\n{}\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}\n",
         test.name,
         type_params_str,
-        field_strs.join("\n")
+        field_strs.join(",\n")
     )
 }
 
@@ -1396,5 +1396,231 @@ proptest! {
 
         // Compare the ASTs structurally (ignoring spans)
         assert_generic_fns_equal(&ast1, &ast2);
+    }
+}
+
+
+// ============================================================================
+// Property 18: Parser Error Span Reporting
+// ============================================================================
+
+/// Feature: flux-type-system, Property 18: Parser Error Span Reporting
+///
+/// **Validates: Requirements 13.1, 13.2**
+///
+/// For any malformed enum definition, match expression, impl block, or trait
+/// definition, the parser SHALL report an error that includes a source span
+/// pointing to or near the location of the syntax error.
+
+// ============================================================================
+// Generators for Malformed Source
+// ============================================================================
+
+/// Generate malformed enum definitions that should cause parse errors.
+fn arb_malformed_enum() -> impl Strategy<Value = String> {
+    let enum_name = arb_enum_name();
+    let variant_name = arb_variant_name();
+
+    (enum_name, variant_name).prop_flat_map(|(ename, vname)| {
+        prop_oneof![
+            // Missing opening brace after enum name
+            Just(format!(
+                "enum {} \n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                ename, vname
+            )),
+            // Missing closing brace
+            Just(format!(
+                "enum {} {{\n    {}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                ename, vname
+            )),
+            // Missing colon in field type annotation
+            Just(format!(
+                "enum {} {{\n    {}(price f64)\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                ename, vname
+            )),
+            // Missing closing paren for variant fields
+            Just(format!(
+                "enum {} {{\n    {}(price: f64\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                ename, vname
+            )),
+            // Number where variant name expected
+            Just(format!(
+                "enum {} {{\n    123\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                ename
+            )),
+        ]
+    })
+}
+
+/// Generate malformed match expressions that should cause parse errors.
+fn arb_malformed_match() -> impl Strategy<Value = String> {
+    let enum_name = arb_enum_name();
+    let variant_name = arb_variant_name();
+
+    (enum_name, variant_name).prop_flat_map(|(ename, vname)| {
+        prop_oneof![
+            // Missing opening brace after scrutinee
+            Just(format!(
+                "enum {} {{\n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        match value\n            {} => {{ x = 1.0 }}\n        }}\n    }}\n}}",
+                ename, vname, vname
+            )),
+            // Missing arrow (=>) in match arm
+            Just(format!(
+                "enum {} {{\n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        match value {{\n            {}.{} {{ x = 1.0 }}\n        }}\n    }}\n}}",
+                ename, vname, ename, vname
+            )),
+            // Missing body braces in match arm
+            Just(format!(
+                "enum {} {{\n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        match value {{\n            {}.{} => x = 1.0\n        }}\n    }}\n}}",
+                ename, vname, ename, vname
+            )),
+            // Missing closing brace for match
+            Just(format!(
+                "enum {} {{\n    {}\n}}\n\nstrategy Test {{\n    on bar {{\n        match value {{\n            {}.{} => {{ x = 1.0 }}\n    }}\n}}",
+                ename, vname, ename, vname
+            )),
+        ]
+    })
+}
+
+/// Generate malformed impl blocks that should cause parse errors.
+fn arb_malformed_impl() -> impl Strategy<Value = String> {
+    let struct_name = arb_struct_name();
+    let method_name = arb_method_name();
+
+    (struct_name, method_name).prop_flat_map(|(sname, mname)| {
+        prop_oneof![
+            // Missing struct name after impl
+            Just(format!(
+                "struct {} {{\n    val: f64\n}}\n\nimpl {{\n    fn {}(self) -> f64 {{\n        return self.val\n    }}\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                sname, mname
+            )),
+            // Missing opening brace for impl block
+            Just(format!(
+                "struct {} {{\n    val: f64\n}}\n\nimpl {}\n    fn {}(self) -> f64 {{\n        return self.val\n    }}\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                sname, sname, mname
+            )),
+            // Non-fn item inside impl block
+            Just(format!(
+                "struct {} {{\n    val: f64\n}}\n\nimpl {} {{\n    x = 1.0\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                sname, sname
+            )),
+            // Missing closing brace for impl block
+            Just(format!(
+                "struct {} {{\n    val: f64\n}}\n\nimpl {} {{\n    fn {}(self) -> f64 {{\n        return self.val\n    }}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                sname, sname, mname
+            )),
+        ]
+    })
+}
+
+/// Generate malformed trait definitions that should cause parse errors.
+fn arb_malformed_trait() -> impl Strategy<Value = String> {
+    let trait_name = arb_struct_name(); // same naming pattern (capitalized)
+    let method_name = arb_method_name();
+
+    (trait_name, method_name).prop_flat_map(|(tname, mname)| {
+        prop_oneof![
+            // Missing opening brace after trait name
+            Just(format!(
+                "trait {}\n    fn {}(self) -> f64\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                tname, mname
+            )),
+            // Missing closing brace
+            Just(format!(
+                "trait {} {{\n    fn {}(self) -> f64\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                tname, mname
+            )),
+            // Non-fn item inside trait body
+            Just(format!(
+                "trait {} {{\n    x = 1.0\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                tname
+            )),
+            // Number where trait name expected
+            Just(format!(
+                "trait 123 {{\n    fn {}(self) -> f64\n}}\n\nstrategy Test {{\n    on bar {{\n        x = 1.0\n    }}\n}}",
+                mname
+            )),
+        ]
+    })
+}
+
+/// Combined generator: pick one of the malformed constructs.
+fn arb_malformed_type_system_source() -> impl Strategy<Value = String> {
+    prop_oneof![
+        arb_malformed_enum(),
+        arb_malformed_match(),
+        arb_malformed_impl(),
+        arb_malformed_trait(),
+    ]
+}
+
+// ============================================================================
+// Property Tests for Parser Error Span Reporting
+// ============================================================================
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Property 18: Malformed type system constructs produce parser errors with span info.
+    #[test]
+    fn prop_parser_error_span_reporting(source in arb_malformed_type_system_source()) {
+        let tokens = lex_with_spans(&source);
+
+        // Skip if lexing itself fails — we want to test parser error spans
+        if let Ok(tokens) = tokens {
+            let result = parse(tokens);
+
+            // Should be an error (malformed source)
+            prop_assert!(
+                result.is_err(),
+                "Expected parse error for malformed source:\n{}", source
+            );
+
+            let err = result.unwrap_err();
+
+            // Should be CompileError::Parser variant with "at byte" span info
+            match &err {
+                flux_compiler::CompileError::Parser(msg) => {
+                    prop_assert!(
+                        msg.contains("at byte "),
+                        "Parser error should contain 'at byte ' span info, got: {}",
+                        msg
+                    );
+
+                    // Verify the byte offset is a valid number
+                    let after_byte = msg.split("at byte ").nth(1).unwrap_or("");
+                    let offset_str: String = after_byte
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
+                    prop_assert!(
+                        !offset_str.is_empty(),
+                        "Error should contain numeric byte offset after 'at byte ', got: {}",
+                        msg
+                    );
+
+                    // Parse the offset to confirm it's a valid usize
+                    let offset: usize = offset_str.parse().unwrap();
+
+                    // The byte offset should be within a reasonable range of the source length
+                    // (it points to a position in the token stream, which may be at or near source end)
+                    prop_assert!(
+                        offset <= source.len() + 1,
+                        "Byte offset {} exceeds source length {} for error: {}",
+                        offset,
+                        source.len(),
+                        msg
+                    );
+                }
+                other => {
+                    prop_assert!(
+                        false,
+                        "Expected CompileError::Parser, got: {:?}",
+                        other
+                    );
+                }
+            }
+        }
     }
 }

@@ -218,4 +218,55 @@ mod tests {
         let ty = FluxType::FixedArray(Box::new(FluxType::Float), 3);
         assert_eq!(map_type(&ty, 42).unwrap(), "[f64; 3]");
     }
+
+    // ===== Generic type mapping tests =====
+
+    #[test]
+    fn map_type_param_simple() {
+        // FluxType::TypeParam("T") → "T"
+        let ty = FluxType::TypeParam("T".to_string());
+        assert_eq!(map_type(&ty, 0).unwrap(), "T");
+    }
+
+    #[test]
+    fn map_type_param_multi_char() {
+        // FluxType::TypeParam("Item") → "Item"
+        let ty = FluxType::TypeParam("Item".to_string());
+        assert_eq!(map_type(&ty, 0).unwrap(), "Item");
+    }
+
+    #[test]
+    fn map_generic_single_param() {
+        // FluxType::Generic("Vec", [Float]) → "Vec<f64>"
+        let ty = FluxType::Generic("Vec".to_string(), vec![FluxType::Float]);
+        assert_eq!(map_type(&ty, 0).unwrap(), "Vec<f64>");
+    }
+
+    #[test]
+    fn map_generic_two_params() {
+        // FluxType::Generic("HashMap", [String, Float]) → "HashMap<String, f64>"
+        let ty = FluxType::Generic(
+            "HashMap".to_string(),
+            vec![FluxType::String, FluxType::Float],
+        );
+        assert_eq!(map_type(&ty, 0).unwrap(), "HashMap<String, f64>");
+    }
+
+    #[test]
+    fn map_generic_with_type_param() {
+        // FluxType::Generic("Vec", [TypeParam("T")]) → "Vec<T>"
+        let ty = FluxType::Generic(
+            "Vec".to_string(),
+            vec![FluxType::TypeParam("T".to_string())],
+        );
+        assert_eq!(map_type(&ty, 0).unwrap(), "Vec<T>");
+    }
+
+    #[test]
+    fn map_generic_nested() {
+        // FluxType::Generic("Vec", [Generic("Option", [Int])]) → "Vec<Option<i64>>"
+        let inner = FluxType::Generic("Option".to_string(), vec![FluxType::Int]);
+        let ty = FluxType::Generic("Vec".to_string(), vec![inner]);
+        assert_eq!(map_type(&ty, 0).unwrap(), "Vec<Option<i64>>");
+    }
 }

@@ -471,8 +471,8 @@ fn value_to_serialized(value: &Value) -> Option<SerializedValue> {
                 v.iter().map(|f| SerializedValue::Float(*f)).collect();
             Some(SerializedValue::List(serialized))
         }
-        // Signals, Null, MatFloat, Struct, and Enum are not persisted
-        Value::Null | Value::Signal(_) | Value::MatFloat { .. } | Value::Struct { .. } | Value::Enum { .. } => None,
+        // Signals, Null, MatFloat, Struct, Enum, and HashMap are not persisted
+        Value::Null | Value::Signal(_) | Value::MatFloat { .. } | Value::Struct { .. } | Value::Enum { .. } | Value::HashMap(_) => None,
     }
 }
 

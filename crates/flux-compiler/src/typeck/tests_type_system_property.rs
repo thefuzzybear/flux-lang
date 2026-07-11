@@ -1174,3 +1174,995 @@ mod trait_impl_completeness_tests {
         }
     }
 }
+
+// ============================================================================
+// Property 10: Trait Bound Satisfaction
+// ============================================================================
+
+#[cfg(test)]
+mod trait_bound_satisfaction_tests {
+    use crate::typeck::typed_ast::TypedProgram;
+    use proptest::prelude::*;
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    /// Lex → Parse → Typecheck a Flux source string. Returns the check result.
+    fn check_source(source: &str) -> crate::error::Result<TypedProgram> {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let tokens = lex_with_spans(source).unwrap_or_else(|e| {
+            panic!("Lexing failed for source:\n{}\nError: {}", source, e);
+        });
+        let program = parse(tokens).unwrap_or_else(|e| {
+            panic!("Parsing failed for source:\n{}\nError: {}", source, e);
+        });
+        crate::typeck::check(program)
+    }
+
+    // ========================================================================
+    // Generators
+    // ========================================================================
+
+    /// Pool of trait names to choose from.
+    const TRAIT_NAMES: &[&str] = &[
+        "DataFeed", "Indicator", "Fillable", "Sortable", "Renderable",
+    ];
+
+    /// Pool of struct names.
+    const STRUCT_NAMES: &[&str] = &[
+        "LiveFeed", "HistFeed", "Widget", "Sensor", "Record",
+    ];
+
+    /// Pool of method names for traits.
+    const METHOD_NAMES: &[&str] = &[
+        "compute", "process", "evaluate", "transform",
+    ];
+
+    /// Pool of generic function names.
+    const FN_NAMES: &[&str] = &[
+        "run_bounded", "apply_feed", "handle_item", "execute_task",
+    ];
+
+    /// Return types for trait methods.
+    #[derive(Debug, Clone)]
+    enum ReturnType {
+        Float,
+        Bool,
+        Int,
+    }
+
+    impl ReturnType {
+        fn annotation(&self) -> &str {
+            match self {
+                ReturnType::Float => "f64",
+                ReturnType::Bool => "bool",
+                ReturnType::Int => "int",
+            }
+        }
+
+        fn default_literal(&self) -> &str {
+            match self {
+                ReturnType::Float => "0.0",
+                ReturnType::Bool => "true",
+                ReturnType::Int => "0",
+            }
+        }
+    }
+
+    fn arb_return_type() -> impl Strategy<Value = ReturnType> {
+        prop_oneof![
+            Just(ReturnType::Float),
+            Just(ReturnType::Bool),
+            Just(ReturnType::Int),
+        ]
+    }
+
+    /// Number of methods in a trait (1-3).
+    fn arb_method_count() -> impl Strategy<Value = usize> {
+        1usize..=3
+    }
+
+    /// Generate a list of method definitions for a trait.
+    #[derive(Debug, Clone)]
+    struct TraitMethod {
+        name: String,
+        return_type: ReturnType,
+    }
+
+    fn arb_trait_methods() -> impl Strategy<Value = Vec<TraitMethod>> {
+        arb_method_count().prop_flat_map(|count| {
+            proptest::collection::vec(arb_return_type(), count..=count).prop_map(
+                move |return_types| {
+                    return_types
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, rt)| TraitMethod {
+                            name: METHOD_NAMES[i % METHOD_NAMES.len()].to_string(),
+                            return_type: rt,
+                        })
+                        .collect()
+                },
+            )
+        })
+    }
+
+    // ========================================================================
+    // Program builders
+    // ========================================================================
+
+    /// Builds a trait definition source.
+    fn build_trait_def(trait_name: &str, methods: &[TraitMethod]) -> String {
+        let method_sigs: Vec<String> = methods
+            .iter()
+            .map(|m| format!("    fn {}(self) -> {}", m.name, m.return_type.annotation()))
+            .collect();
+        format!("trait {} {{\n{}\n}}\n", trait_name, method_sigs.join("\n"))
+    }
+
+    /// Builds a struct definition.
+    fn build_struct_def(struct_name: &str) -> String {
+        format!("struct {} {{\n    value: f64\n}}\n", struct_name)
+    }
+
+    /// Builds a trait impl block for a struct.
+    fn build_trait_impl(
+        trait_name: &str,
+        struct_name: &str,
+        methods: &[TraitMethod],
+    ) -> String {
+        let method_impls: Vec<String> = methods
+            .iter()
+            .map(|m| {
+                format!(
+                    "    fn {}(self) -> {} {{\n        return {}\n    }}",
+                    m.name,
+                    m.return_type.annotation(),
+                    m.return_type.default_literal()
+                )
+            })
+            .collect();
+        format!(
+            "impl {} for {} {{\n{}\n}}\n",
+            trait_name,
+            struct_name,
+            method_impls.join("\n")
+        )
+    }
+
+    /// Builds a generic function with a trait bound.
+    fn build_bounded_generic_fn(
+        fn_name: &str,
+        type_param: &str,
+        trait_name: &str,
+    ) -> String {
+        format!(
+            "fn {}[{}: {}](item: {}) -> f64 {{\n    return 1.0\n}}\n",
+            fn_name, type_param, trait_name, type_param
+        )
+    }
+
+    /// Builds the strategy that calls the bounded generic function.
+    fn build_strategy_calling(fn_name: &str, struct_name: &str) -> String {
+        format!(
+            "strategy Test {{\n    on bar {{\n        s = {} {{ value = 1.0 }}\n        result = {}(s)\n    }}\n}}\n",
+            struct_name, fn_name
+        )
+    }
+
+    // ========================================================================
+    // Property 10: Trait Bound Satisfaction
+    //
+    // **Validates: Requirements 9.2, 9.3**
+    //
+    // For any generic function with a trait-bounded type parameter `T: SomeTrait`,
+    // if the concrete type used at the call site implements `SomeTrait`, the
+    // typechecker SHALL accept the call. If the concrete type does NOT implement
+    // the trait, the typechecker SHALL report a trait bound violation error
+    // naming the type and required trait.
+    // ========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// When a generic function with bound `T: Trait` is called with a type
+        /// that implements the trait, the typechecker accepts.
+        #[test]
+        fn prop_trait_bound_satisfied_accepted(
+            trait_idx in 0usize..5,
+            struct_idx in 0usize..5,
+            fn_idx in 0usize..4,
+            methods in arb_trait_methods(),
+        ) {
+            let trait_name = TRAIT_NAMES[trait_idx];
+            let struct_name = STRUCT_NAMES[struct_idx];
+            let fn_name = FN_NAMES[fn_idx];
+
+            let source = format!(
+                "{}\n{}\n{}\n{}\n{}",
+                build_trait_def(trait_name, &methods),
+                build_struct_def(struct_name),
+                build_trait_impl(trait_name, struct_name, &methods),
+                build_bounded_generic_fn(fn_name, "T", trait_name),
+                build_strategy_calling(fn_name, struct_name),
+            );
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_ok(),
+                "Calling bounded generic fn with implementing type should be accepted.\nSource:\n{}\nError: {:?}",
+                source,
+                result.err()
+            );
+        }
+
+        /// When a generic function with bound `T: Trait` is called with a type
+        /// that does NOT implement the trait, the typechecker rejects with an error
+        /// that names the type and the required trait.
+        #[test]
+        fn prop_trait_bound_violated_rejected(
+            trait_idx in 0usize..5,
+            struct_idx in 0usize..5,
+            fn_idx in 0usize..4,
+            methods in arb_trait_methods(),
+        ) {
+            let trait_name = TRAIT_NAMES[trait_idx];
+            let struct_name = STRUCT_NAMES[struct_idx];
+            let fn_name = FN_NAMES[fn_idx];
+
+            // Build the program WITHOUT the trait impl — struct does not implement the trait
+            let source = format!(
+                "{}\n{}\n{}\n{}",
+                build_trait_def(trait_name, &methods),
+                build_struct_def(struct_name),
+                build_bounded_generic_fn(fn_name, "T", trait_name),
+                build_strategy_calling(fn_name, struct_name),
+            );
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_err(),
+                "Calling bounded generic fn with non-implementing type should be rejected.\nSource:\n{}",
+                source,
+            );
+
+            // Verify the error mentions the struct name and trait name
+            let err_msg = result.unwrap_err().to_string();
+            prop_assert!(
+                err_msg.contains(struct_name),
+                "Error should mention the type '{}', got: {}",
+                struct_name,
+                err_msg
+            );
+            prop_assert!(
+                err_msg.contains(trait_name),
+                "Error should mention the trait '{}', got: {}",
+                trait_name,
+                err_msg
+            );
+            prop_assert!(
+                err_msg.contains("does not implement trait"),
+                "Error should contain 'does not implement trait', got: {}",
+                err_msg
+            );
+        }
+    }
+}
+
+
+// ============================================================================
+// Property 9: Generic Type Argument Substitution
+// ============================================================================
+
+#[cfg(test)]
+mod generic_type_arg_substitution_tests {
+    use crate::typeck::typed_ast::TypedProgram;
+    use proptest::prelude::*;
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    /// Lex → Parse → Typecheck a Flux source string. Returns the check result.
+    fn check_source(source: &str) -> crate::error::Result<TypedProgram> {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let tokens = lex_with_spans(source).unwrap_or_else(|e| {
+            panic!("Lexing failed for source:\n{}\nError: {}", source, e);
+        });
+        let program = parse(tokens).unwrap_or_else(|e| {
+            panic!("Parsing failed for source:\n{}\nError: {}", source, e);
+        });
+        crate::typeck::check(program)
+    }
+
+    // ========================================================================
+    // Generators
+    // ========================================================================
+
+    /// Pool of type parameter names.
+    const TYPE_PARAM_NAMES: &[&str] = &["T", "U", "V", "W"];
+
+    /// Concrete types that can be substituted for type parameters.
+    #[derive(Debug, Clone)]
+    enum ConcreteType {
+        Float,
+        Int,
+        Bool,
+        Str,
+    }
+
+    impl ConcreteType {
+        /// Returns the Flux source annotation for this type.
+        fn annotation(&self) -> &str {
+            match self {
+                ConcreteType::Float => "f64",
+                ConcreteType::Int => "int",
+                ConcreteType::Bool => "bool",
+                ConcreteType::Str => "str",
+            }
+        }
+
+        /// Returns a valid literal expression for this type.
+        fn literal(&self) -> &str {
+            match self {
+                ConcreteType::Float => "3.14",
+                ConcreteType::Int => "42",
+                ConcreteType::Bool => "true",
+                ConcreteType::Str => "\"hello\"",
+            }
+        }
+    }
+
+    /// Generate a concrete type.
+    fn arb_concrete_type() -> impl Strategy<Value = ConcreteType> {
+        prop_oneof![
+            Just(ConcreteType::Float),
+            Just(ConcreteType::Int),
+            Just(ConcreteType::Bool),
+            Just(ConcreteType::Str),
+        ]
+    }
+
+    /// Generate a number of type parameters (1-4).
+    fn arb_type_param_count() -> impl Strategy<Value = usize> {
+        1usize..=4
+    }
+
+    /// Generate a list of concrete types for type arguments.
+    fn arb_concrete_types(count: usize) -> impl Strategy<Value = Vec<ConcreteType>> {
+        prop::collection::vec(arb_concrete_type(), count..=count)
+    }
+
+    // ========================================================================
+    // Source Builders
+    // ========================================================================
+
+    /// Build a generic struct definition with K type parameters.
+    /// Each type param gets a field that uses it.
+    fn build_generic_struct(struct_name: &str, k: usize) -> String {
+        let type_params: Vec<&str> = TYPE_PARAM_NAMES.iter().take(k).copied().collect();
+        let type_param_list = type_params.join(", ");
+
+        let mut fields = Vec::new();
+        for (i, tp) in type_params.iter().enumerate() {
+            fields.push(format!("    field{}: {}", i, tp));
+        }
+
+        format!(
+            "struct {}[{}] {{\n{}\n}}\n",
+            struct_name,
+            type_param_list,
+            fields.join(",\n")
+        )
+    }
+
+    /// Build a struct that uses the generic struct as a field with concrete type args.
+    fn build_user_struct_with_generic_field(
+        generic_struct_name: &str,
+        concrete_types: &[ConcreteType],
+    ) -> String {
+        let type_args: Vec<&str> = concrete_types.iter().map(|t| t.annotation()).collect();
+        let type_arg_list = type_args.join(", ");
+        format!(
+            "struct Holder {{\n    inner: {}[{}]\n}}\n",
+            generic_struct_name, type_arg_list
+        )
+    }
+
+    /// Build a struct that uses the generic struct with WRONG number of type args.
+    fn build_user_struct_with_wrong_arg_count(
+        generic_struct_name: &str,
+        _expected_k: usize,
+        actual_count: usize,
+    ) -> String {
+        // Generate `actual_count` concrete type annotations
+        let type_args: Vec<&str> = (0..actual_count)
+            .map(|i| match i % 4 {
+                0 => "f64",
+                1 => "int",
+                2 => "bool",
+                _ => "str",
+            })
+            .collect();
+        let type_arg_list = type_args.join(", ");
+        format!(
+            "struct Holder {{\n    inner: {}[{}]\n}}\n",
+            generic_struct_name, type_arg_list
+        )
+    }
+
+    /// Build a generic function with K type parameters.
+    /// The function takes one parameter of each type param and returns f64.
+    fn build_generic_function(fn_name: &str, k: usize) -> String {
+        let type_params: Vec<&str> = TYPE_PARAM_NAMES.iter().take(k).copied().collect();
+        let type_param_list = type_params.join(", ");
+
+        let params: Vec<String> = type_params
+            .iter()
+            .enumerate()
+            .map(|(i, tp)| format!("arg{}: {}", i, tp))
+            .collect();
+        let param_list = params.join(", ");
+
+        format!(
+            "fn {}[{}]({}) -> f64 {{\n    return 1.0\n}}\n",
+            fn_name, type_param_list, param_list
+        )
+    }
+
+    /// Build a function call with the given concrete argument literals.
+    fn build_generic_fn_call(fn_name: &str, concrete_types: &[ConcreteType]) -> String {
+        let args: Vec<&str> = concrete_types.iter().map(|t| t.literal()).collect();
+        format!("{}({})", fn_name, args.join(", "))
+    }
+
+    /// Build a minimal strategy block.
+    fn build_strategy(body_expr: &str) -> String {
+        format!(
+            "strategy Test {{\n    on bar {{\n        result = {}\n    }}\n}}\n",
+            body_expr
+        )
+    }
+
+    // ========================================================================
+    // Property 9: Generic Type Argument Substitution
+    //
+    // **Validates: Requirements 7.2, 7.3, 7.4, 8.2, 8.3**
+    //
+    // For any generic struct or function with K type parameters:
+    // - When instantiated with exactly K concrete type arguments, the typechecker
+    //   SHALL substitute all occurrences and accept.
+    // - If the count of arguments does not equal K, an error SHALL be reported.
+    // ========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// 9a: A generic struct with K type params, when used with exactly K
+        /// concrete type arguments, is accepted by the typechecker.
+        #[test]
+        fn prop_generic_struct_correct_arg_count_accepted(
+            concrete_types in arb_type_param_count().prop_flat_map(|k| arb_concrete_types(k)),
+        ) {
+            let k = concrete_types.len();
+
+            let generic_struct = build_generic_struct("Container", k);
+            let user_struct = build_user_struct_with_generic_field("Container", &concrete_types);
+            let strategy = build_strategy("1.0");
+
+            let source = format!("{}\n{}\n{}", generic_struct, user_struct, strategy);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_ok(),
+                "Generic struct with {} type params instantiated with {} type args should be accepted.\nSource:\n{}\nError: {:?}",
+                k,
+                concrete_types.len(),
+                source,
+                result.err()
+            );
+        }
+
+        /// 9b: A generic struct with K type params, when used with a different
+        /// number of type arguments (fewer or more), is rejected by the typechecker.
+        #[test]
+        fn prop_generic_struct_wrong_arg_count_rejected(
+            k in arb_type_param_count(),
+            delta in 1usize..=3,
+            add_or_sub in any::<bool>(),
+        ) {
+            // Compute a wrong arg count: either k + delta or k - delta (clamped to >= 1)
+            let actual_count = if add_or_sub {
+                k + delta
+            } else {
+                if k > delta { k - delta } else { 0 }
+            };
+
+            // actual_count must differ from k and must be >= 1 for valid syntax
+            prop_assume!(actual_count != k && actual_count >= 1);
+
+            let generic_struct = build_generic_struct("Container", k);
+            let user_struct = build_user_struct_with_wrong_arg_count("Container", k, actual_count);
+            let strategy = build_strategy("1.0");
+
+            let source = format!("{}\n{}\n{}", generic_struct, user_struct, strategy);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_err(),
+                "Generic struct with {} type params instantiated with {} type args should be rejected.\nSource:\n{}",
+                k,
+                actual_count,
+                source,
+            );
+
+            let err_msg = result.unwrap_err().to_string();
+            prop_assert!(
+                err_msg.contains("expected") && err_msg.contains("type arguments"),
+                "Error should mention expected type arguments count, got: {}",
+                err_msg
+            );
+        }
+
+        /// 9c: A generic function with K type params, when called with exactly K
+        /// arguments of concrete types, is accepted by the typechecker (type inference succeeds).
+        #[test]
+        fn prop_generic_fn_correct_arg_count_accepted(
+            concrete_types in arb_type_param_count().prop_flat_map(|k| arb_concrete_types(k)),
+        ) {
+            let k = concrete_types.len();
+
+            let generic_fn = build_generic_function("transform", k);
+            let call_expr = build_generic_fn_call("transform", &concrete_types);
+            let strategy = build_strategy(&call_expr);
+
+            let source = format!("{}\n{}", generic_fn, strategy);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_ok(),
+                "Generic function with {} type params called with {} args should be accepted.\nSource:\n{}\nError: {:?}",
+                k,
+                concrete_types.len(),
+                source,
+                result.err()
+            );
+        }
+
+        /// 9d: A generic function with K type params, when called with a
+        /// different number of arguments, is rejected by the typechecker.
+        #[test]
+        fn prop_generic_fn_wrong_arg_count_rejected(
+            k in arb_type_param_count(),
+            delta in 1usize..=3,
+            add_or_sub in any::<bool>(),
+        ) {
+            // Compute a wrong arg count
+            let actual_count = if add_or_sub {
+                k + delta
+            } else {
+                if k > delta { k - delta } else { 0 }
+            };
+
+            // actual_count must differ from k and must be >= 1 for valid call syntax
+            prop_assume!(actual_count != k && actual_count >= 1);
+
+            let generic_fn = build_generic_function("transform", k);
+
+            // Build call with wrong number of arguments
+            let arg_literals: Vec<&str> = (0..actual_count)
+                .map(|i| match i % 4 {
+                    0 => "3.14",
+                    1 => "42",
+                    2 => "true",
+                    _ => "\"hello\"",
+                })
+                .collect();
+            let call_expr = format!("transform({})", arg_literals.join(", "));
+            let strategy = build_strategy(&call_expr);
+
+            let source = format!("{}\n{}", generic_fn, strategy);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_err(),
+                "Generic function with {} type params called with {} args should be rejected.\nSource:\n{}",
+                k,
+                actual_count,
+                source,
+            );
+
+            let err_msg = result.unwrap_err().to_string();
+            prop_assert!(
+                err_msg.contains("expects") && err_msg.contains("argument"),
+                "Error should mention argument count mismatch, got: {}",
+                err_msg
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Property 7: Match Pattern Binding Types
+// ============================================================================
+
+#[cfg(test)]
+mod match_pattern_binding_tests {
+    use crate::typeck::typed_ast::TypedProgram;
+    use proptest::prelude::*;
+
+    // ========================================================================
+    // Helpers
+    // ========================================================================
+
+    /// Lex → Parse → Typecheck a Flux source string. Returns the check result.
+    fn check_source(source: &str) -> crate::error::Result<TypedProgram> {
+        use crate::lexer::lex_with_spans;
+        use crate::parser::parse;
+
+        let tokens = lex_with_spans(source).unwrap_or_else(|e| {
+            panic!("Lexing failed for source:\n{}\nError: {}", source, e);
+        });
+        let program = parse(tokens).unwrap_or_else(|e| {
+            panic!("Parsing failed for source:\n{}\nError: {}", source, e);
+        });
+        crate::typeck::check(program)
+    }
+
+    // ========================================================================
+    // Generators
+    // ========================================================================
+
+    /// A simple type for enum fields.
+    #[derive(Debug, Clone)]
+    enum FieldType {
+        Int,
+        Float,
+        String,
+        Bool,
+    }
+
+    impl FieldType {
+        /// Returns the Flux source type annotation string.
+        fn annotation(&self) -> &str {
+            match self {
+                FieldType::Int => "int",
+                FieldType::Float => "f64",
+                FieldType::String => "str",
+                FieldType::Bool => "bool",
+            }
+        }
+
+        /// Returns a valid literal expression for this type.
+        fn valid_literal(&self) -> &str {
+            match self {
+                FieldType::Int => "42",
+                FieldType::Float => "3.14",
+                FieldType::String => "\"hello\"",
+                FieldType::Bool => "true",
+            }
+        }
+    }
+
+    /// Generate a field type.
+    fn arb_field_type() -> impl Strategy<Value = FieldType> {
+        prop_oneof![
+            Just(FieldType::Int),
+            Just(FieldType::Float),
+            Just(FieldType::String),
+            Just(FieldType::Bool),
+        ]
+    }
+
+    /// A generated enum variant with fields.
+    #[derive(Debug, Clone)]
+    struct GenVariant {
+        name: String,
+        fields: Vec<(String, FieldType)>,
+    }
+
+    /// Generate a data variant with 1-4 fields.
+    fn arb_data_variant(idx: usize) -> impl Strategy<Value = GenVariant> {
+        prop::collection::vec(arb_field_type(), 1..=4).prop_map(move |types| {
+            let fields: Vec<(String, FieldType)> = types
+                .into_iter()
+                .enumerate()
+                .map(|(i, ty)| (format!("f{}", i), ty))
+                .collect();
+            GenVariant {
+                name: format!("Var{}", idx),
+                fields,
+            }
+        })
+    }
+
+    /// Generate an enum with 1-3 data variants (all have fields for binding tests).
+    fn arb_enum_with_data_variants() -> impl Strategy<Value = Vec<GenVariant>> {
+        (1usize..=3).prop_flat_map(|n| {
+            let strats: Vec<_> = (0..n).map(|i| arb_data_variant(i)).collect();
+            strats
+        })
+    }
+
+    // ========================================================================
+    // Source Builders
+    // ========================================================================
+
+    /// Build a Flux enum definition source from generated variants.
+    fn build_enum_def(enum_name: &str, variants: &[GenVariant]) -> String {
+        let mut s = format!("enum {} {{\n", enum_name);
+        for variant in variants {
+            let fields: Vec<String> = variant
+                .fields
+                .iter()
+                .map(|(name, ty)| format!("{}: {}", name, ty.annotation()))
+                .collect();
+            s.push_str(&format!("    {}({}),\n", variant.name, fields.join(", ")));
+        }
+        s.push_str("}\n");
+        s
+    }
+
+    /// Build a match expression where one arm has a specific number of bindings.
+    /// The target_variant_idx arm uses the specified bindings; all other arms use
+    /// correct bindings. A wildcard is added for exhaustiveness if there are other
+    /// variants not explicitly handled.
+    fn build_match_with_bindings(
+        enum_name: &str,
+        variants: &[GenVariant],
+        target_variant_idx: usize,
+        binding_names: &[String],
+    ) -> String {
+        let target_variant = &variants[target_variant_idx];
+        let bindings_str = binding_names.join(", ");
+
+        let mut match_source = format!(
+            "match val {{\n        {}.{}({}) => {{\n            x = 1.0\n        }}\n",
+            enum_name, target_variant.name, bindings_str
+        );
+
+        // Add a wildcard arm for remaining variants (exhaustiveness)
+        if variants.len() > 1 {
+            match_source.push_str("        _ => {\n            x = 2.0\n        }\n");
+        }
+
+        match_source.push_str("    }");
+        match_source
+    }
+
+    /// Build a match expression where the arm body uses the bound variable in a
+    /// type-specific operation. This verifies the bound variable has the correct type.
+    fn build_match_with_typed_usage(
+        enum_name: &str,
+        variants: &[GenVariant],
+        target_variant_idx: usize,
+    ) -> String {
+        let target_variant = &variants[target_variant_idx];
+        let field_count = target_variant.fields.len();
+
+        let binding_names: Vec<String> = (0..field_count)
+            .map(|i| format!("b{}", i))
+            .collect();
+        let bindings_str = binding_names.join(", ");
+
+        // Use the first binding in a type-appropriate operation
+        let first_field_type = &target_variant.fields[0].1;
+        let usage_expr = match first_field_type {
+            FieldType::Int => "result = b0 + 1",
+            FieldType::Float => "result = b0 + 1.0",
+            FieldType::String => "result = b0",
+            FieldType::Bool => "result = b0",
+        };
+
+        let mut match_source = format!(
+            "match val {{\n        {}.{}({}) => {{\n            {}\n        }}\n",
+            enum_name, target_variant.name, bindings_str, usage_expr
+        );
+
+        // Add wildcard for exhaustiveness
+        if variants.len() > 1 {
+            match_source.push_str("        _ => {\n            result = 0.0\n        }\n");
+        }
+
+        match_source.push_str("    }");
+        match_source
+    }
+
+    /// Build a complete Flux program with an enum definition, a value construction,
+    /// and a match expression in the strategy on_bar block.
+    fn build_program(enum_def: &str, enum_name: &str, variant: &GenVariant, match_expr: &str) -> String {
+        // Construct a value of the target variant
+        let args: Vec<&str> = variant
+            .fields
+            .iter()
+            .map(|(_, ty)| ty.valid_literal())
+            .collect();
+        let construction = if args.is_empty() {
+            format!("{}.{}", enum_name, variant.name)
+        } else {
+            format!("{}.{}({})", enum_name, variant.name, args.join(", "))
+        };
+
+        format!(
+            "{}\nstrategy Test {{\n    on bar {{\n        val = {}\n    {}\n    }}\n}}\n",
+            enum_def, construction, match_expr
+        )
+    }
+
+    // ========================================================================
+    // Property 7: Match Pattern Binding Types
+    //
+    // **Validates: Requirements 3.5, 3.7, 3.8**
+    //
+    // For any match arm with a variant pattern that binds variables:
+    // - The typechecker SHALL introduce each bound variable into the arm body
+    //   scope with the type matching the corresponding field in the enum variant
+    //   definition.
+    // - If the binding count differs from the field count, an error SHALL be
+    //   reported.
+    // ========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        /// 7a: When a match arm binds the correct number of variables
+        /// (matching the variant's field count), the typechecker accepts
+        /// the match expression.
+        #[test]
+        fn prop_correct_binding_count_accepted(
+            variants in arb_enum_with_data_variants(),
+            target_idx_seed in 0usize..100,
+        ) {
+            let enum_name = "TestEnum";
+            let target_idx = target_idx_seed % variants.len();
+            let target_variant = &variants[target_idx];
+
+            // Generate correct number of binding names
+            let binding_names: Vec<String> = (0..target_variant.fields.len())
+                .map(|i| format!("b{}", i))
+                .collect();
+
+            let enum_def = build_enum_def(enum_name, &variants);
+            let match_expr = build_match_with_bindings(
+                enum_name,
+                &variants,
+                target_idx,
+                &binding_names,
+            );
+            let source = build_program(&enum_def, enum_name, target_variant, &match_expr);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_ok(),
+                "Correct binding count ({}) should be accepted.\nSource:\n{}\nError: {:?}",
+                binding_names.len(),
+                source,
+                result.err()
+            );
+        }
+
+        /// 7b: When a match arm binds more variables than the variant has fields,
+        /// the typechecker rejects with a field count mismatch error.
+        #[test]
+        fn prop_too_many_bindings_rejected(
+            variants in arb_enum_with_data_variants(),
+            target_idx_seed in 0usize..100,
+            extra in 1usize..=3,
+        ) {
+            let enum_name = "TestEnum";
+            let target_idx = target_idx_seed % variants.len();
+            let target_variant = &variants[target_idx];
+
+            // Generate MORE binding names than fields
+            let binding_count = target_variant.fields.len() + extra;
+            let binding_names: Vec<String> = (0..binding_count)
+                .map(|i| format!("b{}", i))
+                .collect();
+
+            let enum_def = build_enum_def(enum_name, &variants);
+            let match_expr = build_match_with_bindings(
+                enum_name,
+                &variants,
+                target_idx,
+                &binding_names,
+            );
+            let source = build_program(&enum_def, enum_name, target_variant, &match_expr);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_err(),
+                "Too many bindings ({} for {} fields) should be rejected.\nSource:\n{}",
+                binding_count,
+                target_variant.fields.len(),
+                source,
+            );
+
+            let err_msg = result.unwrap_err().to_string();
+            prop_assert!(
+                err_msg.contains("field") && err_msg.contains("binds"),
+                "Error should mention field count vs binding mismatch, got: {}",
+                err_msg
+            );
+        }
+
+        /// 7c: When a match arm binds fewer variables than the variant has fields,
+        /// the typechecker rejects with a field count mismatch error.
+        #[test]
+        fn prop_too_few_bindings_rejected(
+            variants in arb_enum_with_data_variants(),
+            target_idx_seed in 0usize..100,
+        ) {
+            let enum_name = "TestEnum";
+            let target_idx = target_idx_seed % variants.len();
+            let target_variant = &variants[target_idx];
+
+            // Only test variants with 2+ fields so we can drop one
+            prop_assume!(target_variant.fields.len() >= 2);
+
+            // Generate FEWER binding names than fields (always at least 1 less)
+            let binding_count = target_variant.fields.len() - 1;
+            let binding_names: Vec<String> = (0..binding_count)
+                .map(|i| format!("b{}", i))
+                .collect();
+
+            let enum_def = build_enum_def(enum_name, &variants);
+            let match_expr = build_match_with_bindings(
+                enum_name,
+                &variants,
+                target_idx,
+                &binding_names,
+            );
+            let source = build_program(&enum_def, enum_name, target_variant, &match_expr);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_err(),
+                "Too few bindings ({} for {} fields) should be rejected.\nSource:\n{}",
+                binding_count,
+                target_variant.fields.len(),
+                source,
+            );
+
+            let err_msg = result.unwrap_err().to_string();
+            prop_assert!(
+                err_msg.contains("field") && err_msg.contains("binds"),
+                "Error should mention field count vs binding mismatch, got: {}",
+                err_msg
+            );
+        }
+
+        /// 7d: Bound variables are introduced with the correct types in the arm body.
+        /// When the arm body uses a bound variable in a type-appropriate expression,
+        /// the typechecker accepts. This validates that the binding types match
+        /// the enum variant's field types.
+        #[test]
+        fn prop_bound_variables_have_correct_types(
+            variants in arb_enum_with_data_variants(),
+            target_idx_seed in 0usize..100,
+        ) {
+            let enum_name = "TestEnum";
+            let target_idx = target_idx_seed % variants.len();
+            let target_variant = &variants[target_idx];
+
+            let enum_def = build_enum_def(enum_name, &variants);
+            let match_expr = build_match_with_typed_usage(
+                enum_name,
+                &variants,
+                target_idx,
+            );
+            let source = build_program(&enum_def, enum_name, target_variant, &match_expr);
+
+            let result = check_source(&source);
+            prop_assert!(
+                result.is_ok(),
+                "Bound variable usage with correct types should be accepted.\nSource:\n{}\nError: {:?}",
+                source,
+                result.err()
+            );
+        }
+    }
+}

@@ -1,9 +1,10 @@
-//! Property-based tests for type system codegen (enums, impl blocks).
+//! Property-based tests for type system codegen (enums, impl blocks, generics).
 //!
 //! Feature: flux-type-system, Property 14: Codegen Enum Output Validity
 //! Feature: flux-type-system, Property 15: Codegen Impl/Trait Output Validity (impl portion)
+//! Feature: flux-type-system, Property 16: Codegen Generic Bracket Translation
 //! Uses proptest to verify that enum definitions, construction expressions,
-//! and impl blocks emit valid Rust code with correct syntax.
+//! impl blocks, and generic structs/functions emit valid Rust code with correct syntax.
 
 #[cfg(test)]
 mod tests {
@@ -376,6 +377,399 @@ mod tests {
                 "Output must NOT contain '{}' (dot separator is Flux syntax, not Rust), got:\n{}",
                 dot_construction, output
             );
+        }
+    }
+
+    // ========================================================================
+    // Generators for Property 16: Codegen Generic Bracket Translation
+    // ========================================================================
+
+    /// Generate a single uppercase type parameter name (e.g., "T", "U", "K", "V").
+    fn arb_type_param_name() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("T".to_string()),
+            Just("U".to_string()),
+            Just("K".to_string()),
+            Just("V".to_string()),
+            Just("A".to_string()),
+            Just("B".to_string()),
+        ]
+    }
+
+    /// Generate a valid trait name for bounds.
+    fn arb_trait_name() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("DataFeed".to_string()),
+            Just("Processor".to_string()),
+            Just("Strategy".to_string()),
+            Just("Serializable".to_string()),
+            Just("Comparable".to_string()),
+        ]
+    }
+
+    /// Generate a generic struct with 1-3 type parameters.
+    fn arb_generic_struct_def() -> impl Strategy<Value = TypedStructDef> {
+        (
+            arb_pascal_ident(),
+            prop::collection::vec(arb_type_param_name(), 1..=3),
+        )
+            .prop_map(|(name, type_params)| {
+                // Deduplicate type param names
+                let mut seen = std::collections::HashSet::new();
+                let deduped_params: Vec<String> = type_params
+                    .into_iter()
+                    .filter(|p| seen.insert(p.clone()))
+                    .collect();
+
+                // Create fields using the type params
+                let fields: Vec<TypedStructField> = deduped_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, param)| TypedStructField {
+                        name: format!("field_{}", i),
+                        resolved_type: FluxType::TypeParam(param.clone()),
+                        bit_width: None,
+                        field_decorator_names: vec![],
+                        span: Span::new(0, 1),
+                    })
+                    .collect();
+
+                TypedStructDef {
+                    name,
+                    type_params: deduped_params,
+                    fields,
+                    decorators: vec![],
+                    span: Span::new(0, 1),
+                }
+            })
+    }
+
+    /// Generate a generic function definition with optional trait bounds.
+    fn arb_generic_fn_def_with_bounds() -> impl Strategy<Value = TypedFnDef> {
+        (
+            arb_field_ident(),
+            prop::collection::vec(
+                (arb_type_param_name(), prop::option::of(arb_trait_name())),
+                1..=3,
+            ),
+        )
+            .prop_map(|(fn_name, params_with_bounds)| {
+                // Deduplicate type param names
+                let mut seen = std::collections::HashSet::new();
+                let deduped: Vec<(String, Option<String>)> = params_with_bounds
+                    .into_iter()
+                    .filter(|(p, _)| seen.insert(p.clone()))
+                    .collect();
+
+                let type_params: Vec<String> = deduped.iter().map(|(p, _)| p.clone()).collect();
+                let type_param_bounds: Vec<Option<String>> =
+                    deduped.iter().map(|(_, b)| b.clone()).collect();
+
+                // Generate params: one param for each type param
+                let params: Vec<String> = type_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("arg_{}", i))
+                    .collect();
+                let param_types: Vec<FluxType> = type_params
+                    .iter()
+                    .map(|p| FluxType::TypeParam(p.clone()))
+                    .collect();
+
+                // Return type is the first type param
+                let return_type = FluxType::TypeParam(type_params[0].clone());
+
+                TypedFnDef {
+                    name: fn_name,
+                    type_params,
+                    type_param_bounds,
+                    params,
+                    param_types,
+                    body: vec![],
+                    return_type,
+                    span: Span::new(0, 1),
+                }
+            })
+    }
+
+    /// Generate a generic function that always has at least one trait bound.
+    fn arb_generic_fn_with_at_least_one_bound() -> impl Strategy<Value = TypedFnDef> {
+        (
+            arb_field_ident(),
+            arb_type_param_name(),
+            arb_trait_name(),
+            prop::collection::vec(
+                (arb_type_param_name(), prop::option::of(arb_trait_name())),
+                0..=2,
+            ),
+        )
+            .prop_map(|(fn_name, first_param, first_bound, extra_params)| {
+                let mut seen = std::collections::HashSet::new();
+                seen.insert(first_param.clone());
+
+                let mut type_params = vec![first_param.clone()];
+                let mut type_param_bounds: Vec<Option<String>> = vec![Some(first_bound)];
+
+                for (p, b) in extra_params {
+                    if seen.insert(p.clone()) {
+                        type_params.push(p);
+                        type_param_bounds.push(b);
+                    }
+                }
+
+                let params: Vec<String> = type_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("arg_{}", i))
+                    .collect();
+                let param_types: Vec<FluxType> = type_params
+                    .iter()
+                    .map(|p| FluxType::TypeParam(p.clone()))
+                    .collect();
+
+                let return_type = FluxType::TypeParam(type_params[0].clone());
+
+                TypedFnDef {
+                    name: fn_name,
+                    type_params,
+                    type_param_bounds,
+                    params,
+                    param_types,
+                    body: vec![],
+                    return_type,
+                    span: Span::new(0, 1),
+                }
+            })
+    }
+
+    /// Helper: build a program with a generic struct.
+    fn build_generic_struct_program(struct_def: TypedStructDef) -> TypedProgram {
+        TypedProgram {
+            imports: vec![],
+            structs: vec![struct_def],
+            enums: vec![],
+            functions: vec![],
+            impl_blocks: vec![],
+            traits: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: TypedStrategy {
+                name: "GenericTest".to_string(),
+                body: vec![],
+                span: Span::new(0, 10),
+            },
+            span: Span::new(0, 10),
+        }
+    }
+
+    /// Helper: build a program with a generic function.
+    fn build_generic_fn_program(fn_def: TypedFnDef) -> TypedProgram {
+        TypedProgram {
+            imports: vec![],
+            structs: vec![],
+            enums: vec![],
+            functions: vec![fn_def],
+            impl_blocks: vec![],
+            traits: vec![],
+            data_block: None,
+            connector_block: None,
+            strategy: TypedStrategy {
+                name: "GenericFnTest".to_string(),
+                body: vec![],
+                span: Span::new(0, 10),
+            },
+            span: Span::new(0, 10),
+        }
+    }
+
+    // ========================================================================
+    // Property 16: Codegen Generic Bracket Translation
+    // ========================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        // Feature: flux-type-system, Property 16: Codegen Generic Bracket Translation
+        /// **Validates: Requirements 7.5, 8.5, 9.4**
+        ///
+        /// For any valid typed generic struct definition, the codegen stage SHALL emit
+        /// Rust source using angle-bracket syntax `<T>` (not square brackets `[T]`).
+        #[test]
+        fn prop_codegen_generic_struct_uses_angle_brackets(
+            struct_def in arb_generic_struct_def()
+        ) {
+            let struct_name = struct_def.name.clone();
+            let type_params = struct_def.type_params.clone();
+            let program = build_generic_struct_program(struct_def);
+
+            let result = generate(&program);
+            prop_assert!(result.is_ok(), "generate() failed: {:?}", result.err());
+            let output = result.unwrap();
+
+            // 1. Must contain angle brackets with type params: `struct Name<T>`
+            let expected_generics = format!("<{}>", type_params.join(", "));
+            let expected_header = format!("struct {}{}", struct_name, expected_generics);
+            prop_assert!(
+                output.contains(&expected_header),
+                "Generic struct must use angle brackets '{}', got:\n{}",
+                expected_header, output
+            );
+
+            // 2. Must NOT contain square-bracket generics `[T]` in struct definition
+            let square_bracket_generic = format!("{}[", struct_name);
+            prop_assert!(
+                !output.contains(&square_bracket_generic),
+                "Generic struct must NOT use square brackets '{}[...]', got:\n{}",
+                struct_name, output
+            );
+
+            // 3. Each type param should appear as a field type in the output
+            for param in &type_params {
+                prop_assert!(
+                    output.contains(param),
+                    "Type param '{}' must appear in the output, got:\n{}",
+                    param, output
+                );
+            }
+
+            // 4. Output must be syntactically plausible (contains matching braces for struct)
+            let struct_start = output.find(&expected_header).unwrap();
+            let after_header = &output[struct_start..];
+            prop_assert!(
+                after_header.contains('{') && after_header.contains('}'),
+                "Struct definition must have opening and closing braces, got:\n{}",
+                after_header
+            );
+        }
+
+        /// **Validates: Requirements 8.5, 9.4**
+        ///
+        /// For any valid typed generic function with trait bounds, the codegen stage
+        /// SHALL emit Rust source using `<T: Trait>` syntax (not `[T: Trait]`).
+        #[test]
+        fn prop_codegen_generic_fn_with_bounds_uses_angle_brackets(
+            fn_def in arb_generic_fn_with_at_least_one_bound()
+        ) {
+            let fn_name = fn_def.name.clone();
+            let type_params = fn_def.type_params.clone();
+            let type_param_bounds = fn_def.type_param_bounds.clone();
+            let program = build_generic_fn_program(fn_def);
+
+            let result = generate(&program);
+            prop_assert!(result.is_ok(), "generate() failed: {:?}", result.err());
+            let output = result.unwrap();
+
+            // 1. Build the expected generics string with bounds
+            let expected_params: Vec<String> = type_params
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    if let Some(Some(bound)) = type_param_bounds.get(i) {
+                        format!("{}: {}", name, bound)
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            let expected_generics = format!("<{}>", expected_params.join(", "));
+            let expected_sig = format!("fn {}{}", fn_name, expected_generics);
+            prop_assert!(
+                output.contains(&expected_sig),
+                "Generic function must emit '{}', got:\n{}",
+                expected_sig, output
+            );
+
+            // 2. Must NOT contain square-bracket generics
+            let square_bracket = format!("{}[", fn_name);
+            prop_assert!(
+                !output.contains(&square_bracket),
+                "Generic function must NOT use square brackets '{}[...]', got:\n{}",
+                fn_name, output
+            );
+
+            // 3. Verify at least one bound appears with colon syntax in angle brackets
+            let has_bound = type_param_bounds.iter().any(|b| b.is_some());
+            prop_assert!(has_bound, "Test requires at least one trait bound");
+            for (i, param) in type_params.iter().enumerate() {
+                if let Some(Some(bound)) = type_param_bounds.get(i) {
+                    let bound_syntax = format!("{}: {}", param, bound);
+                    prop_assert!(
+                        output.contains(&bound_syntax),
+                        "Output must contain trait bound '{}', got:\n{}",
+                        bound_syntax, output
+                    );
+                }
+            }
+
+            // 4. Function declaration must be syntactically valid (has parentheses and braces)
+            let fn_start = output.find(&expected_sig).unwrap();
+            let after_sig = &output[fn_start..];
+            prop_assert!(
+                after_sig.contains('(') && after_sig.contains(')'),
+                "Function must have parameter parentheses, got:\n{}",
+                after_sig
+            );
+            prop_assert!(
+                after_sig.contains('{') && after_sig.contains('}'),
+                "Function must have body braces, got:\n{}",
+                after_sig
+            );
+        }
+
+        /// **Validates: Requirements 7.5, 8.5**
+        ///
+        /// For any valid typed generic function (with or without bounds), the codegen
+        /// SHALL emit angle-bracket syntax and the output must not contain Flux-style
+        /// square bracket generics.
+        #[test]
+        fn prop_codegen_generic_fn_angle_bracket_translation(
+            fn_def in arb_generic_fn_def_with_bounds()
+        ) {
+            let fn_name = fn_def.name.clone();
+            let type_params = fn_def.type_params.clone();
+            let type_param_bounds = fn_def.type_param_bounds.clone();
+            let program = build_generic_fn_program(fn_def);
+
+            let result = generate(&program);
+            prop_assert!(result.is_ok(), "generate() failed: {:?}", result.err());
+            let output = result.unwrap();
+
+            // 1. Must contain `fn name<...>(`
+            let expected_params: Vec<String> = type_params
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    if let Some(Some(bound)) = type_param_bounds.get(i) {
+                        format!("{}: {}", name, bound)
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            let expected_generics = format!("<{}>", expected_params.join(", "));
+            let expected_header = format!("fn {}{}(", fn_name, expected_generics);
+            prop_assert!(
+                output.contains(&expected_header),
+                "Generic fn must emit angle brackets '{}', got:\n{}",
+                expected_header, output
+            );
+
+            // 2. Must NOT contain square-bracket syntax for this function
+            let square_bracket = format!("fn {}[", fn_name);
+            prop_assert!(
+                !output.contains(&square_bracket),
+                "Generic fn must NOT emit square brackets 'fn {}[...]', got:\n{}",
+                fn_name, output
+            );
+
+            // 3. Each type param should appear somewhere in the output (as param type or return type)
+            for param in &type_params {
+                prop_assert!(
+                    output.contains(param),
+                    "Type param '{}' must appear in the emitted code, got:\n{}",
+                    param, output
+                );
+            }
         }
     }
 

@@ -3295,11 +3295,73 @@ impl TypeChecker {
                         span,
                     })
                 } else {
-                    Err(self.type_error(
-                        span,
-                        format!("No method '{}' on type '{}'", method, struct_name),
-                    ))
+                    // Not found in inherent impl — try trait impl methods
+                    let trait_method_opt = self.env.get_trait_method(struct_name, method).cloned();
+                    if let Some(trait_method_info) = trait_method_opt {
+                        let expected_params = trait_method_info.param_types;
+                        let return_type = trait_method_info.return_type;
+                        let is_static = trait_method_info.is_static;
+
+                        if is_static {
+                            return Err(self.type_error(
+                                span,
+                                format!(
+                                    "Method '{}' on type '{}' is static and cannot be called on an instance",
+                                    method, struct_name
+                                ),
+                            ));
+                        }
+
+                        // Check argument count
+                        if args.len() != expected_params.len() {
+                            return Err(self.type_error(
+                                span,
+                                format!(
+                                    "Method '{}' on type '{}' expects {} arguments, found {}",
+                                    method, struct_name, expected_params.len(), args.len()
+                                ),
+                            ));
+                        }
+
+                        // Typecheck arguments
+                        let mut typed_args = Vec::new();
+                        for (arg, expected_ty) in args.into_iter().zip(expected_params.iter()) {
+                            let typed_arg = self.check_expr(arg)?;
+                            if !typed_arg.resolved_type.is_assignable_to(expected_ty) {
+                                return Err(self.type_error(
+                                    typed_arg.span,
+                                    format!(
+                                        "Method '{}' argument expects {}, found {}",
+                                        method, expected_ty, typed_arg.resolved_type
+                                    ),
+                                ));
+                            }
+                            typed_args.push(typed_arg);
+                        }
+
+                        Ok(TypedExpr {
+                            kind: TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_receiver),
+                                method: method.to_string(),
+                                args: typed_args,
+                            },
+                            resolved_type: return_type,
+                            span,
+                        })
+                    } else {
+                        Err(self.type_error(
+                            span,
+                            format!("No method '{}' on type '{}'", method, struct_name),
+                        ))
+                    }
                 }
+            }
+            FluxType::Generic(type_name, type_args) if type_name == "HashMap" && type_args.len() == 2 => {
+                let key_type = type_args[0].clone();
+                let value_type = type_args[1].clone();
+                self.check_hashmap_method_call(
+                    typed_receiver, &key_type, &value_type, method, args, span,
+                )
             }
             _ => Err(self.type_error(
                 span,
@@ -3850,6 +3912,11 @@ impl TypeChecker {
         args: Vec<Expr>,
         span: Span,
     ) -> Result<TypedExpr> {
+        // Handle HashMap.new() as a built-in generic static method call
+        if enum_name == "HashMap" {
+            return self.check_hashmap_static_call(variant_name, args, span);
+        }
+
         // 1. Look up the enum in the type environment
         let enum_info = match self.env.get_enum(enum_name) {
             Some(info) => info.clone(),
@@ -3921,6 +3988,231 @@ impl TypeChecker {
             resolved_type: FluxType::Enum(enum_name.to_string()),
             span,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // HashMap built-in generic type support
+    // -----------------------------------------------------------------------
+
+    /// Handle static method calls on `HashMap` (e.g., `HashMap.new()`).
+    fn check_hashmap_static_call(
+        &mut self,
+        method_name: &str,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<TypedExpr> {
+        match method_name {
+            "new" => {
+                if !args.is_empty() {
+                    return Err(self.type_error(
+                        span,
+                        format!("'HashMap.new' expects 0 arguments, found {}", args.len()),
+                    ));
+                }
+                // Return HashMap[K, V] with unresolved type params
+                let hashmap_type = FluxType::Generic(
+                    "HashMap".to_string(),
+                    vec![FluxType::TypeParam("K".to_string()), FluxType::TypeParam("V".to_string())],
+                );
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(TypedExpr {
+                            kind: TypedExprKind::Ident("HashMap".to_string()),
+                            resolved_type: FluxType::Void, // type namespace, not a value
+                            span,
+                        }),
+                        method: "new".to_string(),
+                        args: vec![],
+                    },
+                    resolved_type: hashmap_type,
+                    span,
+                })
+            }
+            _ => Err(self.type_error(
+                span,
+                format!("'HashMap' has no static method '{}'", method_name),
+            )),
+        }
+    }
+
+    /// Handle method calls on a `HashMap[K, V]` receiver.
+    ///
+    /// Supported methods:
+    /// - `insert(key: K, value: V) -> HashMap[K, V]`
+    /// - `get(key: K) -> V`
+    /// - `contains_key(key: K) -> Bool`
+    /// - `remove(key: K) -> HashMap[K, V]`
+    fn check_hashmap_method_call(
+        &mut self,
+        typed_receiver: TypedExpr,
+        key_type: &FluxType,
+        value_type: &FluxType,
+        method: &str,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<TypedExpr> {
+        let receiver_ty = typed_receiver.resolved_type.clone();
+
+        // Extract the receiver variable name for type refinement
+        let receiver_var_name = match &typed_receiver.kind {
+            TypedExprKind::Ident(name) => Some(name.clone()),
+            _ => None,
+        };
+
+        match method {
+            "insert" => {
+                if args.len() != 2 {
+                    return Err(self.type_error(
+                        span,
+                        format!("'insert' expects 2 arguments (key, value), found {}", args.len()),
+                    ));
+                }
+                let mut args_iter = args.into_iter();
+                let typed_key = self.check_expr(args_iter.next().unwrap())?;
+                let typed_value = self.check_expr(args_iter.next().unwrap())?;
+
+                // Infer or validate key type
+                let resolved_key = self.resolve_hashmap_type_param(
+                    key_type, &typed_key.resolved_type, "key", "insert", span,
+                )?;
+                // Infer or validate value type
+                let resolved_value = self.resolve_hashmap_type_param(
+                    value_type, &typed_value.resolved_type, "value", "insert", span,
+                )?;
+
+                let result_type = FluxType::Generic(
+                    "HashMap".to_string(),
+                    vec![resolved_key.clone(), resolved_value.clone()],
+                );
+
+                // Refine the receiver variable type if it had unresolved TypeParams
+                if let Some(ref var_name) = receiver_var_name {
+                    if matches!(key_type, FluxType::TypeParam(_)) || matches!(value_type, FluxType::TypeParam(_)) {
+                        self.env.insert(var_name.clone(), result_type.clone());
+                    }
+                }
+
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: "insert".to_string(),
+                        args: vec![typed_key, typed_value],
+                    },
+                    resolved_type: result_type,
+                    span,
+                })
+            }
+            "get" => {
+                if args.len() != 1 {
+                    return Err(self.type_error(
+                        span,
+                        format!("'get' expects 1 argument (key), found {}", args.len()),
+                    ));
+                }
+                let typed_key = self.check_expr(args.into_iter().next().unwrap())?;
+
+                // Validate key type
+                self.resolve_hashmap_type_param(
+                    key_type, &typed_key.resolved_type, "key", "get", span,
+                )?;
+
+                // Return the value type
+                let result_type = value_type.clone();
+
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: "get".to_string(),
+                        args: vec![typed_key],
+                    },
+                    resolved_type: result_type,
+                    span,
+                })
+            }
+            "contains_key" => {
+                if args.len() != 1 {
+                    return Err(self.type_error(
+                        span,
+                        format!("'contains_key' expects 1 argument (key), found {}", args.len()),
+                    ));
+                }
+                let typed_key = self.check_expr(args.into_iter().next().unwrap())?;
+
+                // Validate key type
+                self.resolve_hashmap_type_param(
+                    key_type, &typed_key.resolved_type, "key", "contains_key", span,
+                )?;
+
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: "contains_key".to_string(),
+                        args: vec![typed_key],
+                    },
+                    resolved_type: FluxType::Bool,
+                    span,
+                })
+            }
+            "remove" => {
+                if args.len() != 1 {
+                    return Err(self.type_error(
+                        span,
+                        format!("'remove' expects 1 argument (key), found {}", args.len()),
+                    ));
+                }
+                let typed_key = self.check_expr(args.into_iter().next().unwrap())?;
+
+                // Validate key type
+                self.resolve_hashmap_type_param(
+                    key_type, &typed_key.resolved_type, "key", "remove", span,
+                )?;
+
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: "remove".to_string(),
+                        args: vec![typed_key],
+                    },
+                    resolved_type: receiver_ty,
+                    span,
+                })
+            }
+            _ => Err(self.type_error(
+                span,
+                format!("type HashMap does not have method '{}'", method),
+            )),
+        }
+    }
+
+    /// Resolve a HashMap type parameter: if the declared param is a TypeParam (unresolved),
+    /// accept any concrete type. If it's concrete, validate the actual type matches.
+    fn resolve_hashmap_type_param(
+        &self,
+        declared: &FluxType,
+        actual: &FluxType,
+        param_name: &str,
+        method_name: &str,
+        span: Span,
+    ) -> Result<FluxType> {
+        match declared {
+            FluxType::TypeParam(_) => {
+                // Unresolved: infer from the actual argument type
+                Ok(actual.clone())
+            }
+            _ => {
+                // Concrete: validate the argument matches
+                if !actual.is_assignable_to(declared) {
+                    return Err(self.type_error(
+                        span,
+                        format!(
+                            "HashMap '{}' {} type mismatch: expected {}, found {}",
+                            method_name, param_name, declared, actual
+                        ),
+                    ));
+                }
+                Ok(declared.clone())
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -6094,6 +6386,243 @@ strategy Test {
         assert!(
             err_msg.contains("Writable"),
             "Expected 'Writable' in error, got: {}",
+            err_msg
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // HashMap built-in generic type tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hashmap_new_typechecks() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "HashMap.new() should typecheck: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_hashmap_insert_typechecks() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "HashMap insert should typecheck: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_hashmap_get_returns_value_type() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+        price = m.get("AAPL")
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "HashMap get should typecheck: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_hashmap_contains_key_returns_bool() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+        exists = m.contains_key("AAPL")
+        if exists {
+            OPEN(symbol, 100.0)
+        }
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "HashMap contains_key should typecheck: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_hashmap_remove_returns_hashmap() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+        m = m.remove("AAPL")
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "HashMap remove should typecheck: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_hashmap_key_type_mismatch() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+        m = m.insert(123, 200.0)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected key type mismatch error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("key") && err_msg.contains("mismatch"),
+            "Expected key type mismatch error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_hashmap_value_type_mismatch() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+        m = m.insert("GOOG", "not a number")
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected value type mismatch error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("value") && err_msg.contains("mismatch"),
+            "Expected value type mismatch error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_hashmap_new_with_args_error() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new(42)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected error for HashMap.new() with args");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("0 arguments"),
+            "Expected '0 arguments' in error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_hashmap_insert_wrong_arg_count() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("key")
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected error for insert with 1 arg");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("2 arguments"),
+            "Expected '2 arguments' in error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_hashmap_unknown_method_error() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m.clear()
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected error for unknown method");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("does not have method 'clear'"),
+            "Expected 'does not have method' error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_hashmap_unknown_static_method_error() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.create()
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected error for unknown static method");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("no static method 'create'"),
+            "Expected 'no static method' error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_hashmap_int_keys_float_values() {
+        // Test HashMap with Int keys and Float values
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert(1, 100.5)
+        m = m.insert(2, 200.5)
+        val = m.get(1)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "HashMap[Int, Float] should typecheck: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_hashmap_get_key_type_mismatch() {
+        let source = r#"
+strategy Test {
+    on bar {
+        m = HashMap.new()
+        m = m.insert("AAPL", 150.0)
+        val = m.get(42)
+    }
+}
+"#;
+        let result = check_source(source);
+        assert!(result.is_err(), "Expected key type mismatch on get");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("key") && err_msg.contains("mismatch"),
+            "Expected key type mismatch error, got: {}",
             err_msg
         );
     }

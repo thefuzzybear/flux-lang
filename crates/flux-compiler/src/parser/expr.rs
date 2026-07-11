@@ -170,6 +170,15 @@ impl ParserState {
             | Token::Null => self.parse_literal(),
             // Identifier
             Token::Ident(_) => self.parse_ident_expr(),
+            // `self` keyword used as an expression (e.g., self.field in method bodies)
+            Token::SelfKw => {
+                let span = self.current_span();
+                self.advance();
+                Ok(Expr {
+                    kind: ExprKind::Ident("self".to_string()),
+                    span,
+                })
+            }
             _ => Err(self.error_expected("expression")),
         }
     }

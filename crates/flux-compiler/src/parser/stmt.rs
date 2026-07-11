@@ -54,6 +54,8 @@ impl ParserState {
                 | Token::Bang
                 | Token::OpenParen
                 | Token::OpenBracket
+                | Token::SelfKw
+                | Token::Match
         )
     }
 

@@ -25,6 +25,8 @@ pub enum Value {
     Struct { type_name: String, fields: HashMap<String, Value> },
     /// An enum value with enum name, variant name, and named field values.
     Enum { enum_name: String, variant_name: String, fields: Vec<(String, Value)> },
+    /// A HashMap (key-value associative container).
+    HashMap(HashMap<String, Value>),
 }
 
 impl fmt::Display for Value {
@@ -84,6 +86,21 @@ impl fmt::Display for Value {
                     }
                     write!(f, ")")
                 }
+            }
+            Value::HashMap(map) => {
+                write!(f, "HashMap {{")?;
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by_key(|(k, _)| *k);
+                for (i, (key, value)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, " {}: {}", key, value)?;
+                }
+                if !entries.is_empty() {
+                    write!(f, " ")?;
+                }
+                write!(f, "}}")
             }
         }
     }
@@ -733,6 +750,16 @@ impl Interpreter {
 
             // --- Method call ---
             TypedExprKind::MethodCall { receiver, method, args } => {
+                // Handle HashMap.new() static constructor before evaluating receiver
+                // (since "HashMap" is not a runtime value, it cannot be looked up as a variable)
+                if method == "new" {
+                    if let TypedExprKind::Ident(ref name) = receiver.kind {
+                        if name == "HashMap" {
+                            return Ok(Value::HashMap(HashMap::new()));
+                        }
+                    }
+                }
+
                 let receiver_val = self.eval_expr(receiver, locals)?;
 
                 // Evaluate arguments eagerly
@@ -762,6 +789,66 @@ impl Interpreter {
                         }
                     }
                     _ => {}
+                }
+
+                // Handle built-in HashMap methods
+                if let Value::HashMap(ref map) = receiver_val {
+                    match method.as_str() {
+                        "insert" => {
+                            if evaluated_args.len() != 2 {
+                                return Err("HashMap.insert requires 2 arguments (key, value)".to_string());
+                            }
+                            let key = match &evaluated_args[0] {
+                                Value::Str(s) => s.clone(),
+                                other => format!("{}", other),
+                            };
+                            let value = evaluated_args[1].clone();
+                            let mut new_map = map.clone();
+                            new_map.insert(key, value);
+                            return Ok(Value::HashMap(new_map));
+                        }
+                        "get" => {
+                            if evaluated_args.len() != 1 {
+                                return Err("HashMap.get requires 1 argument (key)".to_string());
+                            }
+                            let key = match &evaluated_args[0] {
+                                Value::Str(s) => s.clone(),
+                                other => format!("{}", other),
+                            };
+                            match map.get(&key) {
+                                Some(val) => return Ok(val.clone()),
+                                None => return Err(format!("Key '{}' not found in HashMap", key)),
+                            }
+                        }
+                        "contains_key" => {
+                            if evaluated_args.len() != 1 {
+                                return Err("HashMap.contains_key requires 1 argument (key)".to_string());
+                            }
+                            let key = match &evaluated_args[0] {
+                                Value::Str(s) => s.clone(),
+                                other => format!("{}", other),
+                            };
+                            return Ok(Value::Bool(map.contains_key(&key)));
+                        }
+                        "remove" => {
+                            if evaluated_args.len() != 1 {
+                                return Err("HashMap.remove requires 1 argument (key)".to_string());
+                            }
+                            let key = match &evaluated_args[0] {
+                                Value::Str(s) => s.clone(),
+                                other => format!("{}", other),
+                            };
+                            let mut new_map = map.clone();
+                            new_map.remove(&key);
+                            return Ok(Value::HashMap(new_map));
+                        }
+                        "len" => {
+                            return Ok(Value::Int(map.len() as i64));
+                        }
+                        _ => {
+                            return Err(format!("No method '{}' on HashMap", method));
+                        }
+                    }
                 }
 
                 // Check if receiver is a struct with user-defined impl methods
@@ -877,6 +964,11 @@ impl Interpreter {
                 variant_name,
                 args,
             } => {
+                // Handle HashMap.new() as a built-in container constructor
+                if enum_name == "HashMap" && variant_name == "new" {
+                    return Ok(Value::HashMap(HashMap::new()));
+                }
+
                 // Look up field names from the enum definition
                 let field_names: Vec<String> = self
                     .enum_defs
@@ -2662,5 +2754,235 @@ mod tests {
             ),
             other => panic!("Expected Value::Float, got {:?}", other),
         }
+    }
+
+    // =========================================================================
+    // HashMap evaluation tests
+    // =========================================================================
+
+    #[test]
+    fn test_hashmap_new() {
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // HashMap.new() is routed through EnumConstruction with enum_name="HashMap", variant_name="new"
+        let expr = typed_expr(
+            TypedExprKind::EnumConstruction {
+                enum_name: "HashMap".to_string(),
+                variant_name: "new".to_string(),
+                args: vec![],
+            },
+            FluxType::Generic("HashMap".to_string(), vec![FluxType::String, FluxType::Float]),
+        );
+
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        match result {
+            Value::HashMap(map) => assert!(map.is_empty(), "HashMap.new() should create empty map"),
+            other => panic!("Expected Value::HashMap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hashmap_insert_and_get() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Create empty map and store in locals
+        locals.insert("m".to_string(), Value::HashMap(HashMap::new()));
+
+        // Call m.insert("key", 42.0)
+        let receiver = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let insert_expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: "insert".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("price".to_string()), FluxType::String),
+                    typed_expr(TypedExprKind::FloatLiteral(42.0), FluxType::Float),
+                ],
+            },
+            FluxType::Generic("HashMap".to_string(), vec![]),
+        );
+
+        let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+        // Store result back
+        locals.insert("m".to_string(), result);
+
+        // Call m.get("price")
+        let receiver2 = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let get_expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver2),
+                method: "get".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("price".to_string()), FluxType::String),
+                ],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&get_expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 42.0).abs() < f64::EPSILON, "get('price') should return 42.0, got {}", f),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hashmap_contains_key() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Start with a map that already has "AAPL" key
+        let mut map = HashMap::new();
+        map.insert("AAPL".to_string(), Value::Float(150.0));
+        locals.insert("registry".to_string(), Value::HashMap(map));
+
+        // Check contains_key("AAPL") → true
+        let receiver = typed_expr(TypedExprKind::Ident("registry".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: "contains_key".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("AAPL".to_string()), FluxType::String),
+                ],
+            },
+            FluxType::Bool,
+        );
+        let result = interp.eval_expr(&expr, &locals).unwrap();
+        assert!(matches!(result, Value::Bool(true)), "contains_key('AAPL') should be true");
+
+        // Check contains_key("GOOG") → false
+        let receiver2 = typed_expr(TypedExprKind::Ident("registry".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let expr2 = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver2),
+                method: "contains_key".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("GOOG".to_string()), FluxType::String),
+                ],
+            },
+            FluxType::Bool,
+        );
+        let result2 = interp.eval_expr(&expr2, &locals).unwrap();
+        assert!(matches!(result2, Value::Bool(false)), "contains_key('GOOG') should be false");
+    }
+
+    #[test]
+    fn test_hashmap_remove() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Create a map with two entries
+        let mut map = HashMap::new();
+        map.insert("AAPL".to_string(), Value::Float(150.0));
+        map.insert("GOOG".to_string(), Value::Float(2800.0));
+        locals.insert("m".to_string(), Value::HashMap(map));
+
+        // Remove "AAPL"
+        let receiver = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let remove_expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: "remove".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("AAPL".to_string()), FluxType::String),
+                ],
+            },
+            FluxType::Generic("HashMap".to_string(), vec![]),
+        );
+
+        let result = interp.eval_expr(&remove_expr, &locals).unwrap();
+        match result {
+            Value::HashMap(new_map) => {
+                assert!(!new_map.contains_key("AAPL"), "AAPL should be removed");
+                assert!(new_map.contains_key("GOOG"), "GOOG should still be present");
+                assert_eq!(new_map.len(), 1);
+            }
+            other => panic!("Expected Value::HashMap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hashmap_get_missing_key_returns_error() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+        locals.insert("m".to_string(), Value::HashMap(HashMap::new()));
+
+        // Try to get a key that doesn't exist
+        let receiver = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let get_expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: "get".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("missing".to_string()), FluxType::String),
+                ],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&get_expr, &locals);
+        assert!(result.is_err(), "get on missing key should return error");
+        assert!(result.unwrap_err().contains("not found"), "error should mention key not found");
+    }
+
+    #[test]
+    fn test_hashmap_insert_overwrites_existing_key() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Create a map with one entry
+        let mut map = HashMap::new();
+        map.insert("price".to_string(), Value::Float(100.0));
+        locals.insert("m".to_string(), Value::HashMap(map));
+
+        // Insert same key with new value
+        let receiver = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let insert_expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: "insert".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("price".to_string()), FluxType::String),
+                    typed_expr(TypedExprKind::FloatLiteral(200.0), FluxType::Float),
+                ],
+            },
+            FluxType::Generic("HashMap".to_string(), vec![]),
+        );
+
+        let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+        locals.insert("m".to_string(), result);
+
+        // Verify the overwritten value
+        let receiver2 = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
+        let get_expr = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(receiver2),
+                method: "get".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::StringLiteral("price".to_string()), FluxType::String),
+                ],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&get_expr, &locals).unwrap();
+        match result {
+            Value::Float(f) => assert!((f - 200.0).abs() < f64::EPSILON, "overwritten value should be 200.0, got {}", f),
+            other => panic!("Expected Value::Float, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hashmap_display() {
+        let mut map = HashMap::new();
+        map.insert("alpha".to_string(), Value::Float(1.5));
+        let val = Value::HashMap(map);
+        let display = format!("{}", val);
+        assert!(display.contains("alpha"), "display should contain key name");
+        assert!(display.contains("1.5"), "display should contain value");
+        assert!(display.starts_with("HashMap {"), "display should start with HashMap brace prefix");
     }
 }

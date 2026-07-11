@@ -1,11 +1,15 @@
-//! Property-based tests for interpreter match evaluation correctness.
+//! Property-based tests for interpreter correctness.
 //!
-//! These tests validate that the Flux interpreter correctly selects the matching
-//! arm in a match expression and binds pattern variables to the correct field values.
+//! These tests validate that the Flux interpreter correctly handles:
+//! - Match evaluation (Property 11): selecting the correct arm and binding pattern variables
+//! - HashMap insert-get round-trip (Property 12): last-write-wins semantics and missing key behavior
 //!
 //! Feature: flux-type-system, Property 11: Interpreter Match Evaluation Correctness
+//! Feature: flux-type-system, Property 12: Interpreter HashMap Insert-Get Round-Trip
 
 use proptest::prelude::*;
+
+use std::collections::HashMap as StdHashMap;
 
 use flux_compiler::lexer::Span;
 use flux_compiler::typeck::typed_ast::*;
@@ -369,5 +373,305 @@ proptest! {
             construction.field_values,
             enum_desc,
         );
+    }
+}
+
+
+// =============================================================================
+// Property 12: Interpreter HashMap Insert-Get Round-Trip
+// Feature: flux-type-system, Property 12
+// =============================================================================
+
+/// Describes a single HashMap operation (insert or get).
+#[derive(Debug, Clone)]
+enum HashMapOp {
+    Insert { key: String, value: f64 },
+    Get { key: String },
+}
+
+/// Strategy to generate valid HashMap key strings (short alphanumeric identifiers).
+fn arb_key() -> impl Strategy<Value = String> {
+    "[a-z]{1,6}".prop_map(|s| s)
+}
+
+/// Strategy to generate a sequence of HashMap operations with a mix of inserts and gets.
+fn arb_hashmap_ops() -> impl Strategy<Value = Vec<HashMapOp>> {
+    // Generate 2-20 operations mixing inserts and gets
+    prop::collection::vec(
+        prop_oneof![
+            // Insert: 70% probability (to build up state)
+            7 => (arb_key(), -1000.0f64..1000.0f64).prop_map(|(key, value)| HashMapOp::Insert { key, value }),
+            // Get: 30% probability
+            3 => arb_key().prop_map(|key| HashMapOp::Get { key }),
+        ],
+        2..=20,
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+    /// **Validates: Requirements 10.9**
+    ///
+    /// Property 12: Interpreter HashMap Insert-Get Round-Trip
+    ///
+    /// For any sequence of HashMap insert operations followed by get operations,
+    /// the interpreter SHALL return the most recently inserted value for each key.
+    /// Keys not inserted SHALL not be retrievable.
+    #[test]
+    fn prop_hashmap_insert_get_round_trip(
+        ops in arb_hashmap_ops(),
+    ) {
+        let mut interp = {
+            // Build a minimal TypedProgram just to construct an Interpreter
+            let program = TypedProgram {
+                imports: vec![],
+                structs: vec![],
+                enums: vec![],
+                functions: vec![],
+                impl_blocks: vec![],
+                traits: vec![],
+                data_block: None,
+                connector_block: None,
+                strategy: TypedStrategy {
+                    name: "HashMapTest".to_string(),
+                    body: vec![
+                        TypedStrategyItem::EventHandler(TypedEventHandler {
+                            event_name: "bar".to_string(),
+                            body: vec![],
+                            span: Span::new(0, 0),
+                        }),
+                    ],
+                    span: Span::new(0, 0),
+                },
+                span: Span::new(0, 0),
+            };
+            Interpreter::new(&program)
+        };
+
+        // Track expected state: the last-inserted value for each key
+        let mut expected: StdHashMap<String, f64> = StdHashMap::new();
+        // Current HashMap value in the interpreter
+        let mut current_map = Value::HashMap(StdHashMap::new());
+
+        for op in &ops {
+            match op {
+                HashMapOp::Insert { key, value } => {
+                    // Build: current_map.insert(key, value)
+                    let mut locals = StdHashMap::new();
+                    locals.insert("__map".to_string(), current_map.clone());
+
+                    let receiver = texpr(
+                        TypedExprKind::Ident("__map".to_string()),
+                        FluxType::Generic("HashMap".to_string(), vec![]),
+                    );
+                    let insert_expr = texpr(
+                        TypedExprKind::MethodCall {
+                            receiver: Box::new(receiver),
+                            method: "insert".to_string(),
+                            args: vec![
+                                texpr(TypedExprKind::StringLiteral(key.clone()), FluxType::String),
+                                texpr(TypedExprKind::FloatLiteral(*value), FluxType::Float),
+                            ],
+                        },
+                        FluxType::Generic("HashMap".to_string(), vec![]),
+                    );
+
+                    let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+                    current_map = result;
+                    expected.insert(key.clone(), *value);
+                }
+                HashMapOp::Get { key } => {
+                    let mut locals = StdHashMap::new();
+                    locals.insert("__map".to_string(), current_map.clone());
+
+                    let receiver = texpr(
+                        TypedExprKind::Ident("__map".to_string()),
+                        FluxType::Generic("HashMap".to_string(), vec![]),
+                    );
+                    let get_expr = texpr(
+                        TypedExprKind::MethodCall {
+                            receiver: Box::new(receiver),
+                            method: "get".to_string(),
+                            args: vec![
+                                texpr(TypedExprKind::StringLiteral(key.clone()), FluxType::String),
+                            ],
+                        },
+                        FluxType::Float,
+                    );
+
+                    let result = interp.eval_expr(&get_expr, &locals);
+
+                    if let Some(&expected_val) = expected.get(key) {
+                        // Key was previously inserted — get should succeed
+                        let val = result.unwrap_or_else(|e| {
+                            panic!(
+                                "Expected get('{}') to return {}, but got error: {}\nops so far: {:?}",
+                                key, expected_val, e, ops
+                            )
+                        });
+                        match val {
+                            Value::Float(f) => {
+                                prop_assert!(
+                                    (f - expected_val).abs() < 1e-10,
+                                    "get('{}') returned {} but expected {} (last-write-wins)\nops: {:?}",
+                                    key, f, expected_val, ops,
+                                );
+                            }
+                            other => {
+                                prop_assert!(
+                                    false,
+                                    "get('{}') returned {:?} instead of Float({})\nops: {:?}",
+                                    key, other, expected_val, ops,
+                                );
+                            }
+                        }
+                    } else {
+                        // Key was never inserted — get should fail
+                        prop_assert!(
+                            result.is_err(),
+                            "get('{}') should fail for never-inserted key, but got {:?}\nops: {:?}",
+                            key, result, ops,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// =============================================================================
+// Property 13: Enum Value Display Formatting
+// Feature: flux-type-system, Property 13
+// =============================================================================
+
+/// Strategy for generating valid Flux identifiers for use as enum/variant/field names.
+/// Uses a leading letter followed by lowercase alphanumeric characters.
+fn arb_flux_ident() -> impl Strategy<Value = String> {
+    "[A-Z][a-z0-9]{1,8}".prop_map(|s| s)
+}
+
+/// Strategy for generating a field name (lowercase identifier).
+fn arb_field_name() -> impl Strategy<Value = String> {
+    "[a-z][a-z0-9]{0,5}".prop_map(|s| s)
+}
+
+/// Strategy for generating a simple Value (for use as enum field values).
+fn arb_simple_value() -> impl Strategy<Value = Value> {
+    prop_oneof![
+        (-1000.0f64..1000.0f64).prop_map(Value::Float),
+        any::<i64>().prop_map(Value::Int),
+        any::<bool>().prop_map(Value::Bool),
+        "[a-z]{1,10}".prop_map(|s| Value::Str(s)),
+    ]
+}
+
+/// Description of a generated enum value for the display property test.
+#[derive(Debug, Clone)]
+struct EnumValueDesc {
+    enum_name: String,
+    variant_name: String,
+    fields: Vec<(String, Value)>,
+}
+
+/// Strategy that generates an enum value with 0 fields (unit variant).
+fn arb_unit_enum_value() -> impl Strategy<Value = EnumValueDesc> {
+    (arb_flux_ident(), arb_flux_ident()).prop_map(|(enum_name, variant_name)| EnumValueDesc {
+        enum_name,
+        variant_name,
+        fields: vec![],
+    })
+}
+
+/// Strategy that generates an enum value with 1-4 named fields (data variant).
+fn arb_data_enum_value() -> impl Strategy<Value = EnumValueDesc> {
+    (
+        arb_flux_ident(),
+        arb_flux_ident(),
+        prop::collection::vec((arb_field_name(), arb_simple_value()), 1..=4),
+    )
+        .prop_map(|(enum_name, variant_name, fields)| EnumValueDesc {
+            enum_name,
+            variant_name,
+            fields,
+        })
+}
+
+/// Strategy that generates either a unit or data enum value.
+fn arb_enum_value() -> impl Strategy<Value = EnumValueDesc> {
+    prop_oneof![arb_unit_enum_value(), arb_data_enum_value(),]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 100, .. ProptestConfig::default() })]
+
+    /// **Validates: Requirements 11.1, 11.2**
+    ///
+    /// Property 13: Enum Value Display Formatting
+    ///
+    /// For any enum value, the interpreter's Display implementation SHALL format
+    /// unit variants as `EnumName.VariantName` and data variants as
+    /// `EnumName.VariantName(field1: value1, field2: value2, ...)` with all fields listed.
+    #[test]
+    fn prop_enum_value_display_formatting(
+        desc in arb_enum_value(),
+    ) {
+        // Construct the Value::Enum from our description
+        let value = Value::Enum {
+            enum_name: desc.enum_name.clone(),
+            variant_name: desc.variant_name.clone(),
+            fields: desc.fields.clone(),
+        };
+
+        let display_output = format!("{}", value);
+
+        if desc.fields.is_empty() {
+            // Unit variant: should format as "EnumName.VariantName"
+            let expected = format!("{}.{}", desc.enum_name, desc.variant_name);
+            prop_assert_eq!(
+                &display_output,
+                &expected,
+                "Unit variant display mismatch.\nGot: {}\nExpected: {}\nDesc: {:?}",
+                display_output,
+                expected,
+                desc,
+            );
+        } else {
+            // Data variant: should format as "EnumName.VariantName(field1: value1, field2: value2)"
+            let prefix = format!("{}.{}(", desc.enum_name, desc.variant_name);
+            prop_assert!(
+                display_output.starts_with(&prefix),
+                "Data variant should start with '{}', got: '{}'\nDesc: {:?}",
+                prefix,
+                display_output,
+                desc,
+            );
+            prop_assert!(
+                display_output.ends_with(')'),
+                "Data variant should end with ')', got: '{}'\nDesc: {:?}",
+                display_output,
+                desc,
+            );
+
+            // Verify all fields are present in the correct format
+            let fields_str = &display_output[prefix.len()..display_output.len() - 1];
+            let expected_fields: Vec<String> = desc
+                .fields
+                .iter()
+                .map(|(name, val)| format!("{}: {}", name, val))
+                .collect();
+            let expected_fields_str = expected_fields.join(", ");
+
+            prop_assert_eq!(
+                fields_str,
+                &expected_fields_str,
+                "Data variant fields mismatch.\nGot fields: '{}'\nExpected fields: '{}'\nFull output: '{}'\nDesc: {:?}",
+                fields_str,
+                expected_fields_str,
+                display_output,
+                desc,
+            );
+        }
     }
 }
