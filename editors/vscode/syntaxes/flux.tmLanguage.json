@@ -11,9 +11,11 @@
     { "include": "#keywords-declaration" },
     { "include": "#builtin-types" },
     { "include": "#function-definition" },
+    { "include": "#enum-variant-access" },
     { "include": "#struct-type-names" },
     { "include": "#strategy-name" },
     { "include": "#constants" },
+    { "include": "#self-keyword" },
     { "include": "#bar-context" },
     { "include": "#builtin-functions" },
     { "include": "#function-call" },
@@ -34,7 +36,7 @@
     "keywords-control": {
       "patterns": [
         {
-          "match": "\\b(if|elif|else|for|while|return|in)\\b",
+          "match": "\\b(if|elif|else|for|while|return|in|match)\\b",
           "name": "keyword.control.flux"
         }
       ]
@@ -42,7 +44,7 @@
     "keywords-declaration": {
       "patterns": [
         {
-          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector|struct)\\b",
+          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector|struct|enum|impl|trait)\\b",
           "name": "keyword.other.flux"
         }
       ]
@@ -117,15 +119,35 @@
     "builtin-types": {
       "patterns": [
         {
-          "match": "\\b(f64|int|bool|str)\\b",
+          "match": "\\b(f64|int|bool|str|HashMap)\\b",
           "name": "support.type.primitive.flux"
+        }
+      ]
+    },
+    "self-keyword": {
+      "patterns": [
+        {
+          "match": "\\bself\\b",
+          "name": "variable.language.self.flux"
+        }
+      ]
+    },
+    "enum-variant-access": {
+      "patterns": [
+        {
+          "comment": "Enum variant access: EnumName.VariantName or EnumName.VariantName(...)",
+          "match": "\\b([A-Z][A-Za-z0-9_]*)\\.([A-Z][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "entity.name.type.enum.flux" },
+            "2": { "name": "variable.other.enummember.flux" }
+          }
         }
       ]
     },
     "struct-type-names": {
       "patterns": [
         {
-          "comment": "Capitalized identifiers used as struct/type names (e.g., Quote, Tick, Bar, Book, Level)",
+          "comment": "Capitalized identifiers used as struct/enum/type names (e.g., Quote, Tick, Signal, Regime)",
           "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
           "name": "entity.name.type.struct.flux"
         }
@@ -155,13 +177,17 @@
       "patterns": [
         {
           "comment": "Built-in bar context variables available in on_bar handlers",
-          "match": "\\b(close|open|high|low|volume|symbol|in_position)\\b",
+          "match": "\\b(close|open|high|low|volume|symbol|in_position|bar)\\b",
           "name": "variable.language.flux"
         }
       ]
     },
     "operators": {
       "patterns": [
+        {
+          "match": "=>",
+          "name": "keyword.operator.arrow.match.flux"
+        },
         {
           "match": "->",
           "name": "punctuation.arrow.flux"
@@ -179,7 +205,7 @@
           "name": "keyword.operator.arithmetic.flux"
         },
         {
-          "match": "(?<![!=<>])=(?!=)",
+          "match": "(?<![!=<>])=(?!=|>)",
           "name": "keyword.operator.assignment.flux"
         }
       ]

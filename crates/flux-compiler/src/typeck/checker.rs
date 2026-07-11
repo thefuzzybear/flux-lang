@@ -43,6 +43,10 @@ pub(crate) struct TypeChecker {
     current_type_params: HashSet<String>,
     /// Trait bounds on function type parameters: fn_name → [(type_param_name, trait_name)]
     fn_trait_bounds: HashMap<String, Vec<(String, String)>>,
+    /// Trait bounds for type parameters currently in scope: type_param_name → trait_name.
+    /// Populated when checking a generic function body so that method calls on type
+    /// parameters can be resolved against their trait bound.
+    current_type_param_bounds: HashMap<String, String>,
     /// Warnings collected during type checking (non-fatal diagnostics).
     pub(crate) warnings: Vec<String>,
 }
@@ -59,6 +63,7 @@ impl TypeChecker {
             current_fn_return_type: None,
             current_type_params: HashSet::new(),
             fn_trait_bounds: HashMap::new(),
+            current_type_param_bounds: HashMap::new(),
             warnings: Vec::new(),
         }
     }
@@ -929,6 +934,8 @@ impl TypeChecker {
                 }
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
+                } else if self.env.has_enum(name) {
+                    Ok(FluxType::Enum(name.clone()))
                 } else {
                     let msg = if let Some(import_path) = Self::suggest_import_for_type(name) {
                         format!(
@@ -1898,8 +1905,12 @@ impl TypeChecker {
 
         // Set type parameters in scope for resolving generic function signatures
         let prev_type_params = std::mem::take(&mut self.current_type_params);
+        let prev_type_param_bounds = std::mem::take(&mut self.current_type_param_bounds);
         for tp in &fn_def.type_params {
             self.current_type_params.insert(tp.name.clone());
+            if let Some(ref bound) = tp.bound {
+                self.current_type_param_bounds.insert(tp.name.clone(), bound.clone());
+            }
         }
 
         // Resolve declared return type if present
@@ -1965,6 +1976,8 @@ impl TypeChecker {
 
         self.current_fn_return_type = prev_fn_return_type;
         self.in_function_body = false;
+        self.current_type_params = prev_type_params;
+        self.current_type_param_bounds = prev_type_param_bounds;
         self.env.pop_scope();
 
         Ok(TypedFnDef {
@@ -3363,6 +3376,87 @@ impl TypeChecker {
                     typed_receiver, &key_type, &value_type, method, args, span,
                 )
             }
+            FluxType::TypeParam(param_name) => {
+                // Look up the trait bound for this type parameter
+                let trait_name = match self.current_type_param_bounds.get(param_name) {
+                    Some(name) => name.clone(),
+                    None => {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "type {} does not have method '{}' (no trait bound)",
+                                param_name, method
+                            ),
+                        ));
+                    }
+                };
+
+                // Look up the trait definition to find the method signature
+                let trait_info = match self.env.get_trait(&trait_name) {
+                    Some(info) => info.clone(),
+                    None => {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "trait '{}' (bound on type parameter '{}') is not defined",
+                                trait_name, param_name
+                            ),
+                        ));
+                    }
+                };
+
+                // Find the method in the trait's method signatures
+                let trait_method = match trait_info.methods.iter().find(|m| m.name == method) {
+                    Some(m) => m.clone(),
+                    None => {
+                        return Err(self.type_error(
+                            span,
+                            format!(
+                                "trait '{}' does not have method '{}'",
+                                trait_name, method
+                            ),
+                        ));
+                    }
+                };
+
+                // Check argument count (trait method param_types excludes self)
+                let expected_params = &trait_method.param_types;
+                if args.len() != expected_params.len() {
+                    return Err(self.type_error(
+                        span,
+                        format!(
+                            "Method '{}' on trait '{}' expects {} arguments, found {}",
+                            method, trait_name, expected_params.len(), args.len()
+                        ),
+                    ));
+                }
+
+                // Typecheck arguments
+                let mut typed_args = Vec::new();
+                for (arg, expected_ty) in args.into_iter().zip(expected_params.iter()) {
+                    let typed_arg = self.check_expr(arg)?;
+                    if !typed_arg.resolved_type.is_assignable_to(expected_ty) {
+                        return Err(self.type_error(
+                            typed_arg.span,
+                            format!(
+                                "Method '{}' argument expects {}, found {}",
+                                method, expected_ty, typed_arg.resolved_type
+                            ),
+                        ));
+                    }
+                    typed_args.push(typed_arg);
+                }
+
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: method.to_string(),
+                        args: typed_args,
+                    },
+                    resolved_type: trait_method.return_type.clone(),
+                    span,
+                })
+            }
             _ => Err(self.type_error(
                 span,
                 format!("type {} does not have method '{}'", receiver_ty, method),
@@ -3921,6 +4015,11 @@ impl TypeChecker {
         let enum_info = match self.env.get_enum(enum_name) {
             Some(info) => info.clone(),
             None => {
+                // If the name is a known struct, treat this as a static method call
+                // (e.g., PriceLevel.new(...) parsed as EnumConstruction due to PascalCase heuristic)
+                if self.struct_registry.contains_key(enum_name) {
+                    return self.check_struct_static_call(enum_name, variant_name, args, span);
+                }
                 return Err(self.type_error(
                     span,
                     format!("unknown enum type '{}'", enum_name),
@@ -3995,6 +4094,82 @@ impl TypeChecker {
     // -----------------------------------------------------------------------
 
     /// Handle static method calls on `HashMap` (e.g., `HashMap.new()`).
+    /// Handle static method calls on structs (e.g., `PriceLevel.new(...)`)
+    /// that were parsed as EnumConstruction due to the PascalCase heuristic.
+    fn check_struct_static_call(
+        &mut self,
+        struct_name: &str,
+        method_name: &str,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<TypedExpr> {
+        // Look up the static method in the type environment
+        let method_info_opt = self.env.get_method(struct_name, method_name).cloned();
+        if let Some(method_info) = method_info_opt {
+            if !method_info.is_static {
+                return Err(self.type_error(
+                    span,
+                    format!(
+                        "Method '{}' on type '{}' requires an instance (has `self` parameter)",
+                        method_name, struct_name
+                    ),
+                ));
+            }
+
+            let expected_params = method_info.param_types;
+            let return_type = method_info.return_type;
+
+            // Check argument count
+            if args.len() != expected_params.len() {
+                return Err(self.type_error(
+                    span,
+                    format!(
+                        "Static method '{}' on type '{}' expects {} arguments, found {}",
+                        method_name, struct_name, expected_params.len(), args.len()
+                    ),
+                ));
+            }
+
+            // Typecheck arguments
+            let mut typed_args = Vec::new();
+            for (arg, expected_ty) in args.into_iter().zip(expected_params.iter()) {
+                let typed_arg = self.check_expr(arg)?;
+                if !typed_arg.resolved_type.is_assignable_to(expected_ty) {
+                    return Err(self.type_error(
+                        typed_arg.span,
+                        format!(
+                            "Static method '{}' argument expects {}, found {}",
+                            method_name, expected_ty, typed_arg.resolved_type
+                        ),
+                    ));
+                }
+                typed_args.push(typed_arg);
+            }
+
+            Ok(TypedExpr {
+                kind: TypedExprKind::MethodCall {
+                    receiver: Box::new(TypedExpr {
+                        kind: TypedExprKind::Ident(struct_name.to_string()),
+                        resolved_type: FluxType::Struct(struct_name.to_string()),
+                        span,
+                    }),
+                    method: method_name.to_string(),
+                    args: typed_args,
+                },
+                resolved_type: return_type,
+                span,
+            })
+        } else {
+            Err(self.type_error(
+                span,
+                format!(
+                    "No static method '{}' on struct '{}'",
+                    method_name, struct_name
+                ),
+            ))
+        }
+    }
+
     fn check_hashmap_static_call(
         &mut self,
         method_name: &str,
