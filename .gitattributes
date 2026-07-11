@@ -1,0 +1,8 @@
+# Syntax highlighting for .flux files on GitHub
+# Uses Python highlighting as a close approximation of Flux syntax.
+#
+# TODO: Once Flux has enough public repos, submit a PR to
+# https://github.com/github-linguist/linguist to register Flux as a
+# first-class language with our own TextMate grammar
+# (editors/vscode/syntaxes/flux.tmLanguage.json).
+*.flux linguist-language=Python
