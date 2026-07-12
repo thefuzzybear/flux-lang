@@ -492,3 +492,189 @@ fn test_demo_complete_file_structure() {
         }
     }
 }
+
+// =============================================================================
+// Trading Signal Production Tests (Interpreter Type System)
+// =============================================================================
+
+/// Validates: Requirement 9.1 (interpreter type system producing signals)
+///
+/// This test verifies that the pairs_trading demo strategy actually produces
+/// OPEN or CLOSE trading signals during backtest — not just that it exits
+/// successfully. A backtest that exits 0 with zero signals means the interpreter
+/// is silently failing on some type system construct (structs, enums, match, etc.).
+#[test]
+fn test_pairs_trading_produces_trading_signals() {
+    let output = run_flux(&[
+        "backtest",
+        strategy_path("pairs_trading").to_str().unwrap(),
+        "--data",
+        data_path("pairs_trading").to_str().unwrap(),
+        "--capital",
+        "100000",
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "pairs_trading backtest exited with non-zero code, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The key assertion: the interpreter must have evaluated the type system
+    // constructs (structs, enums, match expressions, HashMap ops) to actually
+    // produce trading signals. If we get exit 0 but no Open/Close lines,
+    // the interpreter is silently skipping type system AST nodes.
+    let has_open_signal = stdout.lines().any(|line| line.contains(" Open "));
+    let has_close_signal = stdout.lines().any(|line| line.contains(" Close "));
+
+    assert!(
+        has_open_signal || has_close_signal,
+        "pairs_trading backtest produced no trading signals (no Open or Close in output).\n\
+         This means the interpreter failed to evaluate type system constructs.\n\
+         stdout:\n{}",
+        stdout
+    );
+}
+
+// =============================================================================
+// Signal Production Integration Tests (interpreter-type-system spec)
+// =============================================================================
+
+/// Validates: Requirement 9.3
+///
+/// The order_book demo exercises nested structs and multi-field match destructuring
+/// (OrderBook with best_bid/best_ask sub-structs). If this test fails, it likely means
+/// nested struct field access (`book.best_bid.price`) or match with multiple bindings
+/// isn't working in the interpreter.
+#[test]
+fn test_order_book_produces_trading_signals() {
+    let strat = strategy_path("order_book");
+    let data = data_path("order_book");
+    let output = run_flux(&[
+        "backtest",
+        strat.to_str().unwrap(),
+        "--data",
+        data.to_str().unwrap(),
+        "--capital",
+        "100000",
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "`flux backtest` failed for order_book, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The backtest must produce at least one Open or Close signal line,
+    // confirming the interpreter handles nested struct field access and
+    // multi-field match destructuring correctly.
+    let has_signal = stdout.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.contains(" Open ") || trimmed.contains(" Close ")
+    });
+
+    assert!(
+        has_signal,
+        "order_book backtest produced no Open or Close signals.\n\
+         This likely means nested struct field access (book.best_bid.price) or \
+         match with multiple bindings is not working.\n\
+         Full stdout:\n{}",
+        stdout
+    );
+}
+
+// =============================================================================
+// Signal Production Verification Tests
+// =============================================================================
+
+/// Validates: Requirement 9.2
+///
+/// The regime_detector demo exercises trait-bounded generics (e.g.,
+/// `fn detect_regime[T: RegimeDetector](detector: T, ...)`) and must produce
+/// at least one OPEN or CLOSE signal when backtested against its data.csv.
+/// If this test fails, it likely means trait method dispatch via generic
+/// functions isn't working correctly in the interpreter.
+#[test]
+fn test_regime_detector_produces_trading_signals() {
+    let output = run_flux(&[
+        "backtest",
+        strategy_path("regime_detector").to_str().unwrap(),
+        "--data",
+        data_path("regime_detector").to_str().unwrap(),
+        "--capital",
+        "100000",
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "regime_detector backtest failed with non-zero exit code, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The backtest output contains signal lines in the format:
+    //   "{bar_index} Open {symbol} {qty}" or "{bar_index} Close {symbol}"
+    // At least one such signal must be present for the strategy to be meaningful.
+    let has_open_signal = stdout.lines().any(|line| line.contains(" Open "));
+    let has_close_signal = stdout.lines().any(|line| line.contains(" Close "));
+
+    assert!(
+        has_open_signal || has_close_signal,
+        "regime_detector backtest produced no trading signals (no Open or Close lines found).\n\
+         This likely indicates trait method dispatch via generic functions is broken.\n\
+         stdout:\n{}",
+        stdout
+    );
+}
+
+/// Validates: Requirement 9.4
+///
+/// The live_connector demo exercises trait impls and conditional signals
+/// (AlertLevel enum with match expression, SessionState struct with impl block,
+/// DataFilter trait, and HashMap lookups). If this test fails, it likely means
+/// trait method dispatch or some conditional control flow with type system
+/// constructs isn't working in the interpreter.
+#[test]
+fn test_live_connector_produces_trading_signals() {
+    let output = run_flux(&[
+        "backtest",
+        strategy_path("live_connector").to_str().unwrap(),
+        "--data",
+        data_path("live_connector").to_str().unwrap(),
+        "--capital",
+        "100000",
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "live_connector backtest failed with non-zero exit code, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // The backtest must produce at least one OPEN or CLOSE signal line,
+    // confirming the interpreter handles trait impls (DataFilter), enum match
+    // expressions (AlertLevel), struct instance methods (SessionState.update),
+    // and HashMap operations correctly in a combined strategy.
+    let has_open_signal = stdout.lines().any(|line| line.contains(" Open ") || line.contains("OPEN"));
+    let has_close_signal = stdout.lines().any(|line| line.contains(" Close ") || line.contains("CLOSE"));
+
+    assert!(
+        has_open_signal || has_close_signal,
+        "live_connector backtest produced no trading signals (no Open/OPEN or Close/CLOSE lines found).\n\
+         This likely indicates trait method dispatch or conditional control flow with \
+         type system constructs (enum match, struct methods, HashMap) is broken.\n\
+         stdout:\n{}",
+        stdout
+    );
+}

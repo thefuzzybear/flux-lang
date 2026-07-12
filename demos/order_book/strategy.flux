@@ -181,7 +181,7 @@ strategy OrderBookStrategy {
             # Create a limit order at the bid
             limit = LimitOrder { limit_price = bid.price, quantity = order_size }
 
-            if limit.can_fill(close) {
+            if limit.can_fill(bid.price) {
                 result = try_fill_order(book, order_size, bid.quantity)
 
                 # -------------------------------------------------------

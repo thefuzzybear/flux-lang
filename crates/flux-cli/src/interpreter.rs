@@ -739,9 +739,9 @@ impl Interpreter {
             TypedExprKind::MemberAccess { object, field } => {
                 let obj_val = self.eval_expr(object, locals)?;
                 match obj_val {
-                    Value::Struct { fields: ref field_map, .. } => {
+                    Value::Struct { type_name: ref tn, fields: ref field_map } => {
                         field_map.get(field).cloned().ok_or_else(|| {
-                            format!("runtime error: struct has no field '{}'", field)
+                            format!("runtime error: struct '{}' has no field '{}'", tn, field)
                         })
                     }
                     _ => Err(format!("member access requires a struct value, got {}", obj_val)),
@@ -756,6 +756,62 @@ impl Interpreter {
                     if let TypedExprKind::Ident(ref name) = receiver.kind {
                         if name == "HashMap" {
                             return Ok(Value::HashMap(HashMap::new()));
+                        }
+                    }
+                }
+
+                // General static method dispatch: check if receiver is a type name
+                // that matches a key in impl_methods and the method's first param is NOT `self`
+                if let TypedExprKind::Ident(ref name) = receiver.kind {
+                    if let Some(method_def) = self
+                        .impl_methods
+                        .get(name)
+                        .and_then(|methods| methods.get(method))
+                        .cloned()
+                    {
+                        // Check that the first param is NOT "self" (static method)
+                        let is_static = method_def.params.first().map_or(true, |p| p != "self");
+                        if is_static {
+                            if self.call_depth >= self.max_call_depth {
+                                return Err(format!(
+                                    "stack overflow: maximum call depth ({}) exceeded",
+                                    self.max_call_depth
+                                ));
+                            }
+                            self.call_depth += 1;
+
+                            // Evaluate arguments
+                            let evaluated_args: Vec<Value> = args
+                                .iter()
+                                .map(|a| self.eval_expr(a, locals))
+                                .collect::<Result<Vec<_>, _>>()?;
+
+                            // Bind arguments to parameters
+                            let mut fn_locals = HashMap::new();
+                            for (param_name, arg_value) in method_def.params.iter().zip(evaluated_args.iter()) {
+                                fn_locals.insert(param_name.clone(), arg_value.clone());
+                            }
+                            // Inject bar context from caller's locals
+                            for ctx_name in &["close", "open", "high", "low", "volume", "symbol", "in_position"] {
+                                if let Some(val) = locals.get(*ctx_name) {
+                                    fn_locals.insert(ctx_name.to_string(), val.clone());
+                                }
+                            }
+
+                            let result = self.exec_fn_body(&method_def.body, &mut fn_locals);
+                            self.call_depth -= 1;
+                            return result;
+                        }
+                    } else if self.impl_methods.contains_key(name) {
+                        // Type exists but method doesn't — return descriptive error
+                        // (only if this name is NOT resolvable as a variable)
+                        let is_variable = locals.contains_key(name)
+                            || self.params.contains_key(name)
+                            || self.state.contains_key(name);
+                        if !is_variable {
+                            return Err(format!(
+                                "No static method '{}' on type '{}'", method, name
+                            ));
                         }
                     }
                 }
@@ -817,7 +873,7 @@ impl Interpreter {
                             };
                             match map.get(&key) {
                                 Some(val) => return Ok(val.clone()),
-                                None => return Err(format!("Key '{}' not found in HashMap", key)),
+                                None => return Ok(Value::Null),
                             }
                         }
                         "contains_key" => {
@@ -1026,16 +1082,16 @@ impl Interpreter {
                                             );
                                         }
                                     }
-                                    // Execute arm body, return value of last expression
+                                    // Execute arm body, collecting signals and capturing last expr value
                                     let mut result = Value::Null;
-                                    for stmt in &arm.body {
-                                        // Execute the statement for side effects + signals
-                                        let _signals = self.exec_stmt(stmt, &mut arm_locals)?;
-                                        // If the last statement is an expression, capture its value
-                                        if let TypedStmt::Expr(expr_stmt) = stmt {
-                                            result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
-                                        } else {
-                                            result = Value::Null;
+                                    for (i, stmt) in arm.body.iter().enumerate() {
+                                        let stmt_signals = self.exec_stmt(stmt, &mut arm_locals)?;
+                                        self.fn_signals.extend(stmt_signals);
+                                        // Capture value of the last expression statement
+                                        if i == arm.body.len() - 1 {
+                                            if let TypedStmt::Expr(expr_stmt) = stmt {
+                                                result = self.eval_expr(&expr_stmt.expr, &arm_locals)?;
+                                            }
                                         }
                                     }
                                     return Ok(result);
@@ -1046,12 +1102,13 @@ impl Interpreter {
                             // Wildcard matches anything
                             let mut arm_locals = locals.clone();
                             let mut result = Value::Null;
-                            for stmt in &arm.body {
-                                let _signals = self.exec_stmt(stmt, &mut arm_locals)?;
-                                if let TypedStmt::Expr(expr_stmt) = stmt {
-                                    result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
-                                } else {
-                                    result = Value::Null;
+                            for (i, stmt) in arm.body.iter().enumerate() {
+                                let stmt_signals = self.exec_stmt(stmt, &mut arm_locals)?;
+                                self.fn_signals.extend(stmt_signals);
+                                if i == arm.body.len() - 1 {
+                                    if let TypedStmt::Expr(expr_stmt) = stmt {
+                                        result = self.eval_expr(&expr_stmt.expr, &arm_locals)?;
+                                    }
                                 }
                             }
                             return Ok(result);
@@ -1059,8 +1116,15 @@ impl Interpreter {
                     }
                 }
 
-                // No arm matched (shouldn't happen with exhaustiveness checking)
-                Ok(Value::Null)
+                // No arm matched — return a descriptive runtime error
+                if let Value::Enum { ref enum_name, ref variant_name, .. } = scrutinee_val {
+                    Err(format!(
+                        "runtime error: non-exhaustive match on {}.{}",
+                        enum_name, variant_name
+                    ))
+                } else {
+                    Err("runtime error: non-exhaustive match on unknown value".to_string())
+                }
             }
         }
     }
@@ -1227,6 +1291,25 @@ impl Interpreter {
                 let mut signals = Vec::new();
                 // Drain any signals emitted by user-function calls
                 signals.append(&mut self.fn_signals);
+
+                // Implicit reassignment for mutating HashMap methods (insert, remove).
+                // When a MethodCall on an Ident receiver with a mutating method produces
+                // a Value::HashMap, write it back to the variable so the user doesn't need
+                // to write `map = map.insert(k, v)` explicitly.
+                if let TypedExprKind::MethodCall { receiver, method, .. } = &expr_stmt.expr.kind {
+                    if matches!(method.as_str(), "insert" | "remove") {
+                        if let TypedExprKind::Ident(name) = &receiver.kind {
+                            if matches!(&value, Value::HashMap(_)) {
+                                if self.state.contains_key(name) {
+                                    self.state.insert(name.clone(), value.clone());
+                                } else {
+                                    locals.insert(name.clone(), value.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Also collect if the expression itself is a signal
                 match value {
                     Value::Signal(sig) => {
@@ -2905,12 +2988,12 @@ mod tests {
     }
 
     #[test]
-    fn test_hashmap_get_missing_key_returns_error() {
+    fn test_hashmap_get_missing_key_returns_null() {
         let mut interp = make_interp();
         let mut locals = HashMap::new();
         locals.insert("m".to_string(), Value::HashMap(HashMap::new()));
 
-        // Try to get a key that doesn't exist
+        // Try to get a key that doesn't exist — should return Null
         let receiver = typed_expr(TypedExprKind::Ident("m".to_string()), FluxType::Generic("HashMap".to_string(), vec![]));
         let get_expr = typed_expr(
             TypedExprKind::MethodCall {
@@ -2924,8 +3007,8 @@ mod tests {
         );
 
         let result = interp.eval_expr(&get_expr, &locals);
-        assert!(result.is_err(), "get on missing key should return error");
-        assert!(result.unwrap_err().contains("not found"), "error should mention key not found");
+        assert!(result.is_ok(), "get on missing key should return Ok(Null)");
+        assert!(matches!(result.unwrap(), Value::Null), "get on missing key should return Null");
     }
 
     #[test]
@@ -2984,5 +3067,929 @@ mod tests {
         assert!(display.contains("alpha"), "display should contain key name");
         assert!(display.contains("1.5"), "display should contain value");
         assert!(display.starts_with("HashMap {"), "display should start with HashMap brace prefix");
+    }
+
+    // ========================================================================
+    // Static method dispatch tests (Task 1.1)
+    // ========================================================================
+
+    #[test]
+    fn test_static_method_dispatch_basic() {
+        use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
+
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // Register a static method: PairState.new(lookback) -> returns a Struct
+        let mut pair_state_methods = HashMap::new();
+        pair_state_methods.insert(
+            "new".to_string(),
+            TypedFnDef {
+                name: "new".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["lookback".to_string()], // No "self" — static method
+                param_types: vec![FluxType::Int],
+                body: vec![
+                    // return PairState { lookback: lookback, z_score: 0.0 }
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(
+                            TypedExprKind::StructLiteral {
+                                struct_name: "PairState".to_string(),
+                                fields: vec![
+                                    (
+                                        "lookback".to_string(),
+                                        typed_expr(TypedExprKind::Ident("lookback".to_string()), FluxType::Int),
+                                    ),
+                                    (
+                                        "z_score".to_string(),
+                                        typed_expr(TypedExprKind::FloatLiteral(0.0), FluxType::Float),
+                                    ),
+                                ],
+                            },
+                            FluxType::Struct("PairState".to_string()),
+                        )),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Struct("PairState".to_string()),
+                span: Span::new(0, 0),
+            },
+        );
+        interp.impl_methods.insert("PairState".to_string(), pair_state_methods);
+
+        // Call PairState.new(20)
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("PairState".to_string()),
+                    FluxType::Struct("PairState".to_string()),
+                )),
+                method: "new".to_string(),
+                args: vec![typed_expr(TypedExprKind::IntLiteral(20), FluxType::Int)],
+            },
+            FluxType::Struct("PairState".to_string()),
+        );
+
+        let result = interp.eval_expr(&method_call, &locals).unwrap();
+        match result {
+            Value::Struct { type_name, fields } => {
+                assert_eq!(type_name, "PairState");
+                assert!(matches!(fields.get("lookback"), Some(Value::Int(20))));
+                assert!(matches!(fields.get("z_score"), Some(Value::Float(f)) if *f == 0.0));
+            }
+            other => panic!("Expected Struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_static_method_dispatch_error_unknown_method() {
+        use flux_compiler::typeck::typed_ast::TypedFnDef;
+
+        let mut interp = make_interp();
+        let locals = HashMap::new();
+
+        // Register a type with one method
+        let mut methods = HashMap::new();
+        methods.insert(
+            "new".to_string(),
+            TypedFnDef {
+                name: "new".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["x".to_string()],
+                param_types: vec![FluxType::Int],
+                body: vec![],
+                return_type: FluxType::Struct("MyType".to_string()),
+                span: Span::new(0, 0),
+            },
+        );
+        interp.impl_methods.insert("MyType".to_string(), methods);
+
+        // Call MyType.unknown_method() — should error
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("MyType".to_string()),
+                    FluxType::Struct("MyType".to_string()),
+                )),
+                method: "nonexistent".to_string(),
+                args: vec![],
+            },
+            FluxType::Null,
+        );
+
+        let result = interp.eval_expr(&method_call, &locals);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("MyType"), "error should mention type name: {}", err);
+        assert!(err.contains("nonexistent"), "error should mention method name: {}", err);
+    }
+
+    #[test]
+    fn test_static_method_does_not_intercept_variable() {
+        use flux_compiler::typeck::typed_ast::TypedFnDef;
+
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Register a type "Foo" with a static method "bar"
+        let mut methods = HashMap::new();
+        methods.insert(
+            "bar".to_string(),
+            TypedFnDef {
+                name: "bar".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["x".to_string()], // No self — static
+                param_types: vec![FluxType::Int],
+                body: vec![
+                    TypedStmt::Return(flux_compiler::typeck::typed_ast::TypedReturnStmt {
+                        value: Some(typed_expr(TypedExprKind::IntLiteral(999), FluxType::Int)),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Int,
+                span: Span::new(0, 0),
+            },
+        );
+        interp.impl_methods.insert("Foo".to_string(), methods);
+
+        // Also have a local variable named "Foo" that is a Struct
+        let mut foo_fields = HashMap::new();
+        foo_fields.insert("val".to_string(), Value::Int(42));
+        locals.insert("Foo".to_string(), Value::Struct {
+            type_name: "Foo".to_string(),
+            fields: foo_fields,
+        });
+
+        // Calling Foo.bar(1) — since "Foo" is in impl_methods AND the method is static,
+        // it should dispatch statically (type-name takes priority for static methods)
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("Foo".to_string()),
+                    FluxType::Struct("Foo".to_string()),
+                )),
+                method: "bar".to_string(),
+                args: vec![typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int)],
+            },
+            FluxType::Int,
+        );
+
+        let result = interp.eval_expr(&method_call, &locals).unwrap();
+        assert!(matches!(result, Value::Int(999)));
+    }
+
+    // ========================================================================
+    // Instance method self.method() nested dispatch test (Task 4.1)
+    // ========================================================================
+
+    #[test]
+    fn test_instance_method_self_nested_dispatch() {
+        use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
+
+        let mut interp = make_interp();
+        let _locals: HashMap<String, Value> = HashMap::new();
+
+        // Define a struct type "Calculator" with two instance methods:
+        //   - get_value(self) -> self.value
+        //   - double_value(self) -> self.get_value() * 2
+        //
+        // This tests that within a method body, calling self.get_value()
+        // properly dispatches through impl_methods using the struct's type_name.
+
+        let mut calc_methods = HashMap::new();
+
+        // Method: get_value(self) -> returns self.value
+        calc_methods.insert(
+            "get_value".to_string(),
+            TypedFnDef {
+                name: "get_value".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["self".to_string()],
+                param_types: vec![FluxType::Struct("Calculator".to_string())],
+                body: vec![
+                    // return self.value
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(
+                            TypedExprKind::MemberAccess {
+                                object: Box::new(typed_expr(
+                                    TypedExprKind::Ident("self".to_string()),
+                                    FluxType::Struct("Calculator".to_string()),
+                                )),
+                                field: "value".to_string(),
+                            },
+                            FluxType::Float,
+                        )),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Float,
+                span: Span::new(0, 0),
+            },
+        );
+
+        // Method: double_value(self) -> self.get_value() * 2.0
+        calc_methods.insert(
+            "double_value".to_string(),
+            TypedFnDef {
+                name: "double_value".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec!["self".to_string()],
+                param_types: vec![FluxType::Struct("Calculator".to_string())],
+                body: vec![
+                    // return self.get_value() * 2.0
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(
+                            TypedExprKind::BinaryOp {
+                                left: Box::new(typed_expr(
+                                    TypedExprKind::MethodCall {
+                                        receiver: Box::new(typed_expr(
+                                            TypedExprKind::Ident("self".to_string()),
+                                            FluxType::Struct("Calculator".to_string()),
+                                        )),
+                                        method: "get_value".to_string(),
+                                        args: vec![],
+                                    },
+                                    FluxType::Float,
+                                )),
+                                op: BinOp::Mul,
+                                right: Box::new(typed_expr(
+                                    TypedExprKind::FloatLiteral(2.0),
+                                    FluxType::Float,
+                                )),
+                            },
+                            FluxType::Float,
+                        )),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Float,
+                span: Span::new(0, 0),
+            },
+        );
+
+        interp.impl_methods.insert("Calculator".to_string(), calc_methods);
+
+        // Create a Calculator struct value with value = 21.0
+        let mut calc_fields = HashMap::new();
+        calc_fields.insert("value".to_string(), Value::Float(21.0));
+        let calc_value = Value::Struct {
+            type_name: "Calculator".to_string(),
+            fields: calc_fields,
+        };
+
+        // Store calc in locals so we can call methods on it
+        let mut test_locals = HashMap::new();
+        test_locals.insert("calc".to_string(), calc_value);
+
+        // Call calc.double_value() — this should:
+        // 1. Dispatch to Calculator's double_value method
+        // 2. Bind self = calc (the Value::Struct)
+        // 3. In the method body, evaluate self.get_value() which:
+        //    a. Looks up "self" in method_locals → finds Value::Struct { type_name: "Calculator" }
+        //    b. Dispatches through impl_methods["Calculator"]["get_value"]
+        //    c. Returns self.value = 21.0
+        // 4. Multiply by 2.0 → 42.0
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("calc".to_string()),
+                    FluxType::Struct("Calculator".to_string()),
+                )),
+                method: "double_value".to_string(),
+                args: vec![],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        match result {
+            Value::Float(f) => assert!(
+                (f - 42.0).abs() < f64::EPSILON,
+                "Expected 42.0, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float(42.0), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_instance_method_self_nested_dispatch_with_args() {
+        use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
+
+        let mut interp = make_interp();
+
+        // Define a struct type "PairState" with two instance methods:
+        //   - calculate_zscore(self, spread, avg, std) -> (spread - avg) / std
+        //   - update(self, spread, avg, std) -> self.calculate_zscore(spread, avg, std)
+        //
+        // This mimics the pairs_trading pattern where update() calls self.calculate_zscore().
+
+        let mut pair_methods = HashMap::new();
+
+        // Method: calculate_zscore(self, spread, avg, std_dev) -> (spread - avg) / std_dev
+        pair_methods.insert(
+            "calculate_zscore".to_string(),
+            TypedFnDef {
+                name: "calculate_zscore".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec![
+                    "self".to_string(),
+                    "spread".to_string(),
+                    "avg".to_string(),
+                    "std_dev".to_string(),
+                ],
+                param_types: vec![
+                    FluxType::Struct("PairState".to_string()),
+                    FluxType::Float,
+                    FluxType::Float,
+                    FluxType::Float,
+                ],
+                body: vec![
+                    // return (spread - avg) / std_dev
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(
+                            TypedExprKind::BinaryOp {
+                                left: Box::new(typed_expr(
+                                    TypedExprKind::BinaryOp {
+                                        left: Box::new(typed_expr(
+                                            TypedExprKind::Ident("spread".to_string()),
+                                            FluxType::Float,
+                                        )),
+                                        op: BinOp::Sub,
+                                        right: Box::new(typed_expr(
+                                            TypedExprKind::Ident("avg".to_string()),
+                                            FluxType::Float,
+                                        )),
+                                    },
+                                    FluxType::Float,
+                                )),
+                                op: BinOp::Div,
+                                right: Box::new(typed_expr(
+                                    TypedExprKind::Ident("std_dev".to_string()),
+                                    FluxType::Float,
+                                )),
+                            },
+                            FluxType::Float,
+                        )),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Float,
+                span: Span::new(0, 0),
+            },
+        );
+
+        // Method: update(self, spread, avg, std_dev) -> self.calculate_zscore(spread, avg, std_dev)
+        pair_methods.insert(
+            "update".to_string(),
+            TypedFnDef {
+                name: "update".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec![
+                    "self".to_string(),
+                    "spread".to_string(),
+                    "avg".to_string(),
+                    "std_dev".to_string(),
+                ],
+                param_types: vec![
+                    FluxType::Struct("PairState".to_string()),
+                    FluxType::Float,
+                    FluxType::Float,
+                    FluxType::Float,
+                ],
+                body: vec![
+                    // return self.calculate_zscore(spread, avg, std_dev)
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(
+                            TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_expr(
+                                    TypedExprKind::Ident("self".to_string()),
+                                    FluxType::Struct("PairState".to_string()),
+                                )),
+                                method: "calculate_zscore".to_string(),
+                                args: vec![
+                                    typed_expr(TypedExprKind::Ident("spread".to_string()), FluxType::Float),
+                                    typed_expr(TypedExprKind::Ident("avg".to_string()), FluxType::Float),
+                                    typed_expr(TypedExprKind::Ident("std_dev".to_string()), FluxType::Float),
+                                ],
+                            },
+                            FluxType::Float,
+                        )),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Float,
+                span: Span::new(0, 0),
+            },
+        );
+
+        interp.impl_methods.insert("PairState".to_string(), pair_methods);
+
+        // Create a PairState struct value
+        let mut pair_fields = HashMap::new();
+        pair_fields.insert("lookback".to_string(), Value::Int(20));
+        pair_fields.insert("z_score".to_string(), Value::Float(0.0));
+        let pair_value = Value::Struct {
+            type_name: "PairState".to_string(),
+            fields: pair_fields,
+        };
+
+        let mut test_locals = HashMap::new();
+        test_locals.insert("pair".to_string(), pair_value);
+
+        // Call pair.update(10.0, 8.0, 2.0)
+        // Expected: self.calculate_zscore(10.0, 8.0, 2.0) = (10.0 - 8.0) / 2.0 = 1.0
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("pair".to_string()),
+                    FluxType::Struct("PairState".to_string()),
+                )),
+                method: "update".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::FloatLiteral(10.0), FluxType::Float),
+                    typed_expr(TypedExprKind::FloatLiteral(8.0), FluxType::Float),
+                    typed_expr(TypedExprKind::FloatLiteral(2.0), FluxType::Float),
+                ],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        match result {
+            Value::Float(f) => assert!(
+                (f - 1.0).abs() < f64::EPSILON,
+                "Expected 1.0, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float(1.0), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // Trait method dispatch tests (Task 5.1)
+    // ========================================================================
+
+    /// Test that a trait method registered via `entry().or_insert_with()` is callable
+    /// on a struct instance through the impl_methods registry.
+    /// This confirms that trait impl methods are dispatched at runtime via the
+    /// concrete type_name from Value::Struct.
+    /// Requirements: 8.1, 8.2
+    #[test]
+    fn test_trait_method_callable_on_struct_instance() {
+        use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
+
+        let mut interp = make_interp();
+
+        // Register a trait impl method: impl RegimeDetector for TrendDetector
+        //   fn detect(self, fast_avg, slow_avg, volatility) -> returns Float(1.0)
+        let mut trend_methods = HashMap::new();
+        trend_methods.insert(
+            "detect".to_string(),
+            TypedFnDef {
+                name: "detect".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec![
+                    "self".to_string(),
+                    "fast_avg".to_string(),
+                    "slow_avg".to_string(),
+                    "volatility".to_string(),
+                ],
+                param_types: vec![
+                    FluxType::Struct("TrendDetector".to_string()),
+                    FluxType::Float,
+                    FluxType::Float,
+                    FluxType::Float,
+                ],
+                body: vec![
+                    // return 1.0 (simplified — just proves dispatch works)
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(TypedExprKind::FloatLiteral(1.0), FluxType::Float)),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Float,
+                span: Span::new(0, 0),
+            },
+        );
+        interp.impl_methods.insert("TrendDetector".to_string(), trend_methods);
+
+        // Create a TrendDetector struct value
+        let mut det_fields = HashMap::new();
+        det_fields.insert("crossover_pct".to_string(), Value::Float(0.02));
+        let det_value = Value::Struct {
+            type_name: "TrendDetector".to_string(),
+            fields: det_fields,
+        };
+
+        // Store in locals
+        let mut test_locals = HashMap::new();
+        test_locals.insert("detector".to_string(), det_value);
+
+        // Call detector.detect(10.0, 9.5, 0.5)
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("detector".to_string()),
+                    FluxType::Struct("TrendDetector".to_string()),
+                )),
+                method: "detect".to_string(),
+                args: vec![
+                    typed_expr(TypedExprKind::FloatLiteral(10.0), FluxType::Float),
+                    typed_expr(TypedExprKind::FloatLiteral(9.5), FluxType::Float),
+                    typed_expr(TypedExprKind::FloatLiteral(0.5), FluxType::Float),
+                ],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        match result {
+            Value::Float(f) => assert!(
+                (f - 1.0).abs() < f64::EPSILON,
+                "Expected 1.0, got {}",
+                f
+            ),
+            other => panic!("Expected Value::Float(1.0), got {:?}", other),
+        }
+    }
+
+    /// Test that inherent methods take priority over trait methods with the same name.
+    /// When both an inherent and a trait impl method exist for the same name, the
+    /// inherent method body should execute.
+    /// Requirement: 8.3
+    #[test]
+    fn test_inherent_method_priority_over_trait() {
+        use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
+
+        let mut interp = make_interp();
+
+        // Simulate the Interpreter::new registration behavior:
+        // First register inherent impl (uses insert — unconditional)
+        // Then register trait impl (uses entry().or_insert — only if absent)
+        let mut type_methods: HashMap<String, TypedFnDef> = HashMap::new();
+
+        // Inherent method: detect(self) -> returns 42.0
+        let inherent_method = TypedFnDef {
+            name: "detect".to_string(),
+            type_params: vec![],
+            type_param_bounds: vec![],
+            params: vec!["self".to_string()],
+            param_types: vec![FluxType::Struct("MyDetector".to_string())],
+            body: vec![
+                TypedStmt::Return(TypedReturnStmt {
+                    value: Some(typed_expr(TypedExprKind::FloatLiteral(42.0), FluxType::Float)),
+                    span: Span::new(0, 0),
+                }),
+            ],
+            return_type: FluxType::Float,
+            span: Span::new(0, 0),
+        };
+
+        // Trait method: detect(self) -> returns 99.0 (should NOT be used)
+        let trait_method = TypedFnDef {
+            name: "detect".to_string(),
+            type_params: vec![],
+            type_param_bounds: vec![],
+            params: vec!["self".to_string()],
+            param_types: vec![FluxType::Struct("MyDetector".to_string())],
+            body: vec![
+                TypedStmt::Return(TypedReturnStmt {
+                    value: Some(typed_expr(TypedExprKind::FloatLiteral(99.0), FluxType::Float)),
+                    span: Span::new(0, 0),
+                }),
+            ],
+            return_type: FluxType::Float,
+            span: Span::new(0, 0),
+        };
+
+        // Simulate inherent registration: insert() always overwrites
+        type_methods.insert("detect".to_string(), inherent_method);
+        // Simulate trait registration: entry().or_insert() — should NOT overwrite
+        type_methods.entry("detect".to_string()).or_insert(trait_method);
+
+        interp.impl_methods.insert("MyDetector".to_string(), type_methods);
+
+        // Create a MyDetector struct and call detect
+        let mut det_fields = HashMap::new();
+        det_fields.insert("x".to_string(), Value::Int(1));
+        let det_value = Value::Struct {
+            type_name: "MyDetector".to_string(),
+            fields: det_fields,
+        };
+
+        let mut test_locals = HashMap::new();
+        test_locals.insert("det".to_string(), det_value);
+
+        let method_call = typed_expr(
+            TypedExprKind::MethodCall {
+                receiver: Box::new(typed_expr(
+                    TypedExprKind::Ident("det".to_string()),
+                    FluxType::Struct("MyDetector".to_string()),
+                )),
+                method: "detect".to_string(),
+                args: vec![],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        match result {
+            Value::Float(f) => assert!(
+                (f - 42.0).abs() < f64::EPSILON,
+                "Expected inherent method to return 42.0, got {} (trait method would return 99.0)",
+                f
+            ),
+            other => panic!("Expected Value::Float(42.0), got {:?}", other),
+        }
+    }
+
+    /// Test that a generic function parameter resolves its concrete type for dispatch.
+    /// Simulates: fn detect_regime[T: RegimeDetector](detector: T, ...) calling
+    /// detector.detect(...) — the concrete type should be determined from Value::Struct.
+    /// Requirements: 8.2, 8.3
+    #[test]
+    fn test_generic_function_parameter_dispatches_via_concrete_type() {
+        use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
+
+        let mut interp = make_interp();
+
+        // Register a trait impl method for "TrendDetector":
+        // detect(self, fast, slow, vol) -> returns self.crossover_pct (proving self is bound)
+        let mut trend_methods = HashMap::new();
+        trend_methods.insert(
+            "detect".to_string(),
+            TypedFnDef {
+                name: "detect".to_string(),
+                type_params: vec![],
+                type_param_bounds: vec![],
+                params: vec![
+                    "self".to_string(),
+                    "fast".to_string(),
+                    "slow".to_string(),
+                    "vol".to_string(),
+                ],
+                param_types: vec![
+                    FluxType::Struct("TrendDetector".to_string()),
+                    FluxType::Float,
+                    FluxType::Float,
+                    FluxType::Float,
+                ],
+                body: vec![
+                    // return self.crossover_pct
+                    TypedStmt::Return(TypedReturnStmt {
+                        value: Some(typed_expr(
+                            TypedExprKind::MemberAccess {
+                                object: Box::new(typed_expr(
+                                    TypedExprKind::Ident("self".to_string()),
+                                    FluxType::Struct("TrendDetector".to_string()),
+                                )),
+                                field: "crossover_pct".to_string(),
+                            },
+                            FluxType::Float,
+                        )),
+                        span: Span::new(0, 0),
+                    }),
+                ],
+                return_type: FluxType::Float,
+                span: Span::new(0, 0),
+            },
+        );
+        interp.impl_methods.insert("TrendDetector".to_string(), trend_methods);
+
+        // Register a generic function: detect_regime(detector, fast, slow, vol)
+        // Body: return detector.detect(fast, slow, vol)
+        let generic_fn = TypedFnDef {
+            name: "detect_regime".to_string(),
+            type_params: vec!["T".to_string()],
+            type_param_bounds: vec![Some("RegimeDetector".to_string())],
+            params: vec![
+                "detector".to_string(),
+                "fast".to_string(),
+                "slow".to_string(),
+                "vol".to_string(),
+            ],
+            param_types: vec![
+                FluxType::TypeParam("T".to_string()),
+                FluxType::Float,
+                FluxType::Float,
+                FluxType::Float,
+            ],
+            body: vec![
+                // return detector.detect(fast, slow, vol)
+                TypedStmt::Return(TypedReturnStmt {
+                    value: Some(typed_expr(
+                        TypedExprKind::MethodCall {
+                            receiver: Box::new(typed_expr(
+                                TypedExprKind::Ident("detector".to_string()),
+                                FluxType::TypeParam("T".to_string()),
+                            )),
+                            method: "detect".to_string(),
+                            args: vec![
+                                typed_expr(TypedExprKind::Ident("fast".to_string()), FluxType::Float),
+                                typed_expr(TypedExprKind::Ident("slow".to_string()), FluxType::Float),
+                                typed_expr(TypedExprKind::Ident("vol".to_string()), FluxType::Float),
+                            ],
+                        },
+                        FluxType::Float,
+                    )),
+                    span: Span::new(0, 0),
+                }),
+            ],
+            return_type: FluxType::Float,
+            span: Span::new(0, 0),
+        };
+        interp.functions.insert("detect_regime".to_string(), generic_fn);
+
+        // Create a TrendDetector struct value with crossover_pct = 0.05
+        let mut det_fields = HashMap::new();
+        det_fields.insert("crossover_pct".to_string(), Value::Float(0.05));
+        let det_value = Value::Struct {
+            type_name: "TrendDetector".to_string(),
+            fields: det_fields,
+        };
+
+        let mut test_locals = HashMap::new();
+        test_locals.insert("trend_det".to_string(), det_value);
+
+        // Call detect_regime(trend_det, 10.0, 9.0, 1.0)
+        // This should:
+        // 1. Evaluate trend_det → Value::Struct { type_name: "TrendDetector", ... }
+        // 2. Bind detector = that struct value in fn_locals
+        // 3. In the function body, evaluate detector.detect(fast, slow, vol)
+        // 4. Evaluate detector → Value::Struct { type_name: "TrendDetector" }
+        // 5. Dispatch via impl_methods["TrendDetector"]["detect"]
+        // 6. Bind self = detector struct, access self.crossover_pct → 0.05
+        let fn_call = typed_expr(
+            TypedExprKind::FunctionCall {
+                function: Box::new(typed_expr(
+                    TypedExprKind::Ident("detect_regime".to_string()),
+                    FluxType::Float,
+                )),
+                args: vec![
+                    typed_expr(TypedExprKind::Ident("trend_det".to_string()), FluxType::TypeParam("T".to_string())),
+                    typed_expr(TypedExprKind::FloatLiteral(10.0), FluxType::Float),
+                    typed_expr(TypedExprKind::FloatLiteral(9.0), FluxType::Float),
+                    typed_expr(TypedExprKind::FloatLiteral(1.0), FluxType::Float),
+                ],
+            },
+            FluxType::Float,
+        );
+
+        let result = interp.eval_expr(&fn_call, &test_locals).unwrap();
+        match result {
+            Value::Float(f) => assert!(
+                (f - 0.05).abs() < f64::EPSILON,
+                "Expected 0.05 (self.crossover_pct), got {}. \
+                 This means the generic function correctly dispatched detector.detect() \
+                 to TrendDetector's impl via the concrete type_name.",
+                f
+            ),
+            other => panic!("Expected Value::Float(0.05), got {:?}", other),
+        }
+    }
+
+    // ========================================================================
+    // HashMap implicit reassignment tests (Task 2.2)
+    // ========================================================================
+
+    #[test]
+    fn test_hashmap_implicit_reassignment_insert_in_locals() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Pre-populate locals with an empty HashMap
+        locals.insert("registry".to_string(), Value::HashMap(HashMap::new()));
+
+        // Build expression statement: registry.insert("AAPL", 150.0)
+        let receiver = typed_expr(
+            TypedExprKind::Ident("registry".to_string()),
+            FluxType::Generic("HashMap".to_string(), vec![]),
+        );
+        let expr_stmt = TypedStmt::Expr(TypedExprStmt {
+            expr: typed_expr(
+                TypedExprKind::MethodCall {
+                    receiver: Box::new(receiver),
+                    method: "insert".to_string(),
+                    args: vec![
+                        typed_expr(TypedExprKind::StringLiteral("AAPL".to_string()), FluxType::String),
+                        typed_expr(TypedExprKind::FloatLiteral(150.0), FluxType::Float),
+                    ],
+                },
+                FluxType::Generic("HashMap".to_string(), vec![]),
+            ),
+            span: Span::new(0, 0),
+        });
+
+        let signals = interp.exec_stmt(&expr_stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+
+        // The implicit reassignment should have updated "registry" in locals
+        match locals.get("registry") {
+            Some(Value::HashMap(map)) => {
+                assert!(map.contains_key("AAPL"), "registry should contain 'AAPL' after implicit reassignment");
+                match map.get("AAPL") {
+                    Some(Value::Float(f)) => assert!((f - 150.0).abs() < f64::EPSILON),
+                    other => panic!("Expected Value::Float(150.0), got {:?}", other),
+                }
+            }
+            other => panic!("Expected Value::HashMap in locals, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hashmap_implicit_reassignment_insert_in_state() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Pre-populate state with an empty HashMap
+        interp.state.insert("pair_registry".to_string(), Value::HashMap(HashMap::new()));
+
+        // Build expression statement: pair_registry.insert("symbol", 1.0)
+        let receiver = typed_expr(
+            TypedExprKind::Ident("pair_registry".to_string()),
+            FluxType::Generic("HashMap".to_string(), vec![]),
+        );
+        let expr_stmt = TypedStmt::Expr(TypedExprStmt {
+            expr: typed_expr(
+                TypedExprKind::MethodCall {
+                    receiver: Box::new(receiver),
+                    method: "insert".to_string(),
+                    args: vec![
+                        typed_expr(TypedExprKind::StringLiteral("symbol".to_string()), FluxType::String),
+                        typed_expr(TypedExprKind::FloatLiteral(1.0), FluxType::Float),
+                    ],
+                },
+                FluxType::Generic("HashMap".to_string(), vec![]),
+            ),
+            span: Span::new(0, 0),
+        });
+
+        let signals = interp.exec_stmt(&expr_stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+
+        // The implicit reassignment should have updated "pair_registry" in state
+        match interp.state.get("pair_registry") {
+            Some(Value::HashMap(map)) => {
+                assert!(map.contains_key("symbol"), "pair_registry in state should contain 'symbol'");
+                match map.get("symbol") {
+                    Some(Value::Float(f)) => assert!((f - 1.0).abs() < f64::EPSILON),
+                    other => panic!("Expected Value::Float(1.0), got {:?}", other),
+                }
+            }
+            other => panic!("Expected Value::HashMap in state, got {:?}", other),
+        }
+        // Locals should NOT have pair_registry
+        assert!(locals.get("pair_registry").is_none());
+    }
+
+    #[test]
+    fn test_hashmap_implicit_reassignment_remove_in_locals() {
+        let mut interp = make_interp();
+        let mut locals = HashMap::new();
+
+        // Pre-populate locals with a HashMap that has a key
+        let mut map = HashMap::new();
+        map.insert("AAPL".to_string(), Value::Float(150.0));
+        locals.insert("registry".to_string(), Value::HashMap(map));
+
+        // Build expression statement: registry.remove("AAPL")
+        let receiver = typed_expr(
+            TypedExprKind::Ident("registry".to_string()),
+            FluxType::Generic("HashMap".to_string(), vec![]),
+        );
+        let expr_stmt = TypedStmt::Expr(TypedExprStmt {
+            expr: typed_expr(
+                TypedExprKind::MethodCall {
+                    receiver: Box::new(receiver),
+                    method: "remove".to_string(),
+                    args: vec![
+                        typed_expr(TypedExprKind::StringLiteral("AAPL".to_string()), FluxType::String),
+                    ],
+                },
+                FluxType::Generic("HashMap".to_string(), vec![]),
+            ),
+            span: Span::new(0, 0),
+        });
+
+        let signals = interp.exec_stmt(&expr_stmt, &mut locals).unwrap();
+        assert!(signals.is_empty());
+
+        // The implicit reassignment should have updated "registry" with the key removed
+        match locals.get("registry") {
+            Some(Value::HashMap(map)) => {
+                assert!(!map.contains_key("AAPL"), "registry should NOT contain 'AAPL' after remove");
+                assert!(map.is_empty(), "registry should be empty after removing the only key");
+            }
+            other => panic!("Expected Value::HashMap in locals, got {:?}", other),
+        }
     }
 }

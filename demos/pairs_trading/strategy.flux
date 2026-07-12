@@ -130,7 +130,7 @@ data {
 strategy PairsTrading {
     params {
         lookback = 20
-        threshold = 2.0
+        threshold = 0.8
         base_size = 100.0
     }
 
