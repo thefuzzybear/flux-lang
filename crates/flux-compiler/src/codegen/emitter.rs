@@ -208,7 +208,7 @@ impl<'a> CodeEmitter<'a> {
     /// Emit all trait definitions from the typed program.
     ///
     /// Each trait is emitted as:
-    /// ```rust
+    /// ```text
     /// trait TraitName {
     ///     fn method(&self, ...) -> Type;
     /// }

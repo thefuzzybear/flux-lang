@@ -1197,13 +1197,23 @@ impl Interpreter {
                                     }
                                     // Execute arm body, collecting signals and capturing last expr value
                                     let mut result = Value::Null;
-                                    for (i, stmt) in arm.body.iter().enumerate() {
+                                    for stmt in &arm.body {
                                         let stmt_signals = self.exec_stmt(stmt, &mut arm_locals)?;
                                         self.fn_signals.extend(stmt_signals);
-                                        // Capture value of the last expression statement
-                                        if i == arm.body.len() - 1 {
-                                            if let TypedStmt::Expr(expr_stmt) = stmt {
-                                                result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
+                                    }
+                                    // Capture the value of the last expression (if it is one)
+                                    // Re-evaluate only if it won't produce side effects (signals).
+                                    // FunctionCall and MethodCall may emit signals so skip those.
+                                    if let Some(last_stmt) = arm.body.last() {
+                                        if let TypedStmt::Expr(expr_stmt) = last_stmt {
+                                            match &expr_stmt.expr.kind {
+                                                TypedExprKind::FunctionCall { .. }
+                                                | TypedExprKind::MethodCall { .. } => {
+                                                    // Don't re-evaluate — would double-emit signals
+                                                }
+                                                _ => {
+                                                    result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
+                                                }
                                             }
                                         }
                                     }
@@ -1221,12 +1231,18 @@ impl Interpreter {
                             // Wildcard matches anything
                             let mut arm_locals = locals.clone();
                             let mut result = Value::Null;
-                            for (i, stmt) in arm.body.iter().enumerate() {
+                            for stmt in &arm.body {
                                 let stmt_signals = self.exec_stmt(stmt, &mut arm_locals)?;
                                 self.fn_signals.extend(stmt_signals);
-                                if i == arm.body.len() - 1 {
-                                    if let TypedStmt::Expr(expr_stmt) = stmt {
-                                        result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
+                            }
+                            if let Some(last_stmt) = arm.body.last() {
+                                if let TypedStmt::Expr(expr_stmt) = last_stmt {
+                                    match &expr_stmt.expr.kind {
+                                        TypedExprKind::FunctionCall { .. }
+                                        | TypedExprKind::MethodCall { .. } => {}
+                                        _ => {
+                                            result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
+                                        }
                                     }
                                 }
                             }
