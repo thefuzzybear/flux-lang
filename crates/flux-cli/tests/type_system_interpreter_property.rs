@@ -477,7 +477,7 @@ proptest! {
                         FluxType::Generic("HashMap".to_string(), vec![]),
                     );
 
-                    let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+                    let result = interp.eval_expr(&insert_expr, &mut locals).unwrap();
                     current_map = result;
                     expected.insert(key.clone(), *value);
                 }
@@ -500,7 +500,7 @@ proptest! {
                         FluxType::Float,
                     );
 
-                    let result = interp.eval_expr(&get_expr, &locals);
+                    let result = interp.eval_expr(&get_expr, &mut locals);
 
                     if let Some(&expected_val) = expected.get(key) {
                         // Key was previously inserted — get should succeed
@@ -779,7 +779,7 @@ proptest! {
                 FluxType::Generic("HashMap".to_string(), vec![]),
             );
 
-            let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+            let result = interp.eval_expr(&insert_expr, &mut locals).unwrap();
             current_map = result;
             expected.insert(key.clone(), *value);
         }
@@ -804,7 +804,7 @@ proptest! {
                 FluxType::Float,
             );
 
-            let result = interp.eval_expr(&get_expr, &locals).unwrap();
+            let result = interp.eval_expr(&get_expr, &mut locals).unwrap();
             match result {
                 Value::Float(f) => {
                     prop_assert!(
@@ -850,7 +850,7 @@ proptest! {
                 FluxType::Bool,
             );
 
-            let result = interp.eval_expr(&contains_expr, &locals).unwrap();
+            let result = interp.eval_expr(&contains_expr, &mut locals).unwrap();
             match result {
                 Value::Bool(true) => {} // expected
                 other => prop_assert!(
@@ -881,7 +881,7 @@ proptest! {
                 FluxType::Bool,
             );
 
-            let result = interp.eval_expr(&contains_missing_expr, &locals).unwrap();
+            let result = interp.eval_expr(&contains_missing_expr, &mut locals).unwrap();
             match result {
                 Value::Bool(false) => {} // expected
                 other => prop_assert!(
@@ -912,7 +912,7 @@ proptest! {
                 FluxType::Float,
             );
 
-            let result = interp.eval_expr(&get_missing_expr, &locals).unwrap();
+            let result = interp.eval_expr(&get_missing_expr, &mut locals).unwrap();
             match result {
                 Value::Null => {} // expected
                 other => prop_assert!(
@@ -1537,7 +1537,7 @@ proptest! {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&method_call_expr, &locals).unwrap();
+        let result = interp.eval_expr(&method_call_expr, &mut locals).unwrap();
 
         match result {
             Value::Float(f) => {
@@ -1716,10 +1716,10 @@ proptest! {
         };
 
         let mut interp = Interpreter::new(&program);
-        let locals = StdHashMap::new();
+        let mut locals = StdHashMap::new();
 
         // Evaluate the EnumConstruction expression
-        let result = interp.eval_expr(&enum_construction_expr, &locals).unwrap();
+        let result = interp.eval_expr(&enum_construction_expr, &mut locals).unwrap();
 
         // Assert the result is a Value::Enum with correct structure
         match result {
@@ -2183,8 +2183,8 @@ proptest! {
             FluxType::Struct(type_name.clone()),
         );
 
-        let locals = StdHashMap::new();
-        let struct_val = interp.eval_expr(&struct_literal_expr, &locals)
+        let mut locals = StdHashMap::new();
+        let struct_val = interp.eval_expr(&struct_literal_expr, &mut locals)
             .expect("StructLiteral evaluation should succeed");
 
         // Verify it produced a Value::Struct
@@ -2222,7 +2222,7 @@ proptest! {
                 FluxType::Float, // resolved_type doesn't matter for runtime
             );
 
-            let result = interp.eval_expr(&member_access_expr, &locals_with_obj)
+            let result = interp.eval_expr(&member_access_expr, &mut locals_with_obj)
                 .unwrap_or_else(|e| {
                     panic!(
                         "MemberAccess on field '{}' should succeed, got error: {}\n\

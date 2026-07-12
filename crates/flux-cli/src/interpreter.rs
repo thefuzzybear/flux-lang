@@ -364,7 +364,7 @@ impl Interpreter {
     pub fn eval_expr(
         &mut self,
         expr: &TypedExpr,
-        locals: &HashMap<String, Value>,
+        locals: &mut HashMap<String, Value>,
     ) -> Result<Value, String> {
         match &expr.kind {
             // --- Literals ---
@@ -1009,6 +1009,10 @@ impl Interpreter {
                         "len" => {
                             return Ok(Value::Int(map.len() as i64));
                         }
+                        "keys" => {
+                            let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+                            return Ok(Value::List(keys));
+                        }
                         _ => {
                             return Err(format!("No method '{}' on HashMap", method));
                         }
@@ -1182,6 +1186,7 @@ impl Interpreter {
                                 if val_variant == pat_variant {
                                     // Bind fields to local variables by position
                                     let mut arm_locals = locals.clone();
+                                    let binding_names: Vec<String> = bindings.iter().map(|(n, _)| n.clone()).collect();
                                     for (i, (binding_name, _)) in bindings.iter().enumerate() {
                                         if let Some((_, value)) = fields.get(i) {
                                             arm_locals.insert(
@@ -1198,8 +1203,14 @@ impl Interpreter {
                                         // Capture value of the last expression statement
                                         if i == arm.body.len() - 1 {
                                             if let TypedStmt::Expr(expr_stmt) = stmt {
-                                                result = self.eval_expr(&expr_stmt.expr, &arm_locals)?;
+                                                result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
                                             }
+                                        }
+                                    }
+                                    // Write back modified locals (excluding pattern bindings)
+                                    for (k, v) in &arm_locals {
+                                        if !binding_names.contains(k) {
+                                            locals.insert(k.clone(), v.clone());
                                         }
                                     }
                                     return Ok(result);
@@ -1215,9 +1226,13 @@ impl Interpreter {
                                 self.fn_signals.extend(stmt_signals);
                                 if i == arm.body.len() - 1 {
                                     if let TypedStmt::Expr(expr_stmt) = stmt {
-                                        result = self.eval_expr(&expr_stmt.expr, &arm_locals)?;
+                                        result = self.eval_expr(&expr_stmt.expr, &mut arm_locals)?;
                                     }
                                 }
+                            }
+                            // Write back modified locals for wildcard arms too
+                            for (k, v) in &arm_locals {
+                                locals.insert(k.clone(), v.clone());
                             }
                             return Ok(result);
                         }
@@ -1241,7 +1256,7 @@ impl Interpreter {
     fn eval_expr_as_string(
         &mut self,
         expr: &TypedExpr,
-        locals: &HashMap<String, Value>,
+        locals: &mut HashMap<String, Value>,
     ) -> Result<String, String> {
         let val = self.eval_expr(expr, locals)?;
         match val {
@@ -1254,7 +1269,7 @@ impl Interpreter {
     fn eval_expr_as_f64(
         &mut self,
         expr: &TypedExpr,
-        locals: &HashMap<String, Value>,
+        locals: &mut HashMap<String, Value>,
     ) -> Result<f64, String> {
         let val = self.eval_expr(expr, locals)?;
         match val {
@@ -1268,7 +1283,7 @@ impl Interpreter {
     fn eval_expr_as_i64(
         &mut self,
         expr: &TypedExpr,
-        locals: &HashMap<String, Value>,
+        locals: &mut HashMap<String, Value>,
     ) -> Result<i64, String> {
         let val = self.eval_expr(expr, locals)?;
         match val {
@@ -1468,6 +1483,33 @@ impl Interpreter {
                                     self.state.insert(name.clone(), val_to_write);
                                 } else {
                                     locals.insert(name.clone(), val_to_write);
+                                }
+                            }
+                        } else if let TypedExprKind::MemberAccess { object, field } = &receiver.kind {
+                            // Handle struct field mutations: obj.field.push(x)
+                            // We need to update the field inside the struct and write back.
+                            if let TypedExprKind::Ident(obj_name) = &object.kind {
+                                let val_to_write = self.pending_list_mutation.take().unwrap_or(value.clone());
+
+                                if matches!(&val_to_write, Value::List(_) | Value::HashMap(_)) {
+                                    // Get the struct value, update the field, write back
+                                    let struct_val = if let Some(v) = locals.get(obj_name) {
+                                        Some(v.clone())
+                                    } else {
+                                        self.state.get(obj_name).cloned()
+                                    };
+
+                                    if let Some(Value::Struct { type_name: sname, fields: mut sfields }) = struct_val {
+                                        if let Some(field_val) = sfields.get_mut(field) {
+                                            *field_val = val_to_write;
+                                        }
+                                        let updated = Value::Struct { type_name: sname, fields: sfields };
+                                        if self.state.contains_key(obj_name) {
+                                            self.state.insert(obj_name.clone(), updated);
+                                        } else {
+                                            locals.insert(obj_name.clone(), updated);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1950,49 +1992,49 @@ mod tests {
     #[test]
     fn test_eval_expr_int_add() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(2), FluxType::Int),
             BinOp::Add,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
     #[test]
     fn test_eval_expr_int_sub() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
             BinOp::Sub,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(7)));
     }
 
     #[test]
     fn test_eval_expr_int_mul() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(4), FluxType::Int),
             BinOp::Mul,
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(20)));
     }
 
     #[test]
     fn test_eval_expr_int_div() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         // Integer division: 10 / 3 = 3
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
@@ -2000,35 +2042,35 @@ mod tests {
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(3)));
     }
 
     #[test]
     fn test_eval_expr_int_mod() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
             BinOp::Mod,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(1)));
     }
 
     #[test]
     fn test_eval_expr_float_add() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::FloatLiteral(1.5), FluxType::Float),
             BinOp::Add,
             typed_expr(TypedExprKind::FloatLiteral(2.5), FluxType::Float),
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 4.0).abs() < f64::EPSILON),
             other => panic!("Expected Float, got {:?}", other),
@@ -2038,14 +2080,14 @@ mod tests {
     #[test]
     fn test_eval_expr_float_div() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::FloatLiteral(10.0), FluxType::Float),
             BinOp::Div,
             typed_expr(TypedExprKind::FloatLiteral(3.0), FluxType::Float),
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 10.0 / 3.0).abs() < f64::EPSILON),
             other => panic!("Expected Float, got {:?}", other),
@@ -2055,7 +2097,7 @@ mod tests {
     #[test]
     fn test_eval_expr_mixed_int_float_add() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         // 1 + 2.5 = 3.5 (Int promoted to Float)
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(1), FluxType::Int),
@@ -2063,7 +2105,7 @@ mod tests {
             typed_expr(TypedExprKind::FloatLiteral(2.5), FluxType::Float),
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 3.5).abs() < f64::EPSILON),
             other => panic!("Expected Float, got {:?}", other),
@@ -2073,14 +2115,14 @@ mod tests {
     #[test]
     fn test_eval_expr_division_by_zero_int() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
             BinOp::Div,
             typed_expr(TypedExprKind::IntLiteral(0), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals);
+        let result = interp.eval_expr(&expr, &mut locals);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("division by zero"));
     }
@@ -2088,14 +2130,14 @@ mod tests {
     #[test]
     fn test_eval_expr_mod_by_zero() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(10), FluxType::Int),
             BinOp::Mod,
             typed_expr(TypedExprKind::IntLiteral(0), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals);
+        let result = interp.eval_expr(&expr, &mut locals);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("division by zero"));
     }
@@ -2107,112 +2149,112 @@ mod tests {
     #[test]
     fn test_eval_expr_gt_true() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             BinOp::Gt,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_gt_false() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             BinOp::Gt,
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(false)));
     }
 
     #[test]
     fn test_eval_expr_eq_true() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             BinOp::Eq,
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_eq_false() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             BinOp::Eq,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(false)));
     }
 
     #[test]
     fn test_eval_expr_lt() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             BinOp::Lt,
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_le() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             BinOp::Le,
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_ge() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             BinOp::Ge,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_ne() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::IntLiteral(5), FluxType::Int),
             BinOp::Ne,
             typed_expr(TypedExprKind::IntLiteral(3), FluxType::Int),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
@@ -2223,95 +2265,95 @@ mod tests {
     #[test]
     fn test_eval_expr_and_false() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
             BinOp::And,
             typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(false)));
     }
 
     #[test]
     fn test_eval_expr_and_true() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
             BinOp::And,
             typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_or_true() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
             BinOp::Or,
             typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_or_false() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_binop(
             typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
             BinOp::Or,
             typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(false)));
     }
 
     #[test]
     fn test_eval_expr_not_true() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_unaryop(
             UnaryOp::Not,
             typed_expr(TypedExprKind::BoolLiteral(true), FluxType::Bool),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(false)));
     }
 
     #[test]
     fn test_eval_expr_not_false() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_unaryop(
             UnaryOp::Not,
             typed_expr(TypedExprKind::BoolLiteral(false), FluxType::Bool),
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_eval_expr_negation() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_unaryop(
             UnaryOp::Neg,
             typed_expr(TypedExprKind::IntLiteral(42), FluxType::Int),
             FluxType::Int,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(-42)));
     }
 
@@ -2325,7 +2367,7 @@ mod tests {
         let mut locals = HashMap::new();
         locals.insert("x".to_string(), Value::Int(99));
         let expr = typed_expr(TypedExprKind::Ident("x".to_string()), FluxType::Int);
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(99)));
     }
 
@@ -2333,9 +2375,9 @@ mod tests {
     fn test_eval_expr_ident_from_params() {
         let mut interp = make_interp();
         interp.params.insert("period".to_string(), Value::Int(20));
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = typed_expr(TypedExprKind::Ident("period".to_string()), FluxType::Int);
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(20)));
     }
 
@@ -2343,9 +2385,9 @@ mod tests {
     fn test_eval_expr_ident_from_state() {
         let mut interp = make_interp();
         interp.state.insert("count".to_string(), Value::Int(5));
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = typed_expr(TypedExprKind::Ident("count".to_string()), FluxType::Int);
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
@@ -2356,7 +2398,7 @@ mod tests {
         let mut locals = HashMap::new();
         locals.insert("x".to_string(), Value::Int(42));
         let expr = typed_expr(TypedExprKind::Ident("x".to_string()), FluxType::Int);
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         // Locals take priority over params
         assert!(matches!(result, Value::Int(42)));
     }
@@ -2364,9 +2406,9 @@ mod tests {
     #[test]
     fn test_eval_expr_ident_undefined_variable() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = typed_expr(TypedExprKind::Ident("undefined_var".to_string()), FluxType::Int);
-        let result = interp.eval_expr(&expr, &locals);
+        let result = interp.eval_expr(&expr, &mut locals);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("undefined variable"));
     }
@@ -2497,7 +2539,7 @@ mod tests {
     #[test]
     fn test_eval_expr_open_signal() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "OPEN",
             vec![
@@ -2506,7 +2548,7 @@ mod tests {
             ],
             FluxType::Signal,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Signal(sig) => {
                 assert_eq!(sig.symbol(), "AAPL");
@@ -2520,7 +2562,7 @@ mod tests {
     #[test]
     fn test_eval_expr_close_signal() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "CLOSE",
             vec![typed_expr(
@@ -2529,7 +2571,7 @@ mod tests {
             )],
             FluxType::Signal,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Signal(sig) => {
                 assert_eq!(sig.symbol(), "MSFT");
@@ -2543,7 +2585,7 @@ mod tests {
     #[test]
     fn test_eval_expr_close_qty_signal() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "CLOSE_QTY",
             vec![
@@ -2552,7 +2594,7 @@ mod tests {
             ],
             FluxType::Signal,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Signal(sig) => {
                 assert_eq!(sig.symbol(), "GOOG");
@@ -2592,7 +2634,7 @@ mod tests {
     #[test]
     fn test_eval_expr_sma_call() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "sma",
             vec![
@@ -2601,7 +2643,7 @@ mod tests {
             ],
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         // sma with one value and period 5 should return that value / 5 or the initial call
         // The exact value depends on the runtime implementation, just verify it's a Float
         assert!(matches!(result, Value::Float(_)));
@@ -2610,7 +2652,7 @@ mod tests {
     #[test]
     fn test_eval_expr_ema_call() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "ema",
             vec![
@@ -2619,7 +2661,7 @@ mod tests {
             ],
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Float(_)));
     }
 
@@ -2747,13 +2789,13 @@ mod tests {
     #[test]
     fn test_dispatch_math_abs_negative_float() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "abs",
             vec![typed_expr(TypedExprKind::FloatLiteral(-3.5), FluxType::Float)],
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 3.5).abs() < f64::EPSILON, "abs(-3.5) should be 3.5, got {}", f),
             other => panic!("Expected Value::Float, got {:?}", other),
@@ -2764,13 +2806,13 @@ mod tests {
     #[test]
     fn test_dispatch_math_sqrt() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "sqrt",
             vec![typed_expr(TypedExprKind::FloatLiteral(9.0), FluxType::Float)],
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 3.0).abs() < f64::EPSILON, "sqrt(9.0) should be 3.0, got {}", f),
             other => panic!("Expected Value::Float, got {:?}", other),
@@ -2781,13 +2823,13 @@ mod tests {
     #[test]
     fn test_dispatch_math_abs_int() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
         let expr = make_fn_call(
             "abs",
             vec![typed_expr(TypedExprKind::IntLiteral(-7), FluxType::Int)],
             FluxType::Float, // dispatch returns Float for type resolution, but abs(Int) → Int
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::Int(i) => assert_eq!(i, 7, "abs(-7) should be 7"),
             other => panic!("Expected Value::Int, got {:?}", other),
@@ -2800,7 +2842,7 @@ mod tests {
     #[test]
     fn test_dispatch_stddev_maintains_state_across_calls() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // Feed values [2.0, 4.0, 4.0, 4.0, 5.0] with period=5
         // Population stddev of [2,4,4,4,5] = sqrt(((2-3.8)^2 + (4-3.8)^2 + (4-3.8)^2 + (4-3.8)^2 + (5-3.8)^2)/5)
@@ -2828,7 +2870,7 @@ mod tests {
                 resolved_type: FluxType::Float,
                 span: Span::new(10, 20),
             };
-            last_result = interp.eval_expr(&expr, &locals).unwrap();
+            last_result = interp.eval_expr(&expr, &mut locals).unwrap();
         }
 
         // After all 5 values, stddev should be sqrt(0.96) ≈ 0.9798
@@ -2853,7 +2895,7 @@ mod tests {
     #[test]
     fn test_dispatch_stddev_constant_series_zero() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         let mut last_result = Value::Float(0.0);
         for _ in 0..5 {
@@ -2875,7 +2917,7 @@ mod tests {
                 resolved_type: FluxType::Float,
                 span: Span::new(30, 40),
             };
-            last_result = interp.eval_expr(&expr, &locals).unwrap();
+            last_result = interp.eval_expr(&expr, &mut locals).unwrap();
         }
 
         match last_result {
@@ -2893,7 +2935,7 @@ mod tests {
     #[test]
     fn test_dispatch_sma_correct_results() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // Feed values [10.0, 20.0, 30.0] with period=3
         // After 3 values, sma should be (10+20+30)/3 = 20.0
@@ -2909,7 +2951,7 @@ mod tests {
                 ],
                 FluxType::Float,
             );
-            last_result = interp.eval_expr(&expr, &locals).unwrap();
+            last_result = interp.eval_expr(&expr, &mut locals).unwrap();
         }
 
         match last_result {
@@ -2926,7 +2968,7 @@ mod tests {
     #[test]
     fn test_dispatch_sma_rolling_window() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // Feed values [10.0, 20.0, 30.0, 40.0] with period=3
         // After 4th value, window should be [20, 30, 40], sma = 30.0
@@ -2942,7 +2984,7 @@ mod tests {
                 ],
                 FluxType::Float,
             );
-            last_result = interp.eval_expr(&expr, &locals).unwrap();
+            last_result = interp.eval_expr(&expr, &mut locals).unwrap();
         }
 
         match last_result {
@@ -2959,7 +3001,7 @@ mod tests {
     #[test]
     fn test_dispatch_ema_correct_results() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // Feed values [10.0, 20.0, 30.0] with period=3
         // EMA: k = 2/(3+1) = 0.5
@@ -2978,7 +3020,7 @@ mod tests {
                 ],
                 FluxType::Float,
             );
-            last_result = interp.eval_expr(&expr, &locals).unwrap();
+            last_result = interp.eval_expr(&expr, &mut locals).unwrap();
         }
 
         match last_result {
@@ -2995,7 +3037,7 @@ mod tests {
     #[test]
     fn test_dispatch_ema_first_value() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         let expr = make_fn_call(
             "ema",
@@ -3005,7 +3047,7 @@ mod tests {
             ],
             FluxType::Float,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
 
         match result {
             Value::Float(f) => assert!(
@@ -3024,7 +3066,7 @@ mod tests {
     #[test]
     fn test_hashmap_new() {
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // HashMap.new() is routed through EnumConstruction with enum_name="HashMap", variant_name="new"
         let expr = typed_expr(
@@ -3036,7 +3078,7 @@ mod tests {
             FluxType::Generic("HashMap".to_string(), vec![FluxType::String, FluxType::Float]),
         );
 
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         match result {
             Value::HashMap(map) => assert!(map.is_empty(), "HashMap.new() should create empty map"),
             other => panic!("Expected Value::HashMap, got {:?}", other),
@@ -3065,7 +3107,7 @@ mod tests {
             FluxType::Generic("HashMap".to_string(), vec![]),
         );
 
-        let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+        let result = interp.eval_expr(&insert_expr, &mut locals).unwrap();
         // Store result back
         locals.insert("m".to_string(), result);
 
@@ -3082,7 +3124,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&get_expr, &locals).unwrap();
+        let result = interp.eval_expr(&get_expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 42.0).abs() < f64::EPSILON, "get('price') should return 42.0, got {}", f),
             other => panic!("Expected Value::Float, got {:?}", other),
@@ -3111,7 +3153,7 @@ mod tests {
             },
             FluxType::Bool,
         );
-        let result = interp.eval_expr(&expr, &locals).unwrap();
+        let result = interp.eval_expr(&expr, &mut locals).unwrap();
         assert!(matches!(result, Value::Bool(true)), "contains_key('AAPL') should be true");
 
         // Check contains_key("GOOG") → false
@@ -3126,7 +3168,7 @@ mod tests {
             },
             FluxType::Bool,
         );
-        let result2 = interp.eval_expr(&expr2, &locals).unwrap();
+        let result2 = interp.eval_expr(&expr2, &mut locals).unwrap();
         assert!(matches!(result2, Value::Bool(false)), "contains_key('GOOG') should be false");
     }
 
@@ -3154,7 +3196,7 @@ mod tests {
             FluxType::Generic("HashMap".to_string(), vec![]),
         );
 
-        let result = interp.eval_expr(&remove_expr, &locals).unwrap();
+        let result = interp.eval_expr(&remove_expr, &mut locals).unwrap();
         match result {
             Value::HashMap(new_map) => {
                 assert!(!new_map.contains_key("AAPL"), "AAPL should be removed");
@@ -3184,7 +3226,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&get_expr, &locals);
+        let result = interp.eval_expr(&get_expr, &mut locals);
         assert!(result.is_ok(), "get on missing key should return Ok(Null)");
         assert!(matches!(result.unwrap(), Value::Null), "get on missing key should return Null");
     }
@@ -3213,7 +3255,7 @@ mod tests {
             FluxType::Generic("HashMap".to_string(), vec![]),
         );
 
-        let result = interp.eval_expr(&insert_expr, &locals).unwrap();
+        let result = interp.eval_expr(&insert_expr, &mut locals).unwrap();
         locals.insert("m".to_string(), result);
 
         // Verify the overwritten value
@@ -3229,7 +3271,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&get_expr, &locals).unwrap();
+        let result = interp.eval_expr(&get_expr, &mut locals).unwrap();
         match result {
             Value::Float(f) => assert!((f - 200.0).abs() < f64::EPSILON, "overwritten value should be 200.0, got {}", f),
             other => panic!("Expected Value::Float, got {:?}", other),
@@ -3256,7 +3298,7 @@ mod tests {
         use flux_compiler::typeck::typed_ast::{TypedFnDef, TypedReturnStmt};
 
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // Register a static method: PairState.new(lookback) -> returns a Struct
         let mut pair_state_methods = HashMap::new();
@@ -3309,7 +3351,7 @@ mod tests {
             FluxType::Struct("PairState".to_string()),
         );
 
-        let result = interp.eval_expr(&method_call, &locals).unwrap();
+        let result = interp.eval_expr(&method_call, &mut locals).unwrap();
         match result {
             Value::Struct { type_name, fields } => {
                 assert_eq!(type_name, "PairState");
@@ -3325,7 +3367,7 @@ mod tests {
         use flux_compiler::typeck::typed_ast::TypedFnDef;
 
         let mut interp = make_interp();
-        let locals = HashMap::new();
+        let mut locals = HashMap::new();
 
         // Register a type with one method
         let mut methods = HashMap::new();
@@ -3357,7 +3399,7 @@ mod tests {
             FluxType::Null,
         );
 
-        let result = interp.eval_expr(&method_call, &locals);
+        let result = interp.eval_expr(&method_call, &mut locals);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("MyType"), "error should mention type name: {}", err);
@@ -3415,7 +3457,7 @@ mod tests {
             FluxType::Int,
         );
 
-        let result = interp.eval_expr(&method_call, &locals).unwrap();
+        let result = interp.eval_expr(&method_call, &mut locals).unwrap();
         assert!(matches!(result, Value::Int(999)));
     }
 
@@ -3544,7 +3586,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        let result = interp.eval_expr(&method_call, &mut test_locals).unwrap();
         match result {
             Value::Float(f) => assert!(
                 (f - 42.0).abs() < f64::EPSILON,
@@ -3700,7 +3742,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        let result = interp.eval_expr(&method_call, &mut test_locals).unwrap();
         match result {
             Value::Float(f) => assert!(
                 (f - 1.0).abs() < f64::EPSILON,
@@ -3789,7 +3831,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        let result = interp.eval_expr(&method_call, &mut test_locals).unwrap();
         match result {
             Value::Float(f) => assert!(
                 (f - 1.0).abs() < f64::EPSILON,
@@ -3879,7 +3921,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&method_call, &test_locals).unwrap();
+        let result = interp.eval_expr(&method_call, &mut test_locals).unwrap();
         match result {
             Value::Float(f) => assert!(
                 (f - 42.0).abs() < f64::EPSILON,
@@ -4022,7 +4064,7 @@ mod tests {
             FluxType::Float,
         );
 
-        let result = interp.eval_expr(&fn_call, &test_locals).unwrap();
+        let result = interp.eval_expr(&fn_call, &mut test_locals).unwrap();
         match result {
             Value::Float(f) => assert!(
                 (f - 0.05).abs() < f64::EPSILON,

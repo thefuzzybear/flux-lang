@@ -49,13 +49,15 @@ pub enum FnParams {
 
 impl FluxType {
     /// Returns true if this type is numeric (Int or Float).
+    /// Null and TypeParam are included because they represent untyped/unresolved types (gradual typing).
     pub fn is_numeric(&self) -> bool {
-        matches!(self, FluxType::Int | FluxType::Float)
+        matches!(self, FluxType::Int | FluxType::Float | FluxType::Null | FluxType::TypeParam(_))
     }
 
     /// Returns true if `self` is assignable to `target` (with coercion).
     /// Int is assignable to Float. List(Null) is assignable to any List(T).
     /// TypeParam matches any concrete type (for generic contexts).
+    /// Null is assignable to any type (gradual typing for untyped list elements).
     pub fn is_assignable_to(&self, target: &FluxType) -> bool {
         if self == target {
             return true;
@@ -63,8 +65,14 @@ impl FluxType {
         match (self, target) {
             // TypeParam is assignable to any type (unresolved generic placeholder)
             (FluxType::TypeParam(_), _) | (_, FluxType::TypeParam(_)) => true,
+            // Null is assignable to any type (gradual typing for untyped list element access)
+            (FluxType::Null, _) | (_, FluxType::Null) => true,
             (FluxType::Int, FluxType::Float) => true,
             (FluxType::List(inner), FluxType::List(_)) if inner.as_ref() == &FluxType::Null => {
+                true
+            }
+            // Any List(T) is assignable to List(Null) — untyped list accepts any element type
+            (FluxType::List(_), FluxType::List(target_inner)) if target_inner.as_ref() == &FluxType::Null => {
                 true
             }
             (FluxType::Struct(a), FluxType::Struct(b)) => a == b,
@@ -90,6 +98,14 @@ impl FluxType {
             (FluxType::Int, FluxType::Float) | (FluxType::Float, FluxType::Int) => {
                 Some(FluxType::Float)
             }
+            // Gradual typing: Null (from untyped list access) is compatible with arithmetic
+            (FluxType::Null, FluxType::Float) | (FluxType::Float, FluxType::Null) => {
+                Some(FluxType::Float)
+            }
+            (FluxType::Null, FluxType::Int) | (FluxType::Int, FluxType::Null) => {
+                Some(FluxType::Int)
+            }
+            (FluxType::Null, FluxType::Null) => Some(FluxType::Null),
             _ => None,
         }
     }
@@ -135,10 +151,12 @@ mod tests {
     fn test_is_numeric() {
         assert!(FluxType::Int.is_numeric());
         assert!(FluxType::Float.is_numeric());
+        // Null and TypeParam are considered numeric for gradual typing support
+        assert!(FluxType::Null.is_numeric());
+        assert!(FluxType::TypeParam("T".to_string()).is_numeric());
 
         assert!(!FluxType::String.is_numeric());
         assert!(!FluxType::Bool.is_numeric());
-        assert!(!FluxType::Null.is_numeric());
         assert!(!FluxType::Void.is_numeric());
         assert!(!FluxType::Signal.is_numeric());
         assert!(!FluxType::List(Box::new(FluxType::Int)).is_numeric());
@@ -236,9 +254,10 @@ mod tests {
             FluxType::arithmetic_result(&FluxType::String, &FluxType::String),
             None
         );
+        // Null is compatible with numeric types for gradual typing
         assert_eq!(
             FluxType::arithmetic_result(&FluxType::Null, &FluxType::Int),
-            None
+            Some(FluxType::Int)
         );
     }
 

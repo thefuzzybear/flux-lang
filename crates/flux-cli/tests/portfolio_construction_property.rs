@@ -87,7 +87,7 @@ proptest! {
     ) {
         let program = build_empty_strategy();
         let mut interp = Interpreter::new(&program);
-        let locals: HashMap<String, Value> = HashMap::new();
+        let mut locals: HashMap<String, Value> = HashMap::new();
 
         let len = values.len() as i64;
 
@@ -109,7 +109,7 @@ proptest! {
         };
 
         // Evaluate through the interpreter
-        let result = interp.eval_expr(&index_access_expr, &locals);
+        let result = interp.eval_expr(&index_access_expr, &mut locals);
 
         if raw_index >= 0 && raw_index < len {
             // Valid index: should return the element at that position
@@ -163,7 +163,7 @@ proptest! {
     ) {
         let program = build_empty_strategy();
         let mut interp = Interpreter::new(&program);
-        let locals: HashMap<String, Value> = HashMap::new();
+        let mut locals: HashMap<String, Value> = HashMap::new();
 
         // Set up price state: prev_closes and current_closes for the symbol
         interp.prev_closes.insert(sym.clone(), prev_close);
@@ -195,7 +195,7 @@ proptest! {
         };
 
         // Evaluate ret(sym)
-        let result = interp.eval_expr(&call_expr, &locals)
+        let result = interp.eval_expr(&call_expr, &mut locals)
             .expect("ret() should not error for valid symbol with prices set");
 
         let expected = (current_close / prev_close) - 1.0;
@@ -234,7 +234,7 @@ proptest! {
             resolved_type: FluxType::Float,
             span: Span::new(200, 300),
         };
-        let result2 = interp.eval_expr(&call_expr2, &locals)
+        let result2 = interp.eval_expr(&call_expr2, &mut locals)
             .expect("second ret() call should not error");
         match result2 {
             Value::Float(f2) => {
@@ -272,7 +272,7 @@ proptest! {
             resolved_type: FluxType::Float,
             span: Span::new(300, 400),
         };
-        let result3 = interp.eval_expr(&call_expr3, &locals)
+        let result3 = interp.eval_expr(&call_expr3, &mut locals)
             .expect("ret() with missing symbol should not error");
         match result3 {
             Value::Float(f) => {
@@ -308,7 +308,7 @@ proptest! {
             resolved_type: FluxType::Float,
             span: Span::new(400, 500),
         };
-        let result4 = interp.eval_expr(&call_expr4, &locals)
+        let result4 = interp.eval_expr(&call_expr4, &mut locals)
             .expect("ret() with prev_close=0 should not error");
         match result4 {
             Value::Float(f) => {
@@ -343,13 +343,13 @@ proptest! {
     ) {
         let program = build_empty_strategy();
         let mut interp = Interpreter::new(&program);
-        let locals: HashMap<String, Value> = HashMap::new();
+        let mut locals: HashMap<String, Value> = HashMap::new();
 
         // Build the VecFloat literal expression from the generated values
         let expr = make_vecfloat_literal(&values);
 
         // Evaluate the expression through the interpreter
-        let result = interp.eval_expr(&expr, &locals)
+        let result = interp.eval_expr(&expr, &mut locals)
             .expect("VecFloat literal evaluation should not error");
 
         // Assert the result is Value::VecFloat with the same elements
@@ -424,7 +424,7 @@ proptest! {
     ) {
         let program = build_empty_strategy();
         let mut interp = Interpreter::new(&program);
-        let locals: HashMap<String, Value> = HashMap::new();
+        let mut locals: HashMap<String, Value> = HashMap::new();
 
         // --- Test OPEN(symbol, qty) ---
         let open_expr = make_fn_call(
@@ -443,7 +443,7 @@ proptest! {
             ],
             FluxType::Signal,
         );
-        let open_result = interp.eval_expr(&open_expr, &locals)
+        let open_result = interp.eval_expr(&open_expr, &mut locals)
             .expect("OPEN should not error for valid symbol and qty");
         match open_result {
             Value::Signal(Signal::Open { symbol: s, qty: q }) => {
@@ -467,7 +467,7 @@ proptest! {
             ],
             FluxType::Signal,
         );
-        let close_result = interp.eval_expr(&close_expr, &locals)
+        let close_result = interp.eval_expr(&close_expr, &mut locals)
             .expect("CLOSE should not error for valid symbol");
         match close_result {
             Value::Signal(Signal::Close { symbol: s }) => {
@@ -495,7 +495,7 @@ proptest! {
             ],
             FluxType::Signal,
         );
-        let close_qty_result = interp.eval_expr(&close_qty_expr, &locals)
+        let close_qty_result = interp.eval_expr(&close_qty_expr, &mut locals)
             .expect("CLOSE_QTY should not error for valid symbol and qty");
         match close_qty_result {
             Value::Signal(Signal::CloseQty { symbol: s, qty: q }) => {

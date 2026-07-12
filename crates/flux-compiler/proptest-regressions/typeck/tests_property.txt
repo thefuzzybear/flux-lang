@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e79b96e3ed9b5aa96292ee3f1c458d2a67b0f8d2109c4f4d002ccf3aeaf46f7a # shrinks to program = Program { imports: [], structs: [], enums: [], functions: [], impl_blocks: [], traits: [], data_block: None, connector_block: None, strategy: Strategy { name: "T", body: [EventHandler(EventHandler { event_name: "bar", body: [Expr(ExprStmt { expr: Expr { kind: BinaryOp { left: Expr { kind: FloatLiteral(1.1), span: Span { start: 430, end: 520 } }, op: Div, right: Expr { kind: NullLiteral, span: Span { start: 430, end: 520 } } }, span: Span { start: 430, end: 520 } }, span: Span { start: 430, end: 520 } })], span: Span { start: 430, end: 520 } })], span: Span { start: 0, end: 19 } }, span: Span { start: 0, end: 19 } }
+cc 5d101409bd92f9ec9f98ef6c1a506d7971acae136a83e5dc8d9aa06b4cc68b7e # shrinks to left = Expr { kind: NullLiteral, span: Span { start: 0, end: 1 } }, right = Expr { kind: IntLiteral(0), span: Span { start: 0, end: 1 } }, op = Lt, span = Span { start: 0, end: 1 }

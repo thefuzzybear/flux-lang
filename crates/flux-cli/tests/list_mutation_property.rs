@@ -115,7 +115,7 @@ proptest! {
         let mut interp = minimal_interpreter();
 
         // Set up locals with the list variable
-        let locals: HashMap<String, Value> = {
+        let mut locals: HashMap<String, Value> = {
             let mut m = HashMap::new();
             m.insert("__list".to_string(), Value::List(initial_items.clone()));
             m
@@ -142,7 +142,7 @@ proptest! {
         );
 
         // Evaluate the push call
-        let result = interp.eval_expr(&push_expr, &locals).unwrap();
+        let result = interp.eval_expr(&push_expr, &mut locals).unwrap();
 
         // Extract the resulting list
         let result_items = match &result {
@@ -230,8 +230,8 @@ proptest! {
         );
 
         // Evaluate the pop call — should return the last element
-        let locals = HashMap::new();
-        let result = interp.eval_expr(&pop_expr, &locals).unwrap();
+        let mut locals = HashMap::new();
+        let result = interp.eval_expr(&pop_expr, &mut locals).unwrap();
 
         // Property: return value equals the original last element
         let expected_last = &initial_items[initial_items.len() - 1];
@@ -465,8 +465,8 @@ proptest! {
         );
 
         // Evaluate the remove call — should return the removed element
-        let locals = HashMap::new();
-        let result = interp.eval_expr(&remove_expr, &locals).unwrap();
+        let mut locals = HashMap::new();
+        let result = interp.eval_expr(&remove_expr, &mut locals).unwrap();
 
         // Property: return value equals the element originally at position i
         prop_assert!(
@@ -666,7 +666,7 @@ proptest! {
     ) {
         // Step 1: Start with a list of random elements
         let mut interp = minimal_interpreter();
-        let locals: HashMap<String, Value> = {
+        let mut locals: HashMap<String, Value> = {
             let mut m = HashMap::new();
             m.insert("__list".to_string(), Value::List(initial_items.clone()));
             m
@@ -692,7 +692,7 @@ proptest! {
         );
 
         // Step 2: Call push(element) — get the new list back
-        let push_result = interp.eval_expr(&push_expr, &locals).unwrap();
+        let push_result = interp.eval_expr(&push_expr, &mut locals).unwrap();
         let pushed_list = match &push_result {
             Value::List(items) => items.clone(),
             other => panic!("push should return Value::List, got {:?}", other),
@@ -714,8 +714,8 @@ proptest! {
             FluxType::Int,
         );
 
-        let locals2 = HashMap::new();
-        let pop_result = interp2.eval_expr(&pop_expr, &locals2).unwrap();
+        let mut locals2 = HashMap::new();
+        let pop_result = interp2.eval_expr(&pop_expr, &mut locals2).unwrap();
 
         // Step 4: Verify: pop return value == pushed element
         prop_assert!(
@@ -857,8 +857,8 @@ proptest! {
         );
 
         // Evaluate the sort_by call — should return Value::Null
-        let locals = HashMap::new();
-        let result = interp.eval_expr(&sort_by_expr, &locals).unwrap();
+        let mut locals = HashMap::new();
+        let result = interp.eval_expr(&sort_by_expr, &mut locals).unwrap();
         prop_assert!(
             matches!(result, Value::Null),
             "sort_by should return Value::Null, got {:?}",
@@ -1103,8 +1103,8 @@ proptest! {
             FluxType::Int,
         );
 
-        let locals = HashMap::new();
-        let result = interp.eval_expr(&remove_expr, &locals);
+        let mut locals = HashMap::new();
+        let result = interp.eval_expr(&remove_expr, &mut locals);
         prop_assert!(result.is_err(), "remove({}) should error for negative index", negative_idx);
         let err_msg = result.unwrap_err();
         prop_assert!(
@@ -1144,7 +1144,7 @@ proptest! {
             FluxType::Int,
         );
 
-        let result2 = interp2.eval_expr(&remove_expr2, &locals);
+        let result2 = interp2.eval_expr(&remove_expr2, &mut locals);
         prop_assert!(result2.is_err(), "remove({}) should error for index >= len {}", too_large_idx, len);
         let err_msg2 = result2.unwrap_err();
         prop_assert!(
@@ -1197,8 +1197,8 @@ proptest! {
             FluxType::Void,
         );
 
-        let locals = HashMap::new();
-        let result = interp.eval_expr(&insert_expr, &locals);
+        let mut locals = HashMap::new();
+        let result = interp.eval_expr(&insert_expr, &mut locals);
         prop_assert!(result.is_err(), "insert({}, ..) should error for negative index", negative_idx);
         let err_msg = result.unwrap_err();
         prop_assert!(
@@ -1244,7 +1244,7 @@ proptest! {
             FluxType::Void,
         );
 
-        let result2 = interp2.eval_expr(&insert_expr2, &locals);
+        let result2 = interp2.eval_expr(&insert_expr2, &mut locals);
         prop_assert!(result2.is_err(), "insert({}, ..) should error for index > len {}", too_large_idx, len);
         let err_msg2 = result2.unwrap_err();
         prop_assert!(

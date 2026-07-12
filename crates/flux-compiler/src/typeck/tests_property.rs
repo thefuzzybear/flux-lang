@@ -110,10 +110,7 @@ mod tests {
                 Expr { kind: ExprKind::BoolLiteral(b), span },
                 FluxType::Bool,
             )),
-            Just((
-                Expr { kind: ExprKind::NullLiteral, span },
-                FluxType::Null,
-            )),
+            // Note: Null is considered numeric for gradual typing, so it's not included here
         ]
     }
 
@@ -732,10 +729,7 @@ mod tests {
                 kind: ExprKind::BoolLiteral(b),
                 span,
             }),
-            Just(Expr {
-                kind: ExprKind::NullLiteral,
-                span,
-            }),
+            // Note: Null is considered numeric for gradual typing, so it's not included here
         ]
     }
 

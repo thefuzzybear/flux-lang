@@ -668,3 +668,66 @@ fn test_backtest_math_strategy() {
         stdout
     );
 }
+
+// =============================================================================
+// Backward Compatibility: --fidelity 0 matches default output
+// =============================================================================
+
+/// Validates: Requirements 4.7, 11.7
+/// Running with `--fidelity 0` must produce output identical to running
+/// without the `--fidelity` flag (the default behavior).
+#[test]
+fn test_backtest_fidelity_0_matches_default_output() {
+    // Run without --fidelity flag
+    let output_default = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("math_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("sample_data.csv"))
+        .arg("--capital")
+        .arg("10000")
+        .output()
+        .expect("failed to execute default backtest");
+
+    // Run with explicit --fidelity 0
+    let output_fidelity0 = flux_cmd()
+        .arg("backtest")
+        .arg(fixture_path("math_strategy.flux"))
+        .arg("--data")
+        .arg(fixture_path("sample_data.csv"))
+        .arg("--capital")
+        .arg("10000")
+        .arg("--fidelity")
+        .arg("0")
+        .output()
+        .expect("failed to execute fidelity 0 backtest");
+
+    assert_eq!(
+        output_default.status.code(),
+        Some(0),
+        "Default backtest failed, stderr: {}",
+        String::from_utf8_lossy(&output_default.stderr)
+    );
+    assert_eq!(
+        output_fidelity0.status.code(),
+        Some(0),
+        "Fidelity 0 backtest failed, stderr: {}",
+        String::from_utf8_lossy(&output_fidelity0.stderr)
+    );
+
+    let stdout_default = String::from_utf8_lossy(&output_default.stdout);
+    let stdout_fidelity0 = String::from_utf8_lossy(&output_fidelity0.stdout);
+
+    // Output must be byte-for-byte identical
+    assert_eq!(
+        stdout_default, stdout_fidelity0,
+        "Fidelity 0 output differs from default output.\n\
+         Default:\n{}\n\nFidelity 0:\n{}",
+        stdout_default, stdout_fidelity0
+    );
+
+    // Verify the output contains all expected sections
+    assert!(stdout_default.contains("--- Signals ---"), "Missing Signals section");
+    assert!(stdout_default.contains("--- Portfolio Summary ---"), "Missing Portfolio Summary section");
+    assert!(stdout_default.contains("--- Summary ---"), "Missing Summary section");
+}

@@ -73,6 +73,17 @@ impl TypeChecker {
         // Register imports into global scope
         self.register_imports(&program.imports)?;
 
+        // Pre-register enum names so structs can reference enum types in their fields.
+        // This does NOT validate variants yet — just records the names for type resolution.
+        for enum_def in &program.enums {
+            self.env.pre_register_enum_name(&enum_def.name);
+        }
+
+        // Pre-register trait names so trait methods can reference the trait as a return type.
+        for trait_def in &program.traits {
+            self.env.pre_register_trait_name(&trait_def.name);
+        }
+
         // Register struct definitions (validates fields, resolves types, topological order)
         let typed_structs = self.register_structs(&program.structs)?;
 
@@ -847,8 +858,20 @@ impl TypeChecker {
                 if self.current_type_params.contains(name) {
                     return Ok(FluxType::TypeParam(name.clone()));
                 }
+                // Built-in collection types
+                if name == "list" {
+                    return Ok(FluxType::List(Box::new(FluxType::Null)));
+                }
+                if name == "HashMap" {
+                    return Ok(FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::TypeParam("K".to_string()), FluxType::TypeParam("V".to_string())],
+                    ));
+                }
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
+                } else if self.env.has_enum_name(name) {
+                    Ok(FluxType::Enum(name.clone()))
                 } else {
                     let msg = if let Some(import_path) = Self::suggest_import_for_type(name) {
                         format!(
@@ -932,10 +955,23 @@ impl TypeChecker {
                 if self.current_type_params.contains(name) {
                     return Ok(FluxType::TypeParam(name.clone()));
                 }
+                // Built-in collection types
+                if name == "list" {
+                    return Ok(FluxType::List(Box::new(FluxType::Null)));
+                }
+                if name == "HashMap" {
+                    return Ok(FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::TypeParam("K".to_string()), FluxType::TypeParam("V".to_string())],
+                    ));
+                }
                 if self.struct_registry.contains_key(name) {
                     Ok(FluxType::Struct(name.clone()))
-                } else if self.env.has_enum(name) {
+                } else if self.env.has_enum(name) || self.env.has_enum_name(name) {
                     Ok(FluxType::Enum(name.clone()))
+                } else if self.env.has_trait_name(name) {
+                    // Trait names are valid in return type positions (for trait method signatures)
+                    Ok(FluxType::Struct(name.clone()))
                 } else {
                     let msg = if let Some(import_path) = Self::suggest_import_for_type(name) {
                         format!(
@@ -1211,6 +1247,16 @@ impl TypeChecker {
                 // Check if it's a type parameter in scope (e.g., T in a generic enum)
                 if self.current_type_params.contains(name) {
                     return Ok(FluxType::TypeParam(name.clone()));
+                }
+                // Built-in collection types
+                if name == "list" {
+                    return Ok(FluxType::List(Box::new(FluxType::Null)));
+                }
+                if name == "HashMap" {
+                    return Ok(FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::TypeParam("K".to_string()), FluxType::TypeParam("V".to_string())],
+                    ));
                 }
                 // Check if it's a struct type
                 if self.struct_registry.contains_key(name) {
@@ -1720,13 +1766,25 @@ impl TypeChecker {
                     if impl_return != trait_method.return_type
                         && !impl_return.is_assignable_to(&trait_method.return_type)
                     {
-                        return Err(self.type_error(
-                            method.span,
-                            format!(
-                                "Method '{}' signature mismatch: trait '{}' declares return type '{}', impl provides '{}'",
-                                method.name, trait_name, trait_method.return_type, impl_return
-                            ),
-                        ));
+                        // Allow covariant return: if the trait declares returning the trait name
+                        // and the impl returns the implementing type, that's valid (Self pattern)
+                        let trait_return_is_self = match &trait_method.return_type {
+                            FluxType::Struct(name) => name.as_str() == trait_name.as_str(),
+                            _ => false,
+                        };
+                        let impl_return_is_target = match &impl_return {
+                            FluxType::Struct(name) => name.as_str() == target_type.as_str(),
+                            _ => false,
+                        };
+                        if !(trait_return_is_self && impl_return_is_target) {
+                            return Err(self.type_error(
+                                method.span,
+                                format!(
+                                    "Method '{}' signature mismatch: trait '{}' declares return type '{}', impl provides '{}'",
+                                    method.name, trait_name, trait_method.return_type, impl_return
+                                ),
+                            ));
+                        }
                     }
                 }
 
@@ -2438,6 +2496,8 @@ impl TypeChecker {
         // Iterable must be a List type
         let elem_type = match &typed_iterable.resolved_type {
             FluxType::List(t) => t.as_ref().clone(),
+            // Gradual typing: Null (from untyped expressions) is iterable
+            FluxType::Null => FluxType::Null,
             other => {
                 return Err(self.type_error(
                     typed_iterable.span,
@@ -2669,6 +2729,13 @@ impl TypeChecker {
                 // String concatenation
                 if left_ty == &FluxType::String && right_ty == &FluxType::String {
                     FluxType::String
+                } else if *left_ty == FluxType::Null || *right_ty == FluxType::Null {
+                    // Gradual typing: Null + anything defaults to Null (permissive)
+                    if let Some(ty) = FluxType::arithmetic_result(left_ty, right_ty) {
+                        ty
+                    } else {
+                        FluxType::Null
+                    }
                 } else if let Some(ty) = FluxType::arithmetic_result(left_ty, right_ty) {
                     ty
                 } else {
@@ -2684,6 +2751,9 @@ impl TypeChecker {
             BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
                 if let Some(ty) = FluxType::arithmetic_result(left_ty, right_ty) {
                     ty
+                } else if *left_ty == FluxType::Null || *right_ty == FluxType::Null {
+                    // Gradual typing: Null arithmetic defaults to Null
+                    FluxType::Null
                 } else {
                     let op_str = match op {
                         BinOp::Sub => "-",
@@ -2704,6 +2774,9 @@ impl TypeChecker {
             // Comparison operators (ordering)
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 if left_ty.is_numeric() && right_ty.is_numeric() {
+                    FluxType::Bool
+                } else if *left_ty == FluxType::Null || *right_ty == FluxType::Null {
+                    // Gradual typing: Null is comparable with any type
                     FluxType::Bool
                 } else {
                     let op_str = match op {
@@ -2728,6 +2801,9 @@ impl TypeChecker {
                     FluxType::Bool
                 } else if left_ty.is_numeric() && right_ty.is_numeric() {
                     FluxType::Bool
+                } else if *left_ty == FluxType::Null || *right_ty == FluxType::Null {
+                    // Gradual typing: Null is comparable with any type
+                    FluxType::Bool
                 } else {
                     let op_str = if op == BinOp::Eq { "==" } else { "!=" };
                     return Err(self.type_error(
@@ -2741,7 +2817,9 @@ impl TypeChecker {
             }
             // Logical operators
             BinOp::And | BinOp::Or => {
-                if left_ty != &FluxType::Bool || right_ty != &FluxType::Bool {
+                if (left_ty != &FluxType::Bool || right_ty != &FluxType::Bool)
+                    && *left_ty != FluxType::Null && *right_ty != FluxType::Null
+                {
                     let op_str = if op == BinOp::And { "and" } else { "or" };
                     return Err(self.type_error(
                         span,
@@ -3500,13 +3578,20 @@ impl TypeChecker {
                 let trait_name = match self.current_type_param_bounds.get(param_name) {
                     Some(name) => name.clone(),
                     None => {
-                        return Err(self.type_error(
+                        // Gradual typing: TypeParam without trait bound allows any method
+                        let typed_args: Vec<TypedExpr> = args
+                            .into_iter()
+                            .map(|a| self.check_expr(a))
+                            .collect::<Result<Vec<_>>>()?;
+                        return Ok(TypedExpr {
+                            kind: TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_receiver),
+                                method: method.to_string(),
+                                args: typed_args,
+                            },
+                            resolved_type: FluxType::Null,
                             span,
-                            format!(
-                                "type {} does not have method '{}' (no trait bound)",
-                                param_name, method
-                            ),
-                        ));
+                        });
                     }
                 };
 
@@ -3576,6 +3661,39 @@ impl TypeChecker {
                     span,
                 })
             }
+            // Gradual typing: Null type (from untyped list element access) allows any method
+            FluxType::Null => {
+                let typed_args: Vec<TypedExpr> = args
+                    .into_iter()
+                    .map(|a| self.check_expr(a))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: method.to_string(),
+                        args: typed_args,
+                    },
+                    resolved_type: FluxType::Null,
+                    span,
+                })
+            }
+            _ if receiver_ty == FluxType::Null => {
+                // Gradual typing: Null (from untyped list element access) allows any method call.
+                // This enables patterns like `list[i].method()` without typed generics.
+                let mut typed_args = Vec::new();
+                for arg in args {
+                    typed_args.push(self.check_expr(arg)?);
+                }
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: method.to_string(),
+                        args: typed_args,
+                    },
+                    resolved_type: FluxType::Null,
+                    span,
+                })
+            }
             _ => Err(self.type_error(
                 span,
                 format!("type {} does not have method '{}'", receiver_ty, method),
@@ -3633,6 +3751,8 @@ impl TypeChecker {
                 }
                 elem_type.as_ref().clone()
             }
+            // Gradual typing: Null (from untyped list element access) supports indexing
+            FluxType::Null => FluxType::Null,
             other => {
                 return Err(self.type_error(
                     span,
@@ -3778,6 +3898,32 @@ impl TypeChecker {
             }
         }
 
+        // Gradual typing: allow member access on Null (from untyped list element access)
+        // This supports the pattern: `list[i].field` where list is `list` (untyped)
+        if typed_object.resolved_type == FluxType::Null {
+            return Ok(TypedExpr {
+                kind: TypedExprKind::MemberAccess {
+                    object: Box::new(typed_object),
+                    field: field.to_string(),
+                },
+                resolved_type: FluxType::Null,
+                span,
+            });
+        }
+
+        // Gradual typing: allow member access on TypeParam (from unresolved HashMap.get())
+        // This supports the pattern: `hashmap.get(key).field`
+        if matches!(typed_object.resolved_type, FluxType::TypeParam(_)) {
+            return Ok(TypedExpr {
+                kind: TypedExprKind::MemberAccess {
+                    object: Box::new(typed_object),
+                    field: field.to_string(),
+                },
+                resolved_type: FluxType::Null,
+                span,
+            });
+        }
+
         // Non-struct types don't support member access
         Err(self.type_error(
             span,
@@ -3905,9 +4051,52 @@ impl TypeChecker {
         // 1. Typecheck the scrutinee expression
         let typed_scrutinee = self.check_expr(*match_expr.scrutinee)?;
 
-        // 2. Verify scrutinee type is an enum
+        // 2. Verify scrutinee type is an enum (or Null for gradual typing)
         let enum_name = match &typed_scrutinee.resolved_type {
             FluxType::Enum(name) => name.clone(),
+            FluxType::Null => {
+                // Gradual typing: match on Null (from untyped list element) — skip validation,
+                // typecheck arms with Null bindings. Don't scope arms so assignments leak out
+                // (Python-like semantics that Flux uses).
+                let mut typed_arms = Vec::new();
+                for arm in match_expr.arms {
+                    // Bind any destructured variables as Null based on pattern
+                    let typed_pattern = match &arm.pattern {
+                        Pattern::Variant { enum_name, variant_name, bindings, span: pat_span } => {
+                            for binding in bindings {
+                                self.env.insert(binding.clone(), FluxType::Null);
+                            }
+                            crate::typeck::typed_ast::TypedPattern::Variant {
+                                enum_name: enum_name.clone(),
+                                variant_name: variant_name.clone(),
+                                bindings: bindings.iter().map(|b| (b.clone(), FluxType::Null)).collect(),
+                                span: *pat_span,
+                            }
+                        }
+                        Pattern::Wildcard { span: pat_span } => {
+                            crate::typeck::typed_ast::TypedPattern::Wildcard { span: *pat_span }
+                        }
+                    };
+                    let typed_body: Vec<TypedStmt> = arm.body.into_iter()
+                        .map(|s| self.check_stmt(s))
+                        .collect::<Result<Vec<_>>>()?;
+                    typed_arms.push(crate::typeck::typed_ast::TypedMatchArm {
+                        pattern: typed_pattern,
+                        body: typed_body,
+                        span: arm.span,
+                    });
+                }
+                return Ok(TypedExpr {
+                    kind: TypedExprKind::Match(TypedMatchExpr {
+                        scrutinee: Box::new(typed_scrutinee),
+                        arms: typed_arms,
+                        result_type: FluxType::Null,
+                        span,
+                    }),
+                    resolved_type: FluxType::Null,
+                    span,
+                });
+            }
             other => {
                 return Err(self.type_error(
                     typed_scrutinee.span,
@@ -4468,6 +4657,24 @@ impl TypeChecker {
                         args: vec![typed_key],
                     },
                     resolved_type: receiver_ty,
+                    span,
+                })
+            }
+            "keys" => {
+                if !args.is_empty() {
+                    return Err(self.type_error(
+                        span,
+                        format!("'keys' expects 0 arguments, found {}", args.len()),
+                    ));
+                }
+
+                Ok(TypedExpr {
+                    kind: TypedExprKind::MethodCall {
+                        receiver: Box::new(typed_receiver),
+                        method: "keys".to_string(),
+                        args: vec![],
+                    },
+                    resolved_type: FluxType::List(Box::new(key_type.clone())),
                     span,
                 })
             }

@@ -52,3 +52,5 @@ perf.data.old
 *.kiro/specs
 
 .planning/
+stdout.txt
+stderr.txt

@@ -53,6 +53,21 @@ enum Commands {
         /// Initial capital for portfolio tracking (default: 10000)
         #[arg(long, default_value = "10000.0")]
         capital: f64,
+        /// Engine fidelity level (0=fast, 1=synthetic, 2=replay)
+        #[arg(long, default_value = "0")]
+        fidelity: u8,
+        /// Number of price levels per side (fidelity 1 only, range: 1-20)
+        #[arg(long)]
+        depth: Option<u32>,
+        /// Spread percentage between levels (fidelity 1 only, range: 0.01-10.0)
+        #[arg(long)]
+        spread: Option<f64>,
+        /// Total liquidity per side (fidelity 1 only, range: 100-10000000)
+        #[arg(long)]
+        liquidity: Option<f64>,
+        /// Path to L2 data file (required for fidelity 2)
+        #[arg(long)]
+        l2_data: Option<PathBuf>,
     },
     /// Initialize a new Flux project
     Init {
@@ -151,11 +166,16 @@ fn run() -> i32 {
                 Err(_e) => FAILURE,
             }
         }
-        Commands::Backtest { file, data, capital } => {
+        Commands::Backtest { file, data, capital, fidelity, depth, spread, liquidity, l2_data } => {
             let data_refs: Vec<&std::path::Path> = data.iter().map(|p| p.as_path()).collect();
-            match commands::backtest::run_backtest_cmd(&file, &data_refs, capital) {
+            match commands::backtest::run_backtest_cmd(&file, &data_refs, capital, fidelity, depth, spread, liquidity, l2_data.as_deref()) {
                 Ok(()) => SUCCESS,
-                Err(_e) => FAILURE,
+                Err(e) => {
+                    match &e {
+                        error::CliError::Usage(_) => USAGE_ERROR,
+                        _ => FAILURE,
+                    }
+                }
             }
         }
         Commands::Init { name } => match commands::init::run_init(name.as_deref()) {

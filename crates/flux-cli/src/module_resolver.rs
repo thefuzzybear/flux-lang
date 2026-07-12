@@ -8,7 +8,7 @@
 //! resolved from the workspace `std/` directory and provide both struct definitions
 //! and helper functions to the importing scope.
 
-use flux_compiler::parser::ast::{Expr, ExprKind, FnDef, MatchExpr, Program, Stmt, StructDef};
+use flux_compiler::parser::ast::{EnumDef, Expr, ExprKind, FnDef, ImplBlock, MatchExpr, Program, Stmt, StructDef, TraitDef};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -102,6 +102,12 @@ const STDLIB_STRUCT_MODULES: &[(&str, &[&str])] = &[
     ("market::l1", &["Tick", "Bar", "Quote", "MarketSnapshot"]),
     ("market::l2", &["Level", "Book"]),
     ("collections::buffers", &["QuoteWindow", "BarWindow", "Quote", "Bar"]),
+    ("engine::types", &["Order", "Fill", "PositionState", "OrderSide", "OrderType", "TimeInForce", "FillResult", "BacktestEngine"]),
+    ("engine::book", &["OrderBook", "PriceLevel"]),
+    ("engine::fast", &["FastEngine"]),
+    ("engine::synthetic", &["SyntheticEngine", "SyntheticConfig"]),
+    ("engine::replay", &["ReplayEngine", "L2Event", "L2Action", "QueuedOrder"]),
+    ("engine::metrics", &["Metrics"]),
 ];
 
 /// Known stdlib function names exported from struct modules.
@@ -132,6 +138,30 @@ const STDLIB_MODULE_FUNCTIONS: &[(&str, &[&str])] = &[
             "barwindow_push",
             "barwindow_get",
         ],
+    ),
+    (
+        "engine::types",
+        &[],
+    ),
+    (
+        "engine::book",
+        &[],
+    ),
+    (
+        "engine::fast",
+        &["update_position"],
+    ),
+    (
+        "engine::synthetic",
+        &["generate_price_path", "build_synthetic_book", "update_synth_position"],
+    ),
+    (
+        "engine::replay",
+        &["get_queue_ahead", "process_l2_event", "advance_queues", "check_queue_fills", "update_replay_position", "trim_book"],
+    ),
+    (
+        "engine::metrics",
+        &["compute_metrics", "compute_sharpe", "compute_max_drawdown", "compute_trade_pnls"],
     ),
 ];
 
@@ -224,6 +254,9 @@ impl ModuleResolver {
 
         // Resolve stdlib struct module imports
         let mut merged_structs: Vec<StructDef> = Vec::new();
+        let mut merged_enums: Vec<EnumDef> = Vec::new();
+        let mut merged_traits: Vec<TraitDef> = Vec::new();
+        let mut merged_impl_blocks: Vec<ImplBlock> = Vec::new();
         let mut merged_functions: Vec<FnDef> = Vec::new();
         let mut known_names: HashMap<String, PathBuf> = HashMap::new();
 
@@ -238,14 +271,16 @@ impl ModuleResolver {
 
         for import in &stdlib_struct_imports {
             let stdlib_path = self.resolve_stdlib_path(&import.module_path)?;
-            let (all_structs, all_fns) = self.load_stdlib_file(&stdlib_path)?;
+            let (all_structs, all_enums, all_traits, all_impl_blocks, all_fns) = self.load_stdlib_file(&stdlib_path)?;
 
-            // Select requested names (structs + functions)
+            // Select requested names (structs + enums + traits + functions)
             for name in &import.names {
                 let is_struct = all_structs.iter().any(|s| s.name == *name);
+                let is_enum = all_enums.iter().any(|e| e.name == *name);
+                let is_trait = all_traits.iter().any(|t| t.name == *name);
                 let is_fn = all_fns.iter().any(|f| f.name == *name);
 
-                if !is_struct && !is_fn {
+                if !is_struct && !is_enum && !is_trait && !is_fn {
                     return Err(ModuleError::FunctionNotFound {
                         function_name: name.clone(),
                         file_path: stdlib_path.clone(),
@@ -254,9 +289,8 @@ impl ModuleResolver {
 
                 // Check for duplicates
                 if let Some(existing_file) = known_names.get(name) {
-                    // Allow silent override for structs duplicated across stdlib files
-                    // (e.g., Quote/Bar defined in both l1.flux and buffers.flux)
-                    if !is_struct {
+                    // Allow silent override for types duplicated across stdlib files
+                    if !is_struct && !is_enum && !is_trait {
                         return Err(ModuleError::DuplicateFunction {
                             name: name.clone(),
                             first_file: existing_file.clone(),
@@ -272,11 +306,35 @@ impl ModuleResolver {
                     // but MarketSnapshot depends on Quote, Book depends on Level)
                     self.add_struct_with_deps(struct_def, &all_structs, &mut merged_structs);
                 }
+                if is_enum {
+                    let enum_def = all_enums.iter().find(|e| e.name == *name).unwrap();
+                    if !merged_enums.iter().any(|e| e.name == enum_def.name) {
+                        merged_enums.push(enum_def.clone());
+                    }
+                }
+                if is_trait {
+                    let trait_def = all_traits.iter().find(|t| t.name == *name).unwrap();
+                    if !merged_traits.iter().any(|t| t.name == trait_def.name) {
+                        merged_traits.push(trait_def.clone());
+                    }
+                }
                 if is_fn {
                     let fn_def = all_fns.iter().find(|f| f.name == *name).unwrap();
                     if !merged_functions.iter().any(|f| f.name == fn_def.name) {
                         merged_functions.push(fn_def.clone());
                     }
+                }
+            }
+
+            // Also merge impl blocks for any imported structs/enums from this module
+            for impl_block in &all_impl_blocks {
+                let target_name = &impl_block.target_type;
+                let is_relevant = merged_structs.iter().any(|s| s.name == *target_name)
+                    || merged_enums.iter().any(|e| e.name == *target_name)
+                    || program.structs.iter().any(|s| s.name == *target_name)
+                    || program.enums.iter().any(|e| e.name == *target_name);
+                if is_relevant && !merged_impl_blocks.iter().any(|ib| ib.target_type == impl_block.target_type && ib.trait_name == impl_block.trait_name) {
+                    merged_impl_blocks.push(impl_block.clone());
                 }
             }
         }
@@ -348,6 +406,9 @@ impl ModuleResolver {
         // Assemble final program: retain only built-in imports, merge functions and structs
         program.imports = builtin_imports;
         program.structs.extend(merged_structs);
+        program.enums.extend(merged_enums);
+        program.traits.extend(merged_traits);
+        program.impl_blocks.extend(merged_impl_blocks);
         program.functions.extend(merged_functions);
         Ok(program)
     }
@@ -532,8 +593,8 @@ impl ModuleResolver {
         }
     }
 
-    /// Load and parse a stdlib file, returning both struct definitions and function definitions.
-    fn load_stdlib_file(&self, path: &Path) -> Result<(Vec<StructDef>, Vec<FnDef>), ModuleError> {
+    /// Load and parse a stdlib file, returning struct, enum, trait, impl block, and function definitions.
+    fn load_stdlib_file(&self, path: &Path) -> Result<(Vec<StructDef>, Vec<EnumDef>, Vec<TraitDef>, Vec<ImplBlock>, Vec<FnDef>), ModuleError> {
         let source = std::fs::read_to_string(path).map_err(|_| ModuleError::FileNotFound {
             import_path: path.display().to_string(),
             resolved_path: path.to_path_buf(),
@@ -551,7 +612,7 @@ impl ModuleResolver {
                 message: e.to_string(),
             })?;
 
-        Ok((program.structs, program.functions))
+        Ok((program.structs, program.enums, program.traits, program.impl_blocks, program.functions))
     }
 
     /// Add a struct definition and its transitive struct dependencies to the merged list.

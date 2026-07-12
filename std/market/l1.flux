@@ -17,7 +17,8 @@ struct Bar {
     low: f64,
     close: f64,
     volume: f64,
-    timestamp: f64
+    timestamp: f64,
+    symbol: str
 }
 
 struct Quote {

@@ -11,6 +11,10 @@ pub(crate) struct TypeEnvironment {
     scopes: Vec<HashMap<String, FluxType>>,
     /// Registry of enum definitions: enum name → enum info
     enums: HashMap<String, EnumInfo>,
+    /// Pre-registered enum names (for forward references from struct fields)
+    pre_registered_enum_names: std::collections::HashSet<String>,
+    /// Pre-registered trait names (for forward references from trait method return types)
+    pre_registered_trait_names: std::collections::HashSet<String>,
     /// Registry of impl block methods: type name → method name → method info
     impl_methods: HashMap<String, HashMap<String, MethodInfo>>,
     /// Registry of trait definitions: trait name → trait info
@@ -25,6 +29,8 @@ impl TypeEnvironment {
         Self {
             scopes: vec![HashMap::new()], // Start with global scope
             enums: HashMap::new(),
+            pre_registered_enum_names: std::collections::HashSet::new(),
+            pre_registered_trait_names: std::collections::HashSet::new(),
             impl_methods: HashMap::new(),
             traits: HashMap::new(),
             trait_impls: HashMap::new(),
@@ -84,6 +90,17 @@ impl TypeEnvironment {
         self.enums.contains_key(name)
     }
 
+    /// Pre-register an enum name for forward reference resolution.
+    /// This allows struct fields to reference enum types before they are fully registered.
+    pub fn pre_register_enum_name(&mut self, name: &str) {
+        self.pre_registered_enum_names.insert(name.to_string());
+    }
+
+    /// Check if an enum name is known (either pre-registered or fully registered).
+    pub fn has_enum_name(&self, name: &str) -> bool {
+        self.enums.contains_key(name) || self.pre_registered_enum_names.contains(name)
+    }
+
     /// Returns an iterator over all registered enum names.
     pub fn enum_names(&self) -> impl Iterator<Item = &str> {
         self.enums.keys().map(|s| s.as_str())
@@ -131,6 +148,17 @@ impl TypeEnvironment {
     /// Check if a trait exists with the given name.
     pub fn has_trait(&self, name: &str) -> bool {
         self.traits.contains_key(name)
+    }
+
+    /// Pre-register a trait name for forward reference resolution.
+    /// This allows trait methods to reference the trait name in return types.
+    pub fn pre_register_trait_name(&mut self, name: &str) {
+        self.pre_registered_trait_names.insert(name.to_string());
+    }
+
+    /// Check if a trait name is known (pre-registered or fully registered).
+    pub fn has_trait_name(&self, name: &str) -> bool {
+        self.traits.contains_key(name) || self.pre_registered_trait_names.contains(name)
     }
 
     // --- Trait implementation registry ---
