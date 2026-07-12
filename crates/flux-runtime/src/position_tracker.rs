@@ -166,6 +166,44 @@ impl PositionTracker {
                 Some(fill)
             }
 
+            Signal::Short { symbol, qty } => {
+                let fill = Fill {
+                    symbol: symbol.clone(),
+                    qty: *qty,
+                    price,
+                    side: FillSide::Open,
+                    bar_index,
+                };
+
+                if let Some(position) = self.positions.get_mut(symbol) {
+                    // Adding to a short: qty becomes more negative
+                    let new_qty = position.qty - qty;
+                    let abs_new = new_qty.abs();
+                    if abs_new > 0.0 {
+                        let abs_old = position.qty.abs();
+                        let new_avg = (abs_old * position.avg_entry_price + qty * price) / abs_new;
+                        position.avg_entry_price = new_avg;
+                    }
+                    position.qty = new_qty;
+                    position.last_update_bar = bar_index;
+                } else {
+                    let position = Position {
+                        symbol: symbol.clone(),
+                        qty: -(*qty),  // Negative qty = short
+                        avg_entry_price: price,
+                        unrealized_pnl: 0.0,
+                        realized_pnl: 0.0,
+                        open_bar: bar_index,
+                        last_update_bar: bar_index,
+                    };
+                    self.positions.insert(symbol.clone(), position);
+                }
+
+                self.last_prices.insert(symbol.clone(), price);
+                self.fills.push(fill.clone());
+                Some(fill)
+            }
+
             Signal::Close { symbol } => {
                 let position = self.positions.get_mut(symbol)?;
                 let close_qty = position.qty;
@@ -173,7 +211,7 @@ impl PositionTracker {
 
                 let fill = Fill {
                     symbol: symbol.clone(),
-                    qty: close_qty,
+                    qty: close_qty.abs(),
                     price,
                     side: FillSide::Close,
                     bar_index,
@@ -189,8 +227,14 @@ impl PositionTracker {
 
             Signal::CloseQty { symbol, qty } => {
                 let position = self.positions.get_mut(symbol)?;
-                let actual_qty = qty.min(position.qty);
-                let realized = (price - position.avg_entry_price) * actual_qty;
+                // For longs: reduce qty. For shorts: reduce abs(qty) toward zero.
+                let actual_qty = if position.qty > 0.0 {
+                    qty.min(position.qty)
+                } else {
+                    qty.min(position.qty.abs())
+                };
+                let signed_qty = if position.qty > 0.0 { actual_qty } else { -actual_qty };
+                let realized = (price - position.avg_entry_price) * signed_qty;
 
                 let fill = Fill {
                     symbol: symbol.clone(),
@@ -202,7 +246,11 @@ impl PositionTracker {
 
                 self.total_realized_pnl += realized;
                 position.realized_pnl += realized;
-                position.qty -= actual_qty;
+                if position.qty > 0.0 {
+                    position.qty -= actual_qty;
+                } else {
+                    position.qty += actual_qty; // Closing short: move toward zero
+                }
                 position.last_update_bar = bar_index;
 
                 if position.qty == 0.0 {

@@ -404,6 +404,7 @@ impl LiveHarness {
 fn signal_kind_str(signal: &Signal) -> &'static str {
     match signal {
         Signal::Open { .. } => "OPEN",
+        Signal::Short { .. } => "SHORT",
         Signal::Close { .. } => "CLOSE",
         Signal::CloseQty { .. } => "CLOSE_QTY",
     }

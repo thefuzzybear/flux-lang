@@ -329,6 +329,7 @@ impl Interpreter {
                     for signal in &signals {
                         match signal {
                             Signal::Open { .. } => self.in_position = true,
+                            Signal::Short { .. } => self.in_position = true,
                             Signal::Close { .. } => self.in_position = false,
                             Signal::CloseQty { .. } => {} // partial close does not flatten
                         }
@@ -344,6 +345,7 @@ impl Interpreter {
                     for signal in &signals {
                         match signal {
                             Signal::Open { .. } => self.in_position = true,
+                            Signal::Short { .. } => self.in_position = true,
                             Signal::Close { .. } => self.in_position = false,
                             Signal::CloseQty { .. } => {}
                         }
@@ -609,6 +611,24 @@ impl Interpreter {
                             _ => return Err("expected a numeric value".to_string()),
                         };
                         Ok(Value::Signal(Signal::close_qty(symbol, qty)))
+                    }
+                    "SHORT" => {
+                        if evaluated_args.len() != 2 {
+                            return Err("SHORT requires 2 arguments (symbol, qty)".to_string());
+                        }
+                        let symbol = match &evaluated_args[0] {
+                            Value::Str(s) if s.is_empty() => {
+                                return Err("SHORT: invalid symbol (empty string)".to_string());
+                            }
+                            Value::Str(s) => s.clone(),
+                            _ => return Err("expected a string value".to_string()),
+                        };
+                        let qty = match &evaluated_args[1] {
+                            Value::Float(f) => *f,
+                            Value::Int(i) => *i as f64,
+                            _ => return Err("expected a numeric value".to_string()),
+                        };
+                        Ok(Value::Signal(Signal::short(symbol, qty)))
                     }
                     "sma" => {
                         if evaluated_args.len() != 2 {

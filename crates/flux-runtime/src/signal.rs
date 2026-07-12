@@ -1,20 +1,29 @@
 /// A trade signal emitted by a strategy.
 #[derive(Debug, Clone)]
 pub enum Signal {
-    /// Open a new position
+    /// Open a new long position
     Open { symbol: String, qty: f64 },
-    /// Close the entire position
+    /// Open a new short position
+    Short { symbol: String, qty: f64 },
+    /// Close the entire position (long or short)
     Close { symbol: String },
     /// Close a partial quantity
     CloseQty { symbol: String, qty: f64 },
 }
 
 impl Signal {
-    /// Create a signal to open a position.
+    /// Create a signal to open a long position.
     /// Panics if qty <= 0.0.
     pub fn open(symbol: String, qty: f64) -> Self {
         assert!(qty > 0.0, "Signal::open qty must be greater than 0.0");
         Signal::Open { symbol, qty }
+    }
+
+    /// Create a signal to open a short position.
+    /// Panics if qty <= 0.0.
+    pub fn short(symbol: String, qty: f64) -> Self {
+        assert!(qty > 0.0, "Signal::short qty must be greater than 0.0");
+        Signal::Short { symbol, qty }
     }
 
     /// Create a signal to close the entire position for a symbol.
@@ -33,16 +42,18 @@ impl Signal {
     pub fn symbol(&self) -> &str {
         match self {
             Signal::Open { symbol, .. } => symbol,
+            Signal::Short { symbol, .. } => symbol,
             Signal::Close { symbol } => symbol,
             Signal::CloseQty { symbol, .. } => symbol,
         }
     }
 
     /// Get the quantity, if applicable.
-    /// Returns `Some(qty)` for Open and CloseQty, `None` for Close.
+    /// Returns `Some(qty)` for Open, Short, and CloseQty, `None` for Close.
     pub fn qty(&self) -> Option<f64> {
         match self {
             Signal::Open { qty, .. } => Some(*qty),
+            Signal::Short { qty, .. } => Some(*qty),
             Signal::Close { .. } => None,
             Signal::CloseQty { qty, .. } => Some(*qty),
         }

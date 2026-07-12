@@ -99,7 +99,7 @@ impl SignalAggregator {
                 Signal::Close { .. } | Signal::CloseQty { .. } => {
                     approved.push((strategy_name.clone(), signal.clone()));
                 }
-                Signal::Open { symbol, qty } => {
+                Signal::Open { symbol, qty } | Signal::Short { symbol, qty } => {
                     // Check 1: Position size limit (per-symbol)
                     if let Some(max_size) = self.constraints.max_position_size {
                         let current_qty = tracker

@@ -51,16 +51,27 @@ pub fn signal_to_order_params(
                 order_id: id,
             })
         }
-        Signal::Close { symbol } => {
-            if position_qty <= 0.0 {
-                return None; // No position to close
-            }
+        Signal::Short { symbol, qty } => {
             let id = *next_order_id;
             *next_order_id += 1;
             Some(OrderParams {
                 symbol: symbol.clone(),
                 side_is_buy: false,
-                qty: position_qty,
+                qty: *qty,
+                order_id: id,
+            })
+        }
+        Signal::Close { symbol } => {
+            if position_qty == 0.0 {
+                return None; // No position to close
+            }
+            let id = *next_order_id;
+            *next_order_id += 1;
+            // If position is long (qty > 0), sell to close. If short (qty < 0), buy to close.
+            Some(OrderParams {
+                symbol: symbol.clone(),
+                side_is_buy: position_qty < 0.0,
+                qty: position_qty.abs(),
                 order_id: id,
             })
         }
@@ -189,6 +200,9 @@ pub fn format_signal(bar_index: usize, signal: &Signal) -> String {
         Signal::Open { symbol, qty } => {
             format!("{} Open {} {}", bar_index, symbol, qty)
         }
+        Signal::Short { symbol, qty } => {
+            format!("{} Short {} {}", bar_index, symbol, qty)
+        }
         Signal::Close { symbol } => {
             format!("{} Close {}", bar_index, symbol)
         }
@@ -205,26 +219,29 @@ pub fn format_signal(bar_index: usize, signal: &Signal) -> String {
 /// --- Summary ---
 /// Total signals: {total}
 /// Open: {open_count}
+/// Short: {short_count}
 /// Close: {close_count}
 /// CloseQty: {close_qty_count}
 /// ```
 pub fn format_summary(results: &[(usize, Signal)]) -> String {
     let total = results.len();
     let mut open_count = 0usize;
+    let mut short_count = 0usize;
     let mut close_count = 0usize;
     let mut close_qty_count = 0usize;
 
     for (_idx, signal) in results {
         match signal {
             Signal::Open { .. } => open_count += 1,
+            Signal::Short { .. } => short_count += 1,
             Signal::Close { .. } => close_count += 1,
             Signal::CloseQty { .. } => close_qty_count += 1,
         }
     }
 
     format!(
-        "--- Summary ---\nTotal signals: {}\nOpen: {}\nClose: {}\nCloseQty: {}",
-        total, open_count, close_count, close_qty_count
+        "--- Summary ---\nTotal signals: {}\nOpen: {}\nShort: {}\nClose: {}\nCloseQty: {}",
+        total, open_count, short_count, close_count, close_qty_count
     )
 }
 
@@ -815,8 +832,8 @@ fn run_engine_backtest(
 
     // Main backtest loop
     for (i, bar) in bars.iter().enumerate() {
-        // Set in_position from position state
-        interpreter.in_position = position_qtys.values().any(|&q| q > 0.0);
+        // Set in_position from position state (any non-zero position, long or short)
+        interpreter.in_position = position_qtys.values().any(|&q| q != 0.0);
 
         // Run strategy to get signals
         let signals = interpreter.on_bar(bar);
@@ -830,6 +847,7 @@ fn run_engine_backtest(
         for signal in &signals {
             let sym = match signal {
                 Signal::Open { symbol, .. } => symbol,
+                Signal::Short { symbol, .. } => symbol,
                 Signal::Close { symbol } => symbol,
                 Signal::CloseQty { symbol, .. } => symbol,
             };
@@ -1065,7 +1083,7 @@ mod tests {
         let summary = format_summary(&results);
         assert_eq!(
             summary,
-            "--- Summary ---\nTotal signals: 0\nOpen: 0\nClose: 0\nCloseQty: 0"
+            "--- Summary ---\nTotal signals: 0\nOpen: 0\nShort: 0\nClose: 0\nCloseQty: 0"
         );
     }
 
@@ -1081,7 +1099,7 @@ mod tests {
         let summary = format_summary(&results);
         assert_eq!(
             summary,
-            "--- Summary ---\nTotal signals: 5\nOpen: 2\nClose: 2\nCloseQty: 1"
+            "--- Summary ---\nTotal signals: 5\nOpen: 2\nShort: 0\nClose: 2\nCloseQty: 1"
         );
     }
 
@@ -1095,7 +1113,7 @@ mod tests {
         let summary = format_summary(&results);
         assert_eq!(
             summary,
-            "--- Summary ---\nTotal signals: 3\nOpen: 3\nClose: 0\nCloseQty: 0"
+            "--- Summary ---\nTotal signals: 3\nOpen: 3\nShort: 0\nClose: 0\nCloseQty: 0"
         );
     }
 
@@ -1155,11 +1173,16 @@ mod tests {
 
     #[test]
     fn test_signal_to_order_params_close_negative_position() {
+        // Closing a short position: should buy to cover
         let signal = Signal::Close { symbol: "AAPL".to_string() };
         let mut next_id = 3;
         let result = signal_to_order_params(&signal, &mut next_id, -10.0);
-        assert!(result.is_none());
-        assert_eq!(next_id, 3); // ID not consumed
+        assert!(result.is_some());
+        let params = result.unwrap();
+        assert_eq!(params.symbol, "AAPL");
+        assert!(params.side_is_buy); // Buy to cover
+        assert_eq!(params.qty, 10.0); // abs(-10)
+        assert_eq!(next_id, 4);
     }
 
     #[test]
@@ -1198,6 +1221,10 @@ mod tests {
 
         prop_oneof![
             (symbol, qty.clone()).prop_map(|(s, q)| Signal::Open {
+                symbol: s,
+                qty: q
+            }),
+            ("[A-Z]{1,5}", qty.clone()).prop_map(|(s, q)| Signal::Short {
                 symbol: s,
                 qty: q
             }),
@@ -1268,6 +1295,26 @@ mod tests {
                     prop_assert!(
                         output.contains("CloseQty"),
                         "Output {:?} does not contain 'CloseQty'",
+                        output
+                    );
+                    prop_assert!(
+                        output.contains(symbol),
+                        "Output {:?} does not contain symbol {:?}",
+                        output,
+                        symbol
+                    );
+                    let qty_str = format!("{}", qty);
+                    prop_assert!(
+                        output.contains(&qty_str),
+                        "Output {:?} does not contain qty {:?}",
+                        output,
+                        qty_str
+                    );
+                }
+                Signal::Short { symbol, qty } => {
+                    prop_assert!(
+                        output.contains("Short"),
+                        "Output {:?} does not contain 'Short'",
                         output
                     );
                     prop_assert!(

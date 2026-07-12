@@ -34,6 +34,14 @@ pub(crate) fn signal_function_bindings() -> Vec<(&'static str, FluxType)> {
             ]),
             ret: Box::new(FluxType::Signal),
         }),
+        ("CLOSE_QTY", FluxType::Fn {
+            params: FnParams::Fixed(vec![FluxType::String, FluxType::Float]),
+            ret: Box::new(FluxType::Signal),
+        }),
+        ("SHORT", FluxType::Fn {
+            params: FnParams::Fixed(vec![FluxType::String, FluxType::Float]),
+            ret: Box::new(FluxType::Signal),
+        }),
     ]
 }
 
