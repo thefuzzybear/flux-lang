@@ -1321,12 +1321,7 @@ impl Interpreter {
                         Ok(signals)
                     }
                     TypedExprKind::IndexAccess { object, index } => {
-                        // Index assignment: list[i] = value
-                        let name = match &object.kind {
-                            TypedExprKind::Ident(n) => n.clone(),
-                            _ => return Err("index assignment target must be a variable".to_string()),
-                        };
-
+                        // Index assignment: list[i] = value or struct.field[i] = value
                         let idx_val = self.eval_expr(index, locals)?;
                         let idx = match idx_val {
                             Value::Int(i) => i,
@@ -1339,34 +1334,112 @@ impl Interpreter {
                         let mut signals = Vec::new();
                         signals.append(&mut self.fn_signals);
 
-                        // Look up the existing list from state or locals
-                        let existing = self.state.get(&name)
-                            .or_else(|| locals.get(&name))
-                            .cloned()
-                            .ok_or_else(|| format!("undefined variable: {}", name))?;
+                        match &object.kind {
+                            TypedExprKind::Ident(name) => {
+                                // Simple case: variable[i] = value
+                                let name = name.clone();
+                                let existing = self.state.get(&name)
+                                    .or_else(|| locals.get(&name))
+                                    .cloned()
+                                    .ok_or_else(|| format!("undefined variable: {}", name))?;
 
-                        match existing {
-                            Value::List(mut items) => {
-                                if idx < 0 || idx as usize >= items.len() {
-                                    return Err(format!(
-                                        "runtime error: index {} out of bounds for array of size {}",
-                                        idx, items.len()
-                                    ));
-                                }
-                                items[idx as usize] = rhs;
-                                // Write back to the correct binding
-                                if self.state.contains_key(&name) {
-                                    self.state.insert(name, Value::List(items));
-                                } else {
-                                    locals.insert(name, Value::List(items));
+                                match existing {
+                                    Value::List(mut items) => {
+                                        if idx < 0 || idx as usize >= items.len() {
+                                            return Err(format!(
+                                                "runtime error: index {} out of bounds for array of size {}",
+                                                idx, items.len()
+                                            ));
+                                        }
+                                        items[idx as usize] = rhs;
+                                        if self.state.contains_key(&name) {
+                                            self.state.insert(name, Value::List(items));
+                                        } else {
+                                            locals.insert(name, Value::List(items));
+                                        }
+                                    }
+                                    _ => return Err("index assignment requires a list target".to_string()),
                                 }
                             }
-                            _ => return Err("index assignment requires a list target".to_string()),
+                            TypedExprKind::MemberAccess { object: inner_obj, field } => {
+                                // Field chain case: obj.field[i] = value
+                                let var_name = match &inner_obj.kind {
+                                    TypedExprKind::Ident(n) => n.clone(),
+                                    _ => return Err("nested field index assignment only supports one level of field access (var.field[i])".to_string()),
+                                };
+                                let field_name = field.clone();
+
+                                let existing = self.state.get(&var_name)
+                                    .or_else(|| locals.get(&var_name))
+                                    .cloned()
+                                    .ok_or_else(|| format!("undefined variable: {}", var_name))?;
+
+                                match existing {
+                                    Value::Struct { type_name, mut fields } => {
+                                        let field_val = fields.get_mut(&field_name)
+                                            .ok_or_else(|| format!("struct '{}' has no field '{}'", type_name, field_name))?;
+                                        match field_val {
+                                            Value::List(ref mut items) => {
+                                                if idx < 0 || idx as usize >= items.len() {
+                                                    return Err(format!(
+                                                        "runtime error: index {} out of bounds for array of size {}",
+                                                        idx, items.len()
+                                                    ));
+                                                }
+                                                items[idx as usize] = rhs;
+                                            }
+                                            _ => return Err(format!("field '{}' is not a list", field_name)),
+                                        }
+                                        let updated = Value::Struct { type_name, fields };
+                                        if self.state.contains_key(&var_name) {
+                                            self.state.insert(var_name, updated);
+                                        } else {
+                                            locals.insert(var_name, updated);
+                                        }
+                                    }
+                                    _ => return Err(format!("'{}' is not a struct", var_name)),
+                                }
+                            }
+                            _ => return Err("index assignment target must be a variable or field access".to_string()),
                         }
 
                         Ok(signals)
                     }
-                    _ => return Err("assignment target must be an identifier or index expression".to_string()),
+                    TypedExprKind::MemberAccess { object, field } => {
+                        // Field assignment: obj.field = value
+                        let var_name = match &object.kind {
+                            TypedExprKind::Ident(n) => n.clone(),
+                            _ => return Err("field assignment only supports one level (var.field = value)".to_string()),
+                        };
+                        let field_name = field.clone();
+
+                        let rhs = self.eval_expr(&assignment.value, locals)?;
+
+                        // Drain any signals emitted by user-function calls in the RHS
+                        let mut signals = Vec::new();
+                        signals.append(&mut self.fn_signals);
+
+                        let existing = self.state.get(&var_name)
+                            .or_else(|| locals.get(&var_name))
+                            .cloned()
+                            .ok_or_else(|| format!("undefined variable: {}", var_name))?;
+
+                        match existing {
+                            Value::Struct { type_name, mut fields } => {
+                                fields.insert(field_name, rhs);
+                                let updated = Value::Struct { type_name, fields };
+                                if self.state.contains_key(&var_name) {
+                                    self.state.insert(var_name, updated);
+                                } else {
+                                    locals.insert(var_name, updated);
+                                }
+                            }
+                            _ => return Err(format!("'{}' is not a struct", var_name)),
+                        }
+
+                        Ok(signals)
+                    }
+                    _ => return Err("assignment target must be an identifier, index expression, or field access".to_string()),
                 }
             }
 

@@ -389,8 +389,8 @@ fn builtin_functions_matches_expected_words() {
 #[test]
 fn operators_logical_matches() {
     let grammar = load_grammar();
-    // Logical operators are the second pattern in the operators rule (after -> arrow)
-    let pattern = get_rule_match_at(&grammar, "operators", 1);
+    // Logical operators are the third pattern in the operators rule (after => and -> arrows)
+    let pattern = get_rule_match_at(&grammar, "operators", 2);
     let re = Regex::new(&pattern).expect("operators logical regex must be valid");
 
     for op in &["and", "or", "not"] {
@@ -405,8 +405,8 @@ fn operators_logical_matches() {
 #[test]
 fn operators_comparison_matches() {
     let grammar = load_grammar();
-    // Comparison operators are the third pattern in the operators rule
-    let pattern = get_rule_match_at(&grammar, "operators", 2);
+    // Comparison operators are the fourth pattern in the operators rule
+    let pattern = get_rule_match_at(&grammar, "operators", 3);
     let re = Regex::new(&pattern).expect("operators comparison regex must be valid");
 
     for op in &["==", "!=", "<=", ">=", "<", ">"] {
@@ -421,8 +421,8 @@ fn operators_comparison_matches() {
 #[test]
 fn operators_arithmetic_matches() {
     let grammar = load_grammar();
-    // Arithmetic operators are the fourth pattern in the operators rule
-    let pattern = get_rule_match_at(&grammar, "operators", 3);
+    // Arithmetic operators are the fifth pattern in the operators rule
+    let pattern = get_rule_match_at(&grammar, "operators", 4);
     let re = Regex::new(&pattern).expect("operators arithmetic regex must be valid");
 
     for op in &["+", "-", "*", "/", "%"] {
