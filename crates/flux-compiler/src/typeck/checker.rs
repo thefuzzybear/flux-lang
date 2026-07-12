@@ -3226,6 +3226,33 @@ impl TypeChecker {
                             span,
                         })
                     }
+                    "push" => {
+                        if args.len() != 1 {
+                            return Err(self.type_error(
+                                span,
+                                format!("'push' expects 1 argument, found {}", args.len()),
+                            ));
+                        }
+                        let typed_arg = self.check_expr(args.into_iter().next().unwrap())?;
+                        if !typed_arg.resolved_type.is_assignable_to(&elem_type) {
+                            return Err(self.type_error(
+                                typed_arg.span,
+                                format!(
+                                    "'push' argument must be {}, found {}",
+                                    elem_type, typed_arg.resolved_type
+                                ),
+                            ));
+                        }
+                        Ok(TypedExpr {
+                            kind: TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_receiver),
+                                method: method.to_string(),
+                                args: vec![typed_arg],
+                            },
+                            resolved_type: FluxType::Void,
+                            span,
+                        })
+                    }
                     "pop" => {
                         if !args.is_empty() {
                             return Err(self.type_error(
@@ -3240,6 +3267,98 @@ impl TypeChecker {
                                 args: vec![],
                             },
                             resolved_type: elem_type,
+                            span,
+                        })
+                    }
+                    "remove" => {
+                        if args.len() != 1 {
+                            return Err(self.type_error(
+                                span,
+                                format!("'remove' expects 1 argument, found {}", args.len()),
+                            ));
+                        }
+                        let typed_arg = self.check_expr(args.into_iter().next().unwrap())?;
+                        if !typed_arg.resolved_type.is_assignable_to(&FluxType::Int) {
+                            return Err(self.type_error(
+                                typed_arg.span,
+                                format!(
+                                    "'remove' argument must be Int, found {}",
+                                    typed_arg.resolved_type
+                                ),
+                            ));
+                        }
+                        Ok(TypedExpr {
+                            kind: TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_receiver),
+                                method: method.to_string(),
+                                args: vec![typed_arg],
+                            },
+                            resolved_type: elem_type,
+                            span,
+                        })
+                    }
+                    "insert" => {
+                        if args.len() != 2 {
+                            return Err(self.type_error(
+                                span,
+                                format!("'insert' expects 2 arguments, found {}", args.len()),
+                            ));
+                        }
+                        let mut args_iter = args.into_iter();
+                        let typed_idx = self.check_expr(args_iter.next().unwrap())?;
+                        if !typed_idx.resolved_type.is_assignable_to(&FluxType::Int) {
+                            return Err(self.type_error(
+                                typed_idx.span,
+                                format!(
+                                    "'insert' first argument must be Int, found {}",
+                                    typed_idx.resolved_type
+                                ),
+                            ));
+                        }
+                        let typed_elem = self.check_expr(args_iter.next().unwrap())?;
+                        if !typed_elem.resolved_type.is_assignable_to(&elem_type) {
+                            return Err(self.type_error(
+                                typed_elem.span,
+                                format!(
+                                    "'insert' second argument must be {}, found {}",
+                                    elem_type, typed_elem.resolved_type
+                                ),
+                            ));
+                        }
+                        Ok(TypedExpr {
+                            kind: TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_receiver),
+                                method: method.to_string(),
+                                args: vec![typed_idx, typed_elem],
+                            },
+                            resolved_type: FluxType::Void,
+                            span,
+                        })
+                    }
+                    "sort_by" => {
+                        if args.len() != 1 {
+                            return Err(self.type_error(
+                                span,
+                                format!("'sort_by' expects 1 argument, found {}", args.len()),
+                            ));
+                        }
+                        let typed_arg = self.check_expr(args.into_iter().next().unwrap())?;
+                        if !typed_arg.resolved_type.is_assignable_to(&FluxType::String) {
+                            return Err(self.type_error(
+                                typed_arg.span,
+                                format!(
+                                    "'sort_by' argument must be Str, found {}",
+                                    typed_arg.resolved_type
+                                ),
+                            ));
+                        }
+                        Ok(TypedExpr {
+                            kind: TypedExprKind::MethodCall {
+                                receiver: Box::new(typed_receiver),
+                                method: method.to_string(),
+                                args: vec![typed_arg],
+                            },
+                            resolved_type: FluxType::Void,
                             span,
                         })
                     }

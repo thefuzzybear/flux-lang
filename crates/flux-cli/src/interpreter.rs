@@ -202,7 +202,13 @@ pub struct Interpreter {
     /// Registry of impl block methods, keyed by type name → method name → TypedFnDef.
     /// Used to resolve method calls on struct instances.
     pub impl_methods: HashMap<String, HashMap<String, TypedFnDef>>,
+    /// Temporarily holds a modified list when a mutating method (pop, remove)
+    /// returns a non-list value. The implicit reassignment block reads from here.
+    pub pending_list_mutation: Option<Value>,
 }
+
+/// List methods that trigger implicit reassignment of the receiver variable.
+const LIST_MUTATING_METHODS: &[&str] = &["push", "pop", "remove", "insert", "sort_by"];
 
 impl Interpreter {
     /// Create a new Interpreter from a TypedProgram.
@@ -287,6 +293,7 @@ impl Interpreter {
             fn_signals: Vec::new(),
             pending_return: None,
             impl_methods,
+            pending_list_mutation: None,
         }
     }
 
@@ -831,12 +838,113 @@ impl Interpreter {
                             return Ok(Value::Int(items.len() as i64));
                         }
                     }
-                    (Value::List(_), "pop") => {
-                        // pop returns the last element (non-mutating in this interpreter)
+                    (Value::List(_), "push") => {
+                        if evaluated_args.len() != 1 {
+                            return Err("push requires exactly 1 argument".to_string());
+                        }
                         if let Value::List(items) = &receiver_val {
-                            return items.last().cloned().ok_or_else(|| {
-                                "runtime error: pop on empty list".to_string()
+                            let mut new_list = items.clone();
+                            new_list.push(evaluated_args[0].clone());
+                            return Ok(Value::List(new_list));
+                        }
+                    }
+                    (Value::List(_), "pop") => {
+                        if let Value::List(items) = &receiver_val {
+                            if items.is_empty() {
+                                return Err("runtime error: pop on empty list".to_string());
+                            }
+                            let mut modified = items.clone();
+                            let removed = modified.pop().unwrap();
+                            self.pending_list_mutation = Some(Value::List(modified));
+                            return Ok(removed);
+                        }
+                    }
+                    (Value::List(_), "remove") => {
+                        if evaluated_args.len() != 1 {
+                            return Err("remove requires exactly 1 argument (index)".to_string());
+                        }
+                        let idx = match &evaluated_args[0] {
+                            Value::Int(i) => *i,
+                            _ => return Err("remove argument must be an integer".to_string()),
+                        };
+                        if let Value::List(items) = &receiver_val {
+                            let len = items.len();
+                            if idx < 0 || idx as usize >= len {
+                                return Err(format!(
+                                    "runtime error: index {} out of bounds for array of size {}",
+                                    idx, len
+                                ));
+                            }
+                            let mut modified = items.clone();
+                            let removed = modified.remove(idx as usize);
+                            self.pending_list_mutation = Some(Value::List(modified));
+                            return Ok(removed);
+                        }
+                    }
+                    (Value::List(_), "insert") => {
+                        if evaluated_args.len() != 2 {
+                            return Err("insert requires exactly 2 arguments (index, element)".to_string());
+                        }
+                        let idx = match &evaluated_args[0] {
+                            Value::Int(i) => *i,
+                            _ => return Err("insert first argument must be an integer".to_string()),
+                        };
+                        if let Value::List(items) = &receiver_val {
+                            let len = items.len();
+                            if idx < 0 || idx as usize > len {
+                                return Err(format!(
+                                    "runtime error: index {} out of bounds for array of size {}",
+                                    idx, len
+                                ));
+                            }
+                            let mut modified = items.clone();
+                            modified.insert(idx as usize, evaluated_args[1].clone());
+                            self.pending_list_mutation = Some(Value::List(modified));
+                            return Ok(Value::Null);
+                        }
+                    }
+                    (Value::List(_), "sort_by") => {
+                        if evaluated_args.len() != 1 {
+                            return Err("sort_by requires exactly 1 argument (field name)".to_string());
+                        }
+                        let field_name = match &evaluated_args[0] {
+                            Value::Str(s) => s.clone(),
+                            _ => return Err("sort_by argument must be a string".to_string()),
+                        };
+
+                        if let Value::List(items) = &receiver_val {
+                            let mut sorted = items.clone();
+
+                            // Validate all elements have the field and it's numeric
+                            for item in &sorted {
+                                match item {
+                                    Value::Struct { type_name, fields } => {
+                                        match fields.get(&field_name) {
+                                            None => return Err(format!(
+                                                "runtime error: struct '{}' has no field '{}'",
+                                                type_name, field_name
+                                            )),
+                                            Some(Value::Float(_)) | Some(Value::Int(_)) => {}
+                                            Some(_) => return Err(format!(
+                                                "runtime error: field '{}' is not numeric and cannot be sorted",
+                                                field_name
+                                            )),
+                                        }
+                                    }
+                                    _ => return Err("sort_by requires a list of structs".to_string()),
+                                }
+                            }
+
+                            // Sort by f64 value of the field (ascending)
+                            sorted.sort_by(|a, b| {
+                                let a_val = extract_sort_f64(a, &field_name);
+                                let b_val = extract_sort_f64(b, &field_name);
+                                a_val.partial_cmp(&b_val).unwrap_or(std::cmp::Ordering::Equal)
                             });
+
+                            // Store modified list for implicit reassignment
+                            self.pending_list_mutation = Some(Value::List(sorted));
+                            return Ok(Value::Null);
                         }
                     }
                     (Value::Str(_), "len") => {
@@ -1177,27 +1285,74 @@ impl Interpreter {
     ) -> Result<Vec<Signal>, String> {
         match stmt {
             TypedStmt::Assignment(assignment) => {
-                // Get target name from the target expression (expect Ident)
-                let name = match &assignment.target.kind {
-                    TypedExprKind::Ident(name) => name.clone(),
-                    _ => return Err("assignment target must be an identifier".to_string()),
-                };
+                match &assignment.target.kind {
+                    TypedExprKind::Ident(name) => {
+                        let name = name.clone();
 
-                // Evaluate the RHS
-                let value = self.eval_expr(&assignment.value, locals)?;
+                        // Evaluate the RHS
+                        let value = self.eval_expr(&assignment.value, locals)?;
 
-                // Drain any signals emitted by user-function calls in the RHS
-                let mut signals = Vec::new();
-                signals.append(&mut self.fn_signals);
+                        // Drain any signals emitted by user-function calls in the RHS
+                        let mut signals = Vec::new();
+                        signals.append(&mut self.fn_signals);
 
-                // If the name exists in state, update state; otherwise store in locals
-                if self.state.contains_key(&name) {
-                    self.state.insert(name, value);
-                } else {
-                    locals.insert(name, value);
+                        // If the name exists in state, update state; otherwise store in locals
+                        if self.state.contains_key(&name) {
+                            self.state.insert(name, value);
+                        } else {
+                            locals.insert(name, value);
+                        }
+
+                        Ok(signals)
+                    }
+                    TypedExprKind::IndexAccess { object, index } => {
+                        // Index assignment: list[i] = value
+                        let name = match &object.kind {
+                            TypedExprKind::Ident(n) => n.clone(),
+                            _ => return Err("index assignment target must be a variable".to_string()),
+                        };
+
+                        let idx_val = self.eval_expr(index, locals)?;
+                        let idx = match idx_val {
+                            Value::Int(i) => i,
+                            _ => return Err("index must be an integer".to_string()),
+                        };
+
+                        let rhs = self.eval_expr(&assignment.value, locals)?;
+
+                        // Drain any signals emitted by user-function calls in the RHS
+                        let mut signals = Vec::new();
+                        signals.append(&mut self.fn_signals);
+
+                        // Look up the existing list from state or locals
+                        let existing = self.state.get(&name)
+                            .or_else(|| locals.get(&name))
+                            .cloned()
+                            .ok_or_else(|| format!("undefined variable: {}", name))?;
+
+                        match existing {
+                            Value::List(mut items) => {
+                                if idx < 0 || idx as usize >= items.len() {
+                                    return Err(format!(
+                                        "runtime error: index {} out of bounds for array of size {}",
+                                        idx, items.len()
+                                    ));
+                                }
+                                items[idx as usize] = rhs;
+                                // Write back to the correct binding
+                                if self.state.contains_key(&name) {
+                                    self.state.insert(name, Value::List(items));
+                                } else {
+                                    locals.insert(name, Value::List(items));
+                                }
+                            }
+                            _ => return Err("index assignment requires a list target".to_string()),
+                        }
+
+                        Ok(signals)
+                    }
+                    _ => return Err("assignment target must be an identifier or index expression".to_string()),
                 }
-
-                Ok(signals)
             }
 
             TypedStmt::If(if_stmt) => {
@@ -1292,18 +1447,27 @@ impl Interpreter {
                 // Drain any signals emitted by user-function calls
                 signals.append(&mut self.fn_signals);
 
-                // Implicit reassignment for mutating HashMap methods (insert, remove).
+                // Implicit reassignment for mutating methods (HashMap insert/remove,
+                // and list push/pop/remove/insert/sort_by).
                 // When a MethodCall on an Ident receiver with a mutating method produces
-                // a Value::HashMap, write it back to the variable so the user doesn't need
-                // to write `map = map.insert(k, v)` explicitly.
+                // a Value::HashMap or Value::List, write it back to the variable so the
+                // user doesn't need explicit reassignment.
                 if let TypedExprKind::MethodCall { receiver, method, .. } = &expr_stmt.expr.kind {
-                    if matches!(method.as_str(), "insert" | "remove") {
+                    let is_list_mutating = LIST_MUTATING_METHODS.contains(&method.as_str());
+                    let is_map_mutating = matches!(method.as_str(), "insert" | "remove");
+
+                    if is_list_mutating || is_map_mutating {
                         if let TypedExprKind::Ident(name) = &receiver.kind {
-                            if matches!(&value, Value::HashMap(_)) {
+                            // For list methods that return non-list values (pop, remove),
+                            // use self.pending_list_mutation. For push/insert/sort_by and
+                            // map methods, use the expression value directly.
+                            let val_to_write = self.pending_list_mutation.take().unwrap_or(value.clone());
+
+                            if matches!(&val_to_write, Value::List(_) | Value::HashMap(_)) {
                                 if self.state.contains_key(name) {
-                                    self.state.insert(name.clone(), value.clone());
+                                    self.state.insert(name.clone(), val_to_write);
                                 } else {
-                                    locals.insert(name.clone(), value.clone());
+                                    locals.insert(name.clone(), val_to_write);
                                 }
                             }
                         }
@@ -1416,6 +1580,19 @@ impl Interpreter {
         } else {
             Value::Null
         }
+    }
+}
+
+/// Extract the f64 value of a named field from a struct Value for sorting.
+/// Assumes validation has already confirmed the field exists and is numeric.
+fn extract_sort_f64(val: &Value, field: &str) -> f64 {
+    match val {
+        Value::Struct { fields, .. } => match fields.get(field) {
+            Some(Value::Float(f)) => *f,
+            Some(Value::Int(i)) => *i as f64,
+            _ => 0.0, // unreachable after validation
+        },
+        _ => 0.0,
     }
 }
 
@@ -1725,6 +1902,7 @@ mod tests {
             fn_signals: Vec::new(),
             pending_return: None,
             impl_methods: HashMap::new(),
+            pending_list_mutation: None,
         }
     }
 
