@@ -429,8 +429,11 @@ fn run_fidelity_zero_backtest(
 
     let mut results: Vec<(usize, Signal)> = Vec::new();
     for (i, bar) in bars.iter().enumerate() {
-        // Set in_position from tracker state (multi-symbol aware)
-        interpreter.in_position = tracker.open_position_count() > 0;
+        // Set in_position per-symbol from tracker state (multi-symbol aware).
+        // This ensures each symbol gets its own in_position flag.
+        interpreter.in_position = tracker.position(&bar.symbol)
+            .map(|p| p.qty != 0.0)
+            .unwrap_or(false);
 
         let signals = interpreter.on_bar(bar);
 

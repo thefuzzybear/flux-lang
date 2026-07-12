@@ -54,3 +54,6 @@ perf.data.old
 .planning/
 stdout.txt
 stderr.txt
+
+# Empyrean — private strategy research (not committed)
+/empyrean/

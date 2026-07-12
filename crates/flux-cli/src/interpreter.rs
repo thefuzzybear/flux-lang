@@ -514,8 +514,14 @@ impl Interpreter {
                     _ => return Err("unsupported function expression".to_string()),
                 };
 
-                // Construct a unique call-site key from the expression span
-                let call_site_key = format!("{}_{}_{}", func_name, expr.span.start, expr.span.end);
+                // Construct a unique call-site key from the expression span.
+                // Include the current symbol (if available) so that multi-symbol
+                // strategies get independent indicator state per asset.
+                let call_site_key = if let Some(Value::Str(sym)) = locals.get("symbol") {
+                    format!("{}_{}_{}_{}", func_name, expr.span.start, expr.span.end, sym)
+                } else {
+                    format!("{}_{}_{}", func_name, expr.span.start, expr.span.end)
+                };
 
                 // Evaluate all arguments eagerly for tier dispatch
                 let evaluated_args: Vec<Value> = args
@@ -617,7 +623,11 @@ impl Interpreter {
                             Value::Int(i) => *i as usize,
                             _ => return Err("expected an integer value".to_string()),
                         };
-                        let key = format!("sma_{}_{}", expr.span.start, expr.span.end);
+                        let key = if let Some(Value::Str(sym)) = locals.get("symbol") {
+                            format!("sma_{}_{}_{}", expr.span.start, expr.span.end, sym)
+                        } else {
+                            format!("sma_{}_{}", expr.span.start, expr.span.end)
+                        };
 
                         let entry = self.indicators.entry(key).or_insert_with(|| {
                             IndicatorStateEntry::Sma {
@@ -669,7 +679,11 @@ impl Interpreter {
                             Value::Int(i) => *i as usize,
                             _ => return Err("expected an integer value".to_string()),
                         };
-                        let key = format!("ema_{}_{}", expr.span.start, expr.span.end);
+                        let key = if let Some(Value::Str(sym)) = locals.get("symbol") {
+                            format!("ema_{}_{}_{}", expr.span.start, expr.span.end, sym)
+                        } else {
+                            format!("ema_{}_{}", expr.span.start, expr.span.end)
+                        };
 
                         let entry = self.indicators.entry(key).or_insert_with(|| {
                             IndicatorStateEntry::Ema {
