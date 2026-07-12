@@ -1,0 +1,181 @@
+---
+description: Flux language development context — Flux is NOT in your training data
+globs:
+alwaysApply: true
+---
+
+# Flux Language Development
+
+## Critical: Flux Is Not In Your Training Data
+
+Flux is a custom trading-native programming language built from scratch. You CANNOT reference external docs or examples. Everything you need is in this repository. Rely ONLY on the patterns in `demos/` and the information below.
+
+## What is Flux?
+
+A trading-native language: Python-ergonomic syntax, trading primitives built-in, compiles through Rust for native performance.
+
+```bash
+flux check strategy.flux                            # Typecheck
+flux build strategy.flux                            # Compile to Rust
+flux backtest strategy.flux --data data.csv --capital 10000  # Interpret + backtest
+flux fmt strategy.flux                              # Format
+flux init my-project                                # Scaffold
+flux fetch strategy.flux                            # Download market data
+flux live strategy.flux                             # Live/replay mode
+```
+
+## Architecture
+
+```
+.flux source → Lexer → Parser → Type Checker → Typed AST
+                                                    │
+                        ┌───────────────────────────┼──────────────────┐
+                        │                           │                  │
+                  (flux build)               (flux backtest)     (flux check)
+                        │                           │                  │
+                  Code Generator              Interpreter         (done)
+                        │                           │
+                  Rust source (.rs)           Signals per bar → PositionTracker → P&L
+```
+
+## Repository Layout
+
+- `crates/flux-compiler/src/lexer/` — Logos-based tokenizer
+- `crates/flux-compiler/src/parser/` — Recursive descent parser → AST
+- `crates/flux-compiler/src/typeck/` — Type checker → Typed AST
+- `crates/flux-compiler/src/codegen/` — Rust code emitter
+- `crates/flux-runtime/src/` — Signal, Strategy trait, BarContext, PositionTracker, indicators
+- `crates/flux-cli/src/interpreter.rs` — AST-walking interpreter (main execution)
+- `crates/flux-cli/src/stat_indicators.rs` — stddev, zscore, correlation
+- `crates/flux-cli/src/commands/` — CLI command handlers
+- `demos/` — Working strategy examples
+
+## Flux Syntax Reference
+
+### Strategy Structure
+
+```flux
+from indicators import {sma, ema}
+from signals::entry import {should_enter}
+
+data {
+    symbols = ["AAPL"]
+    period = "1y"
+    interval = "1d"
+    source = "yahoo"
+}
+
+strategy MyStrategy {
+    params {
+        period = 20
+        threshold = 2.0
+    }
+    state {
+        bar_count = 0
+    }
+    on bar {
+        bar_count = bar_count + 1
+        avg = sma(close, period)
+        if close > avg and not in_position {
+            OPEN(symbol, 100.0)
+        }
+        if close < avg and in_position {
+            CLOSE(symbol)
+        }
+    }
+}
+```
+
+### Bar Context: `close`, `open`, `high`, `low`, `volume`, `symbol`, `in_position`
+
+### Types: `int`, `f64`, `bool`, `str`, `HashMap`, user structs, user enums
+
+### Functions
+
+```flux
+fn spread(a: f64, b: f64, ratio: f64) -> f64 {
+    return a - b * ratio
+}
+```
+
+### Structs + Impl
+
+```flux
+struct PairState { mean: f64, z_score: f64, lookback: int }
+
+impl PairState {
+    fn new(lb: int) -> PairState {  # Static (no self)
+        return PairState { mean = 0.0, z_score = 0.0, lookback = lb }
+    }
+    fn update(self, s: f64, a: f64, std: f64) -> PairState {  # Instance
+        return PairState { mean = a, z_score = (s - a) / std, lookback = self.lookback }
+    }
+}
+```
+
+### Enums + Match
+
+```flux
+enum Signal { Buy(strength: f64), Sell(strength: f64), Hold }
+
+match signal {
+    Signal.Buy(strength) => { OPEN(symbol, strength * 100.0) }
+    Signal.Sell(strength) => { CLOSE(symbol) }
+    _ => { }
+}
+```
+
+### Traits + Generics
+
+```flux
+trait RegimeDetector {
+    fn detect(self, fast: f64, slow: f64, vol: f64) -> Regime
+}
+impl RegimeDetector for TrendDetector { ... }
+
+fn detect_regime[T: RegimeDetector](det: T, f: f64, s: f64, v: f64) -> Regime {
+    return det.detect(f, s, v)
+}
+```
+
+### HashMap
+
+```flux
+map = HashMap.new()
+map.insert("key", value)
+val = map.get("key")       # Returns null if missing
+map.contains_key("key")    # Returns bool
+```
+
+### Signals: `OPEN(symbol, qty)`, `CLOSE(symbol)`, `CLOSE_QTY(symbol, qty)`
+
+### Built-ins: `sma`, `ema`, `stddev`, `zscore`, `correlation`, `max`, `min`, `abs`
+
+### Operators: `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`
+
+### Imports: `from indicators import {sma}`, `from signals::entry import {fn_name}`
+
+### Comments: `# single line`
+
+## Testing
+
+```bash
+cargo test -p flux-cli --lib   # 500+ unit tests
+cargo test -p flux-cli --test type_system_interpreter_property  # Property tests
+cargo test -p flux-cli --test type_system_demos_integration     # Integration tests
+```
+
+## Adding New Flux Syntax
+
+1. Token → `lexer/logos_token.rs`
+2. Parse → `parser/mod.rs` + `parser/ast.rs`
+3. Typecheck → `typeck/checker.rs` + `typeck/typed_ast.rs`
+4. Interpret → `interpreter.rs`
+5. Codegen → `codegen/emitter.rs`
+6. Tests
+
+## Coding Standards
+
+- rustfmt + clippy, doc comments on public items
+- Property tests with proptest for invariants
+- Commits: `type(scope): description` (feat/fix/docs/test/refactor, scopes: lexer/parser/typeck/codegen/runtime/cli/interpreter)

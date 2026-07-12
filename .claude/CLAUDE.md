@@ -1,26 +1,89 @@
 # Flux Language Development
 
-**You are working on Flux**, a domain-specific trading language that compiles to native binaries through Rust.
+## Critical: Flux Is Not In Your Training Data
 
-## Critical Context
-
-**Flux does not exist in your training data.** You cannot reference external documentation, Stack Overflow, or examples. Everything you need to know is in this repository.
+Flux is a custom programming language. You CANNOT reference external docs, Stack Overflow, or examples. Everything you need is in this repository. When writing Flux code or modifying the compiler, rely ONLY on the patterns shown here and in `demos/`.
 
 ## What is Flux?
 
-Flux is a trading-native programming language designed for quantitative traders and researchers. It provides:
+Flux is a trading-native programming language that compiles to native binaries through Rust. It provides Python-ergonomic syntax with trading primitives built-in and native Rust performance.
 
-1. **Trading-native syntax:** First-class types for `Bar`, `Signal`, `Position`, `Strategy`
-2. **Type safety:** Prevents lookahead bias and position management bugs at compile time
-3. **Integrated backtesting:** Write strategy in notebook, see results inline
-4. **Native performance:** Compiles through Rust to optimized binaries
-5. **Book-side polymorphism:** Same code tests both LONG and SHORT strategies
+```bash
+flux check strategy.flux                            # Typecheck only
+flux build strategy.flux                            # Compile to Rust source
+flux backtest strategy.flux --data data.csv --capital 10000  # Interpret + backtest
+flux fmt strategy.flux                              # Format code
+flux init my-project                                # Scaffold project
+flux fetch strategy.flux                            # Download market data
+flux live strategy.flux                             # Live/replay mode
+```
 
-**Example Flux Code:**
+## Architecture
+
+```
+.flux source → Lexer → Parser → Type Checker → Typed AST
+                                                    │
+                        ┌───────────────────────────┼──────────────────┐
+                        │                           │                  │
+                  (flux build)               (flux backtest)     (flux check)
+                        │                           │                  │
+                  Code Generator              Interpreter         (done)
+                        │                           │
+                  Rust source (.rs)           Signals per bar
+                                                    │
+                                            PositionTracker
+                                                    │
+                                    Fills, P&L, Equity, Exposure
+```
+
+## Repository Structure
+
+```
+flux-lang/
+├── crates/
+│   ├── flux-compiler/src/
+│   │   ├── lexer/             # Logos-based tokenizer with span tracking
+│   │   ├── parser/            # Recursive descent → AST
+│   │   ├── typeck/            # Type checker → Typed AST
+│   │   └── codegen/           # Rust source emitter
+│   ├── flux-runtime/src/
+│   │   ├── signal.rs          # Signal enum (Open, Close, CloseQty)
+│   │   ├── strategy.rs        # Strategy trait
+│   │   ├── context.rs         # BarContext (close, open, high, low, volume, symbol)
+│   │   ├── position_tracker.rs # Fill simulation, P&L, portfolio metrics
+│   │   ├── backtest.rs        # run_backtest, run_backtest_with_tracker
+│   │   └── indicators/        # SMA, EMA (stateful, per-call-site)
+│   └── flux-cli/src/
+│       ├── interpreter.rs     # AST-walking interpreter (~2500 lines)
+│       ├── stat_indicators.rs # stddev, zscore, correlation
+│       ├── csv_loader.rs      # CSV → Vec<BarContext>
+│       ├── formatter/         # flux fmt
+│       ├── live/              # Live trading harness
+│       ├── data/              # Yahoo Finance data fetcher
+│       └── commands/          # CLI command handlers
+├── demos/                     # Working strategy examples (pairs_trading, regime_detector, etc.)
+├── std/                       # Standard library modules
+├── editors/vscode/            # VS Code extension
+├── docs/                      # User-facing docs
+└── .planning/                 # Architecture, roadmap, language spec
+```
+
+## Flux Language — Complete Syntax Reference
+
+### Strategy Structure
+
 ```flux
-from indicators import {sma}
+from indicators import {sma, ema}
+from signals::entry import {should_enter}
 
-strategy MeanReversion {
+data {
+    symbols = ["AAPL", "MSFT"]
+    period = "1y"
+    interval = "1d"
+    source = "yahoo"
+}
+
+strategy StrategyName {
     params {
         period = 20
         threshold = 2.0
@@ -34,277 +97,254 @@ strategy MeanReversion {
         bar_count = bar_count + 1
         avg = sma(close, period)
 
-        if close < avg and not in_position {
+        if close > avg and not in_position {
             OPEN(symbol, 100.0)
-        } elif close > avg and in_position {
+        }
+        if close < avg and in_position {
             CLOSE(symbol)
         }
     }
 }
 ```
 
-## Architecture Overview
+### Available Bar Context Variables
 
-```
-Flux Source Code (.flux)
-    ↓ Lexer (crates/flux-compiler/src/lexer/)
-Tokens
-    ↓ Parser (crates/flux-compiler/src/parser/)
-Abstract Syntax Tree (AST)
-    ↓ Type Checker (crates/flux-compiler/src/typeck/)
-Typed AST
-    ├─→ Code Generator (crates/flux-compiler/src/codegen/)
-    │       → Rust Source Code (.rs) → Cargo → Native Binary
-    │
-    └─→ Interpreter (crates/flux-cli/src/interpreter.rs)
-            → Signals per bar
-                ↓ PositionTracker (crates/flux-runtime/src/position_tracker.rs)
-            → Fills, Positions, P&L, Equity, Exposure
-```
+- `close`, `open`, `high`, `low` — OHLC prices (f64)
+- `volume` — Volume (f64)
+- `symbol` — Current symbol (str)
+- `in_position` — Whether strategy has an open position (bool)
 
-The **backtest** command uses the interpreter path. The **build** command uses the codegen path.
+### Types
 
-## Repository Structure
+| Type | Example | Notes |
+|------|---------|-------|
+| `int` | `42` | 64-bit integer |
+| `f64` | `3.14` | 64-bit float |
+| `bool` | `true`, `false` | |
+| `str` | `"hello"` | String |
+| `HashMap` | `HashMap.new()` | String keys → any value |
+| Struct | `MyStruct { field = value }` | User-defined |
+| Enum | `Signal.Buy(0.5)` | User-defined tagged union |
 
-```
-flux-lang/
-├── .claude/
-│   ├── CLAUDE.md              # This file - main context
-│   ├── skills/                # Development skills (see below)
-│   └── prompts/               # Common prompts/templates
-├── .kiro/
-│   ├── steering/              # Kiro AI steering files
-│   └── specs/                 # Feature specs (requirements, design, tasks)
-├── crates/
-│   ├── flux-compiler/         # Compiler (lexer, parser, typeck, codegen)
-│   │   └── src/
-│   │       ├── lexer/         # Logos-based lexer with spans
-│   │       ├── parser/        # Recursive descent parser → AST
-│   │       ├── typeck/        # Type checker → Typed AST
-│   │       └── codegen/       # Rust code emitter
-│   ├── flux-runtime/          # Runtime library
-│   │   └── src/
-│   │       ├── backtest.rs        # run_backtest (signal collection)
-│   │       ├── position_tracker.rs # PositionTracker, Fill, Position, run_backtest_with_tracker
-│   │       ├── signal.rs          # Signal enum (Open, Close, CloseQty)
-│   │       ├── strategy.rs        # Strategy trait
-│   │       ├── context.rs         # BarContext struct
-│   │       └── indicators/        # SMA, EMA (per-call-site state)
-│   └── flux-cli/              # CLI tool
-│       └── src/
-│           ├── main.rs            # CLI entry (check, build, backtest, init)
-│           ├── interpreter.rs     # AST-walking interpreter for backtest
-│           ├── csv_loader.rs      # CSV → Vec<BarContext>
-│           ├── commands/
-│           │   ├── backtest.rs    # backtest command (interpreter + PositionTracker)
-│           │   ├── build.rs       # build command (codegen)
-│           │   ├── check.rs       # check command (typecheck only)
-│           │   └── init.rs        # init command (project scaffold)
-│           └── diagnostics.rs     # Error formatting with source spans
-├── .planning/                 # Architecture docs, language spec, roadmap
-├── Cargo.toml                 # Workspace root
-├── CODING_STANDARDS.md        # Coding conventions
-└── CONTRIBUTING.md            # How to contribute
+### Functions
+
+```flux
+fn calculate_spread(price_a: f64, price_b: f64, ratio: f64) -> f64 {
+    return price_a - price_b * ratio
+}
+
+# Functions can access bar context globals
+fn should_enter(lookback: int, threshold: f64) -> f64 {
+    z = zscore(close, lookback)
+    if z < 0.0 - threshold {
+        return 1.0
+    }
+    return 0.0
+}
 ```
 
-## Development Skills
+### Structs and Impl Blocks
 
-Use these skills for focused development tasks:
+```flux
+struct PairState {
+    mean_spread: f64,
+    z_score: f64,
+    lookback: int
+}
 
-- **`/flux-compiler-dev`** - Work on compiler (lexer, parser, type checker, codegen)
-- **`/flux-parser-dev`** - Deep work on parser implementation
-- **`/flux-codegen-dev`** - Work on Rust code generation
-- **`/flux-runtime-dev`** - Work on runtime library (backtesting, indicators)
-- **`/flux-testing`** - Write tests for Flux features
+impl PairState {
+    # Static method (no self) — constructor pattern
+    fn new(lookback: int) -> PairState {
+        return PairState { mean_spread = 0.0, z_score = 0.0, lookback = lookback }
+    }
 
-Each skill loads specific context and coding standards for that area.
+    # Instance method (takes self) — accesses fields via self.field
+    fn update(self, spread: f64, avg: f64, std: f64) -> PairState {
+        z = self.calculate_zscore(spread, avg, std)
+        return PairState { mean_spread = avg, z_score = z, lookback = self.lookback }
+    }
 
-## Quick Start for Agents
+    fn calculate_zscore(self, spread: f64, avg: f64, std: f64) -> f64 {
+        if std > 0.0 { return (spread - avg) / std }
+        return 0.0
+    }
+}
+```
 
-**New to this codebase? Read these in order:**
-1. `docs/architecture/00-overview.md` - High-level architecture
-2. `docs/architecture/01-compiler-pipeline.md` - How compilation works
-3. `docs/language-spec/flux-spec-v0.1.md` - What Flux the language is
-4. `CODING_STANDARDS.md` - How we write code here
+### Enums and Match
 
-**Working on a specific component?**
-- Lexer: Read `docs/architecture/02-lexer.md`
-- Parser: Read `docs/architecture/03-parser.md`
-- Type system: Read `docs/architecture/04-type-system.md`
-- Code generation: Read `docs/architecture/05-codegen.md`
+```flux
+enum Signal {
+    Buy(strength: f64),
+    Sell(strength: f64),
+    Hold
+}
 
-## Coding Standards (Summary)
+enum FillResult {
+    Filled(price: f64, quantity: f64),
+    PartialFill(price: f64, filled_qty: f64, remaining_qty: f64),
+    Rejected(reason: str)
+}
 
-**Full standards in `CODING_STANDARDS.md`. Key points:**
+# Pattern matching with destructuring
+match signal {
+    Signal.Buy(strength) => {
+        OPEN(symbol, base_size * strength)
+    }
+    Signal.Sell(strength) => {
+        CLOSE(symbol)
+    }
+    _ => { }  # Wildcard
+}
+```
 
-### Rust Style
-- Follow rustfmt (no exceptions)
-- Clippy warnings are errors
-- Every public item has doc comment with example
-- Tests colocated with code (`mod tests`)
+### Traits and Generics
 
-### Error Messages
-- Must be actionable (show code snippet + suggestion)
-- Include "help:" line with fix
-- Reference Flux language spec section when relevant
+```flux
+trait RegimeDetector {
+    fn detect(self, fast: f64, slow: f64, vol: f64) -> Regime
+}
 
-### Testing
-- Every feature has positive test (valid code)
-- Every feature has negative test (invalid code with expected error)
-- Property tests for invariants (use proptest)
+struct TrendDetector { crossover_pct: f64 }
 
-### Documentation
-- Doc comments explain WHY, code shows WHAT
-- Examples in doc comments must compile
-- Link to relevant spec sections
+impl RegimeDetector for TrendDetector {
+    fn detect(self, fast: f64, slow: f64, vol: f64) -> Regime {
+        diff = (fast - slow) / slow
+        if diff > self.crossover_pct { return Regime.Bull }
+        return Regime.Sideways
+    }
+}
 
-### Performance
-- No premature optimization
-- Profile before optimizing (use criterion)
-- Document performance-critical sections
+# Generic function with trait bound (square brackets)
+fn detect_regime[T: RegimeDetector](detector: T, fast: f64, slow: f64, vol: f64) -> Regime {
+    return detector.detect(fast, slow, vol)
+}
+```
 
-## Common Development Patterns
+### HashMap
 
-### Adding New Syntax
+```flux
+registry = HashMap.new()
+registry.insert("AAPL", 1.0)
+registry.insert("MSFT", -0.85)
 
-1. **Update lexer** - Add new token(s) in `lexer/token.rs`
-2. **Update parser** - Add parsing rule in `parser/*.rs`
-3. **Update AST** - Add node type in `ast.rs`
-4. **Update type checker** - Add type checking rule in `typeck/*.rs`
-5. **Update codegen** - Add Rust code generation in `codegen/*.rs`
-6. **Add tests** - Both valid and invalid usage
-7. **Update docs** - Language spec and examples
+if registry.contains_key(symbol) {
+    ratio = registry.get(symbol)    # Returns null if key missing
+}
 
-### Adding New Type
+# Mutating methods (insert, remove) auto-reassign when used as statements
+registry.insert("GOOG", 0.5)       # No need for registry = registry.insert(...)
+```
 
-1. **Define type** in `typeck/types.rs`
-2. **Add inference rules** in `typeck/infer.rs`
-3. **Add type checking** in `typeck/check.rs`
-4. **Add codegen** in `codegen/types.rs`
-5. **Add tests** with type errors
-6. **Document** in type system spec
+### Module Imports
 
-### Fixing Bugs
+```flux
+from indicators import {sma, ema}               # Built-in indicators
+from signals::entry import {should_enter}       # Project module (:: = directory separator)
+from math::stats import {zscore_custom}         # Nested module
+```
 
-1. **Write failing test** that reproduces bug
-2. **Fix bug** in relevant module
-3. **Verify test passes**
-4. **Add regression test** if not covered
-5. **Update docs** if behavior clarified
+### Built-in Functions
 
-## Key Principles
+| Function | Signature | Notes |
+|----------|-----------|-------|
+| `sma(series, period)` | `(f64, int) → f64` | Simple moving average |
+| `ema(series, period)` | `(f64, int) → f64` | Exponential moving average |
+| `stddev(series, period)` | `(f64, int) → f64` | Rolling standard deviation |
+| `zscore(series, period)` | `(f64, int) → f64` | Rolling z-score |
+| `correlation(a, b, period)` | `(f64, f64, int) → f64` | Pearson correlation |
+| `max(a, b)` | `(f64, f64) → f64` | Maximum |
+| `min(a, b)` | `(f64, f64) → f64` | Minimum |
+| `abs(x)` | `(f64) → f64` | Absolute value |
 
-### Documentation-First
-Every agent needs rich context because Flux isn't in training data. When you add features:
-- Update relevant docs FIRST
-- Code SECOND
-- This ensures docs stay accurate
+### Signal Emission
 
-### Test-Driven
-Tests are the executable specification. They teach agents "how Flux works":
-- Write test before implementation
-- Tests show valid AND invalid usage
-- Property tests for invariants
+```flux
+OPEN(symbol, quantity)          # Open position (buy)
+CLOSE(symbol)                   # Close entire position
+CLOSE_QTY(symbol, quantity)     # Close partial
+```
 
-### Agent-Friendly
-Future agents will work on Flux. Make their job easy:
-- Clear file organization
-- Rich doc comments
-- Obvious naming
-- Self-documenting code
+### Control Flow and Operators
 
-### Living Documentation
-As you learn Flux patterns, capture them:
-- Update `RUST_PATTERNS.md` with Flux-specific patterns
-- Add examples to docs when you solve hard problems
-- Improve error messages based on confusion
-- Update skills with new learnings
+```flux
+if condition {
+} elif other {
+} else {
+}
 
-## Performance Targets
+# Operators: +, -, *, /, %, ==, !=, <, >, <=, >=, and, or, not
+# Comments: # (hash to end of line)
+# No loops yet — strategies operate bar-by-bar via on bar { }
+```
 
-| Component | Target | Why |
-|-----------|--------|-----|
-| Compile small strategy | <5s | Interactive development |
-| Compile large strategy | <30s | Acceptable for production |
-| Lexer throughput | >10MB/s | Not the bottleneck |
-| Parser throughput | >5MB/s | Not the bottleneck |
-| Type checking | <1s for 1000 LOC | User doesn't wait |
+## Key Development Files
 
-## Current Status
+| File | Purpose |
+|------|---------|
+| `crates/flux-cli/src/interpreter.rs` | AST-walking interpreter (main execution engine) |
+| `crates/flux-compiler/src/typeck/checker.rs` | Type checker |
+| `crates/flux-compiler/src/parser/mod.rs` | Parser |
+| `crates/flux-compiler/src/codegen/emitter.rs` | Rust code emitter |
+| `crates/flux-compiler/src/lexer/mod.rs` | Lexer |
+| `crates/flux-compiler/src/typeck/typed_ast.rs` | Typed AST node definitions |
+| `crates/flux-compiler/src/parser/ast.rs` | AST node definitions |
+| `crates/flux-cli/src/stat_indicators.rs` | Statistical indicator implementations |
 
-**Phase:** Foundation (Core Pipeline Complete)
-**Focus:** The full compile + backtest pipeline is operational
-**What's done:**
-- Lexer (Logos-based, spans, all tokens)
-- Parser (full AST with expressions, statements, strategies)
-- Type Checker (type inference, validation, typed AST)
-- Code Generator (emits valid Rust implementing Strategy trait)
-- Runtime: `run_backtest` (signal collection), `run_backtest_with_tracker` (fills + P&L + portfolio state)
-- Position Tracker: fill simulation, VWAP averaging, mark-to-market, portfolio metrics
-- CLI: `check`, `build`, `backtest` (with `--capital` flag), `init`
-- Interpreter: AST-walking execution for backtest mode (no compile step needed)
-- Indicators: SMA, EMA (stateful, per-call-site)
-- CSV loader (OHLCV data ingestion)
+## Testing
 
-**End-to-end workflow:**
 ```bash
-flux backtest strategy.flux --data prices.csv --capital 10000
-```
-This lexes → parses → typechecks → interprets bar-by-bar → feeds signals through PositionTracker → prints fills, P&L, equity, exposure.
-
-**Next milestones:**
-- More indicators (stddev, RSI, Bollinger Bands)
-- CLOSE_QTY support in language syntax
-- Equity curve output (per-bar CSV)
-- Multi-symbol backtests
-- Performance metrics (Sharpe, max drawdown)
-
-See `.kiro/specs/` for detailed implementation specs.
-
-## Getting Help
-
-**Stuck? Check these resources in order:**
-1. Relevant doc in `docs/architecture/`
-2. Existing tests for similar features
-3. Language spec in `docs/language-spec/`
-4. Code comments in related modules
-
-**Found a gap in docs?** Fix it! Documentation PRs are high priority.
-
-## Git Workflow
-
-### Commit Messages
-```
-<type>(<scope>): <subject>
-
-<body>
-
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+cargo test                    # Full workspace
+cargo test -p flux-cli --lib  # CLI unit tests (500+)
+cargo test -p flux-cli --test type_system_interpreter_property  # Property tests
+cargo test -p flux-cli --test type_system_demos_integration     # Integration tests
+cargo test -p flux-compiler   # Compiler tests
+cargo test -p flux-runtime    # Runtime tests
 ```
 
-**Types:** `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `chore`
-**Scopes:** `lexer`, `parser`, `typeck`, `codegen`, `runtime`, `cli`, `docs`
+Property tests use `proptest`. Convention: `*_property.rs` files in `crates/flux-cli/tests/`.
 
-### Examples
+## Adding New Syntax to Flux
+
+1. Token → `crates/flux-compiler/src/lexer/logos_token.rs`
+2. Parse rule → `crates/flux-compiler/src/parser/mod.rs`
+3. AST node → `crates/flux-compiler/src/parser/ast.rs`
+4. Type check → `crates/flux-compiler/src/typeck/checker.rs`
+5. Typed AST node → `crates/flux-compiler/src/typeck/typed_ast.rs`
+6. Interpreter eval → `crates/flux-cli/src/interpreter.rs`
+7. Codegen → `crates/flux-compiler/src/codegen/emitter.rs`
+8. Tests (positive + negative cases)
+
+## Adding a New Built-in Function
+
+1. Implement in `crates/flux-cli/src/stat_indicators.rs`
+2. Register in interpreter built-in dispatch (`interpreter.rs`, search for "built-in")
+3. Register type signature in typechecker (`checker.rs`, search for "builtin_fn_types")
+4. Add test
+
+## Coding Standards
+
+- Rust: rustfmt + clippy, doc comments on public items
+- Tests: colocated `mod tests`, property tests for invariants
+- Errors: actionable messages with source spans
+- Commits: `type(scope): description`
+- Types: feat, fix, docs, test, refactor
+- Scopes: lexer, parser, typeck, codegen, runtime, cli, interpreter
+
+## CSV Data Format
+
+```csv
+timestamp,symbol,open,high,low,close,volume
+2024-01-02,AAPL,185.50,186.75,185.10,186.20,1200000
 ```
-feat(parser): Add support for on_bar_daily event handler
 
-Implements multi-timeframe event handlers as specified in
-language spec section 4.3.
+## Demo Strategies (Working Examples)
 
-Tests included for valid usage and syntax errors.
-
-Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
-```
-
-## Remember
-
-- **Flux doesn't exist in your training data** - Trust the docs in this repo
-- **Documentation-first culture** - Update docs as you code
-- **Tests teach agents** - Write tests that explain behavior
-- **Agent-friendly code** - Future agents will read your code
-- **Living skills** - Update skills as patterns emerge
-
----
-
-**Ready to contribute? Start with:** `docs/contributing/GETTING_STARTED.md`
+See `demos/` directory for complete working strategies:
+- `demos/mean_reversion/` — Basic z-score mean reversion
+- `demos/pairs_trading/` — Structs, enums, match, HashMap, traits (kitchen sink)
+- `demos/regime_detector/` — Trait-bounded generics, polymorphic dispatch
+- `demos/order_book/` — Nested structs, multi-field match destructuring
+- `demos/live_connector/` — Dual-mode (backtest + live), trait impls
+- `demos/module_imports/` — Multi-file strategy with :: imports
+- `demos/functions_showcase/` — User functions, cross-file imports
