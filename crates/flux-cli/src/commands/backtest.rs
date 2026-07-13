@@ -426,8 +426,26 @@ pub fn run_backtest_cmd(file: &Path, data_paths: &[&Path], initial_capital: f64,
         // Engine-based backtest (fidelity 1 or 2)
         run_engine_backtest(&typed_program, &bars, initial_capital, fidelity, depth, spread, liquidity, l2_data, file)?;
     } else {
-        // Existing PositionTracker-based backtest (fidelity 0)
-        run_fidelity_zero_backtest(&typed_program, &bars, initial_capital)?;
+        // Detect multi-symbol: if 2+ distinct symbols, use timestamp-interleaved mode
+        let distinct_symbols: std::collections::HashSet<&str> = bars.iter()
+            .map(|b| b.symbol.as_str())
+            .collect();
+
+        if distinct_symbols.len() >= 2 {
+            // Multi-symbol: re-load with timestamps for grouping
+            let mut all_bars: Vec<BarContext> = Vec::new();
+            let mut all_timestamps: Vec<String> = Vec::new();
+            for data_path in data_paths {
+                let loaded = csv_loader::load_csv_with_timestamps(data_path)
+                    .map_err(CliError::Csv)?;
+                all_bars.extend(loaded.bars);
+                all_timestamps.extend(loaded.timestamps);
+            }
+            run_fidelity_zero_backtest_interleaved(&typed_program, &all_bars, &all_timestamps, initial_capital)?;
+        } else {
+            // Single-symbol: existing sequential path (unchanged)
+            run_fidelity_zero_backtest(&typed_program, &bars, initial_capital)?;
+        }
     }
 
     Ok(())
@@ -464,6 +482,103 @@ fn run_fidelity_zero_backtest(
 
         // Mark all open positions to market at bar close
         tracker.mark_to_market(bar.close, &bar.symbol);
+    }
+
+    // Print signals
+    println!("--- Signals ---");
+    for (idx, sig) in &results {
+        println!("  {}", format_signal(*idx, sig));
+    }
+
+    // Print fills
+    let fills = tracker.fills();
+    if !fills.is_empty() {
+        println!("\n--- Fills ---");
+        for fill in fills {
+            let side_str = match fill.side {
+                FillSide::Open => "BUY",
+                FillSide::Close => "SELL",
+            };
+            println!(
+                "  Bar {:>4} | {:>4} | {} {:>10.2} @ {:>10.2}",
+                fill.bar_index, side_str, fill.symbol, fill.qty, fill.price
+            );
+        }
+    }
+
+    // Print portfolio summary
+    let portfolio = tracker.portfolio_state();
+    println!("\n--- Portfolio Summary ---");
+    println!("  Initial Capital:   {:>12.2}", portfolio.initial_capital);
+    println!("  Final Equity:      {:>12.2}", portfolio.equity);
+    println!("  Realized P&L:      {:>12.2}", portfolio.realized_pnl);
+    println!("  Unrealized P&L:    {:>12.2}", portfolio.unrealized_pnl);
+    println!("  Total Return:      {:>11.2}%", 
+        if portfolio.initial_capital > 0.0 {
+            ((portfolio.equity - portfolio.initial_capital) / portfolio.initial_capital) * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!("  Open Positions:    {:>12}", portfolio.open_position_count);
+    println!("  Gross Exposure:    {:>12.2}", portfolio.gross_exposure);
+    println!("  Net Exposure:      {:>12.2}", portfolio.net_exposure);
+    println!("  Total Fills:       {:>12}", fills.len());
+
+    // Print signal summary
+    println!("\n{}", format_summary(&results));
+
+    Ok(())
+}
+
+/// Run fidelity 0 backtest with timestamp-interleaved multi-symbol processing.
+///
+/// Groups bars by timestamp and processes all symbols for each timestamp before
+/// advancing. This enables cross-symbol portfolio strategies that accumulate
+/// shared state via HashMap.
+fn run_fidelity_zero_backtest_interleaved(
+    typed_program: &TypedProgram,
+    bars: &[BarContext],
+    timestamps: &[String],
+    initial_capital: f64,
+) -> Result<(), CliError> {
+    let mut interpreter = Interpreter::new(typed_program);
+    let mut tracker = PositionTracker::new(initial_capital);
+    let mut results: Vec<(usize, Signal)> = Vec::new();
+
+    // Group bars by timestamp for interleaved processing
+    let groups = group_bars_by_timestamp(bars, timestamps)
+        .map_err(|e| CliError::Runtime(e))?;
+
+    let mut global_bar_index: usize = 0;
+
+    for group in &groups {
+        // Update interpreter with all close prices for this timestamp group
+        interpreter.update_prices(&group.closes);
+
+        // Process each symbol's bar within this timestamp group
+        for bar in &group.bars {
+            // Set per-symbol in_position from tracker
+            interpreter.in_position = tracker.position(&bar.symbol)
+                .map(|p| p.qty != 0.0)
+                .unwrap_or(false);
+
+            // Execute on_bar handler
+            let signals = interpreter.on_bar(bar);
+
+            // Process signals through position tracker
+            tracker.process_signals(&signals, bar.close, global_bar_index);
+
+            // Collect signals
+            for signal in signals {
+                results.push((global_bar_index, signal));
+            }
+
+            // Mark-to-market this specific symbol
+            tracker.mark_to_market(bar.close, &bar.symbol);
+
+            global_bar_index += 1;
+        }
     }
 
     // Print signals
