@@ -142,13 +142,8 @@ impl ParserState {
 
         let (variable, _) = self.expect_ident()?;
 
-        // Expect `in` — which is lexed as an Ident("in"), not a keyword
-        match self.peek() {
-            Token::Ident(s) if s == "in" => {
-                self.advance();
-            }
-            _ => return Err(self.error_expected("\"in\"")),
-        }
+        // Now uses dedicated token instead of string matching
+        self.expect(&Token::In)?;
 
         let iterable = self.with_struct_literal_forbidden(|state| state.parse_expr(0))?;
         let body = self.parse_block()?;
@@ -465,7 +460,7 @@ mod tests {
         let stmt = parse_stmt(vec![
             Token::For,
             Token::Ident("x".to_string()),
-            Token::Ident("in".to_string()),
+            Token::In,
             Token::Ident("items".to_string()),
             Token::OpenBrace,
             Token::Ident("x".to_string()),
@@ -653,8 +648,8 @@ mod tests {
         let err = result.unwrap_err();
         let msg = format!("{}", err);
         assert!(
-            msg.contains("\"in\""),
-            "Error should mention \"in\", got: {msg}"
+            msg.contains("In"),
+            "Error should mention In keyword, got: {msg}"
         );
     }
 }

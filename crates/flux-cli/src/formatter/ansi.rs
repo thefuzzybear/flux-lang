@@ -183,7 +183,8 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::Match
         | Token::SelfKw
         | Token::Impl
-        | Token::Trait => TokenCategory::Keyword,
+        | Token::Trait
+        | Token::In => TokenCategory::Keyword,
 
         // Boolean/Null literals
         Token::True | Token::False | Token::Null => TokenCategory::BooleanLiteral,

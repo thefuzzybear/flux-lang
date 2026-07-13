@@ -154,6 +154,7 @@ fn convert_token(
         LogosToken::SelfKw => Ok(Token::SelfKw),
         LogosToken::Impl => Ok(Token::Impl),
         LogosToken::Trait => Ok(Token::Trait),
+        LogosToken::In => Ok(Token::In),
 
         // Operators
         LogosToken::ColonColon => Ok(Token::ColonColon),
@@ -1420,4 +1421,7 @@ mod tests_colon_colon_property;
 
 #[cfg(test)]
 mod comments_property;
+
+#[cfg(test)]
+mod tests_in_keyword_property;
 

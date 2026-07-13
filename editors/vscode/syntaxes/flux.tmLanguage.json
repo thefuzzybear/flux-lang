@@ -95,7 +95,7 @@
     "builtin-functions": {
       "patterns": [
         {
-          "match": "\\b(sma|ema|stddev|variance|zscore|rsi|atr|corr|covariance|abs|sqrt|exp|log|floor|ceil|round|sign|pow|min|max)\\b",
+          "match": "\\b(sma|ema|stddev|variance|zscore|rsi|atr|corr|covariance|abs|sqrt|exp|log|floor|ceil|round|sign|pow|min|max|range)\\b",
           "name": "support.function.builtin.flux"
         }
       ]

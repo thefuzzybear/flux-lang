@@ -181,6 +181,12 @@ pub(crate) fn math_function_bindings() -> Vec<(&'static str, FluxType)> {
             params: FnParams::Fixed(vec![FluxType::String]),
             ret: Box::new(FluxType::Float),
         }),
+
+        // ── Iteration Utilities ──
+        ("range", FluxType::Fn {
+            params: FnParams::Fixed(vec![FluxType::Int, FluxType::Int]),
+            ret: Box::new(FluxType::List(Box::new(FluxType::Int))),
+        }),
     ]
 }
 

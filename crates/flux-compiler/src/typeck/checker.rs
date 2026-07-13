@@ -2212,6 +2212,20 @@ impl TypeChecker {
                     ))
                 }
             }
+            ExprKind::EnumConstruction { enum_name, variant_name, args } => {
+                // Allow HashMap.new() as a state initializer
+                if enum_name == "HashMap" && variant_name == "new" && args.is_empty() {
+                    Ok(FluxType::Generic(
+                        "HashMap".to_string(),
+                        vec![FluxType::TypeParam("K".to_string()), FluxType::TypeParam("V".to_string())],
+                    ))
+                } else {
+                    Err(self.type_error(
+                        expr.span,
+                        "state variable initializer must be a literal or list literal".to_string(),
+                    ))
+                }
+            }
             _ => Err(self.type_error(
                 expr.span,
                 "state variable initializer must be a literal or list literal".to_string(),

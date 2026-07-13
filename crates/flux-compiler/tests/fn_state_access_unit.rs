@@ -157,8 +157,8 @@ strategy Test {
 fn function_accessing_multiple_bar_context_vars_is_accepted() {
     let source = r#"
 fn compute_range() {
-    range = high - low
-    return range
+    price_range = high - low
+    return price_range
 }
 
 strategy Test {

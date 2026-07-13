@@ -31,6 +31,7 @@ pub enum Token {
     SelfKw,
     Impl,
     Trait,
+    In,
 
     // Identifiers and literals
     Ident(String),
@@ -107,6 +108,7 @@ impl Token {
                 | Token::SelfKw
                 | Token::Impl
                 | Token::Trait
+                | Token::In
         )
     }
 }

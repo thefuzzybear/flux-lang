@@ -106,6 +106,14 @@ impl FluxType {
                 Some(FluxType::Int)
             }
             (FluxType::Null, FluxType::Null) => Some(FluxType::Null),
+            // Gradual typing: TypeParam (from HashMap.get()) is compatible with numeric ops
+            (FluxType::TypeParam(_), FluxType::Float) | (FluxType::Float, FluxType::TypeParam(_)) => {
+                Some(FluxType::Float)
+            }
+            (FluxType::TypeParam(_), FluxType::Int) | (FluxType::Int, FluxType::TypeParam(_)) => {
+                Some(FluxType::Int)
+            }
+            (FluxType::TypeParam(_), FluxType::TypeParam(_)) => Some(FluxType::Float),
             _ => None,
         }
     }

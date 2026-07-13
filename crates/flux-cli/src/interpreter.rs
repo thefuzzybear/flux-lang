@@ -726,6 +726,24 @@ impl Interpreter {
 
                         Ok(Value::Float(result))
                     }
+                    "range" => {
+                        if evaluated_args.len() != 2 {
+                            return Err("range() requires 2 arguments (start, end)".to_string());
+                        }
+                        let start = match &evaluated_args[0] {
+                            Value::Int(n) => *n,
+                            _ => return Err("range() expects integer arguments".to_string()),
+                        };
+                        let end = match &evaluated_args[1] {
+                            Value::Int(n) => *n,
+                            _ => return Err("range() expects integer arguments".to_string()),
+                        };
+                        if start >= end {
+                            Ok(Value::List(vec![]))
+                        } else {
+                            Ok(Value::List((start..end).map(Value::Int).collect()))
+                        }
+                    }
                     "ret" => {
                         if evaluated_args.len() != 1 {
                             return Err("ret requires 1 argument (symbol)".to_string());
@@ -1775,6 +1793,19 @@ fn eval_literal(expr: &TypedExpr) -> Value {
         TypedExprKind::ListLiteral(items) => {
             Value::List(items.iter().map(eval_literal).collect())
         }
+        // Support HashMap.new() in state initializers
+        TypedExprKind::MethodCall { receiver, method, args }
+            if method == "new" && args.is_empty() =>
+        {
+            if let TypedExprKind::Ident(name) = &receiver.kind {
+                if name == "HashMap" {
+                    return Value::HashMap(HashMap::new());
+                }
+            }
+            panic!(
+                "eval_literal: unexpected MethodCall in default/initial value"
+            )
+        }
         _ => panic!(
             "eval_literal: unexpected non-literal expression kind in default/initial value"
         ),
@@ -1789,6 +1820,15 @@ fn eval_arith(
     int_op: impl Fn(i64, i64) -> i64,
     float_op: impl Fn(f64, f64) -> f64,
 ) -> Result<Value, String> {
+    // Coerce Null to 0.0 for gradual typing (HashMap.get() on missing keys returns Null)
+    let left = match left {
+        Value::Null => &Value::Float(0.0),
+        other => other,
+    };
+    let right = match right {
+        Value::Null => &Value::Float(0.0),
+        other => other,
+    };
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(*a, *b))),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(*a as f64, *b))),
@@ -1806,6 +1846,15 @@ fn eval_cmp(
     int_cmp: impl Fn(i64, i64) -> bool,
     float_cmp: impl Fn(f64, f64) -> bool,
 ) -> Result<Value, String> {
+    // Coerce Null to 0.0 for gradual typing (HashMap.get() on missing keys returns Null)
+    let left = match left {
+        Value::Null => &Value::Float(0.0),
+        other => other,
+    };
+    let right = match right {
+        Value::Null => &Value::Float(0.0),
+        other => other,
+    };
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(int_cmp(*a, *b))),
         (Value::Int(a), Value::Float(b)) => Ok(Value::Bool(float_cmp(*a as f64, *b))),

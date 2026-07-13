@@ -24,6 +24,9 @@ mod tests_library_file_property;
 #[cfg(test)]
 mod tests_import_path_property;
 
+#[cfg(test)]
+mod tests_for_loop_property;
+
 pub use ast::*;
 
 use crate::error::Result;

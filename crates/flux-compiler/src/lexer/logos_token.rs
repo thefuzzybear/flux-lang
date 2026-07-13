@@ -21,6 +21,8 @@ pub(crate) enum LogosToken {
     Else,
     #[token("for")]
     For,
+    #[token("in")]
+    In,
     #[token("while")]
     While,
     #[token("return")]

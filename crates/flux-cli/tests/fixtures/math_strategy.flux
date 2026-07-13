@@ -13,7 +13,7 @@ strategy MathTest {
         vol = stddev(close, period)
         z = zscore(close, period)
         strength = rsi(close, period)
-        range = atr(high, low, close, period)
+        price_range = atr(high, low, close, period)
 
         avg = sqrt(pow(close, 2.0))
         capped = min(max(z, -3.0), 3.0)
