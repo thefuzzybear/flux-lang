@@ -19,6 +19,7 @@ use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
 use commands::live::LiveArgs;
+use commands::nucleus::NucleusArgs;
 use exit_codes::{FAILURE, SUCCESS, USAGE_ERROR};
 
 #[derive(Parser)]
@@ -136,6 +137,8 @@ enum Commands {
     },
     /// Run strategies continuously against live market data
     Live(LiveArgs),
+    /// Hypothesis-driven strategy development framework
+    Nucleus(NucleusArgs),
 }
 
 fn main() {
@@ -273,6 +276,13 @@ fn run() -> i32 {
                     eprintln!("error: {e}");
                     FAILURE
                 }
+            }
+        },
+        Commands::Nucleus(args) => match commands::nucleus::run_nucleus(args) {
+            Ok(()) => SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                FAILURE
             }
         },
     }

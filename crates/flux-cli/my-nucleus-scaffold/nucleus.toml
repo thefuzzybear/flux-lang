@@ -1,0 +1,23 @@
+[nucleus]
+name = "my-nucleus-scaffold"
+created = "2026-07-13"
+phase = "discovery"
+
+[discovery]
+cell_count = 0
+findings_count = 0
+
+[hypotheses]
+active = []
+killed = []
+
+[falsification]
+current_hypothesis = ""
+predictions_total = 0
+predictions_tested = 0
+predictions_survived = 0
+
+[strategy]
+file = ""
+last_backtest = ""
+fidelity = 0

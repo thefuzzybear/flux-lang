@@ -5,4 +5,5 @@ pub mod fetch;
 pub mod fmt;
 pub mod init;
 pub mod live;
+pub mod nucleus;
 pub mod run;
