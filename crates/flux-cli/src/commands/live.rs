@@ -101,14 +101,15 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         args.state_file.clone(),
         ReconnectPolicy::default(),
         Duration::from_secs(args.heartbeat),
+        None, // TODO: wire up FillLogger from args
+        None, // TODO: wire up CheckpointScheduler from args
     );
 
     // 5. Restore state if state file exists (corruption → log warning, start fresh)
     if let Some(ref path) = args.state_file {
         match load_state(path) {
-            Ok(Some(_state)) => {
-                // TODO: restore positions and strategy state from HarnessState
-                eprintln!("[harness] restored state from {}", path.display());
+            Ok(Some(state)) => {
+                harness.restore_state(&state);
             }
             Ok(None) => { /* No state file — fresh start */ }
             Err(e) => {

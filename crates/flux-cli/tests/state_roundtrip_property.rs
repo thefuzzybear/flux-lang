@@ -113,17 +113,23 @@ fn arb_position_state() -> impl Strategy<Value = PositionState> {
         })
 }
 
-/// Strategy for generating a complete HarnessState (always version 1).
+/// Strategy for generating a complete HarnessState (always version 2).
 fn arb_harness_state() -> impl Strategy<Value = HarnessState> {
     (
         arb_position_state(),
         proptest::collection::vec(arb_strategy_state(), 0..=3),
+        0..1000u64,
+        "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        0..10000u64,
     )
-        .prop_map(|(positions, strategy_states)| {
+        .prop_map(|(positions, strategy_states, fill_count, checkpoint_timestamp, bars_processed)| {
             HarnessState {
-                version: 1,
+                version: 2,
                 positions,
                 strategy_states,
+                fill_count,
+                checkpoint_timestamp,
+                bars_processed,
             }
         })
 }

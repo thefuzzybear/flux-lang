@@ -9,7 +9,7 @@ use std::path::Path;
 
 /// Current state file format version.
 /// Increment when making breaking changes to the serialized format.
-const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
 /// Complete serializable harness state.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -20,6 +20,12 @@ pub struct HarnessState {
     pub positions: PositionState,
     /// Per-strategy interpreter state (state variables, indicator buffers).
     pub strategy_states: Vec<StrategyState>,
+    /// Total fills processed at this checkpoint.
+    pub fill_count: u64,
+    /// ISO 8601 timestamp of when this checkpoint was taken.
+    pub checkpoint_timestamp: String,
+    /// Total bars processed since the session started.
+    pub bars_processed: u64,
 }
 
 /// Serialized state of the position tracker.
@@ -67,6 +73,13 @@ pub enum SerializedValue {
     Str(String),
     Bool(bool),
     List(Vec<SerializedValue>),
+    /// HashMap with string keys and recursively serialized values.
+    HashMap(Vec<(String, SerializedValue)>),
+    /// Struct with type name and named fields.
+    Struct {
+        type_name: String,
+        fields: Vec<(String, SerializedValue)>,
+    },
 }
 
 /// Errors that can occur during state persistence operations.
@@ -161,6 +174,9 @@ mod tests {
                     vec![150.0, 151.0, 152.0, 153.0, 154.0],
                 )],
             }],
+            fill_count: 5,
+            checkpoint_timestamp: "2024-06-15T14:30:00.000Z".to_string(),
+            bars_processed: 100,
         }
     }
 
@@ -281,6 +297,260 @@ mod tests {
                 ],
                 indicator_buffers: vec![],
             }],
+            fill_count: 0,
+            checkpoint_timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            bars_processed: 0,
+        };
+
+        save_state(&state, &state_path).unwrap();
+        let loaded = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn hashmap_serialization_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let state_path = dir.path().join("hashmap_state.json");
+
+        let state = HarnessState {
+            version: STATE_VERSION,
+            positions: PositionState {
+                initial_capital: 10_000.0,
+                positions: vec![],
+                total_realized_pnl: 0.0,
+                last_prices: vec![],
+            },
+            strategy_states: vec![StrategyState {
+                name: "Kairos".to_string(),
+                state_variables: vec![
+                    (
+                        "pivot_levels".to_string(),
+                        SerializedValue::HashMap(vec![
+                            ("AAPL".to_string(), SerializedValue::Float(185.0)),
+                            ("MSFT".to_string(), SerializedValue::Float(380.0)),
+                            ("GOOG".to_string(), SerializedValue::Float(140.5)),
+                        ]),
+                    ),
+                    (
+                        "scores".to_string(),
+                        SerializedValue::HashMap(vec![
+                            ("AAPL".to_string(), SerializedValue::Int(3)),
+                            ("MSFT".to_string(), SerializedValue::Int(-1)),
+                        ]),
+                    ),
+                    (
+                        "nested_map".to_string(),
+                        SerializedValue::HashMap(vec![
+                            (
+                                "inner".to_string(),
+                                SerializedValue::List(vec![
+                                    SerializedValue::Float(1.0),
+                                    SerializedValue::Float(2.0),
+                                ]),
+                            ),
+                            ("flag".to_string(), SerializedValue::Bool(true)),
+                            ("label".to_string(), SerializedValue::Str("test".to_string())),
+                        ]),
+                    ),
+                ],
+                indicator_buffers: vec![],
+            }],
+            fill_count: 0,
+            checkpoint_timestamp: "2024-01-01T00:00:00Z".to_string(),
+            bars_processed: 0,
+        };
+
+        save_state(&state, &state_path).unwrap();
+        let loaded = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn struct_serialization_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let state_path = dir.path().join("struct_state.json");
+
+        let state = HarnessState {
+            version: STATE_VERSION,
+            positions: PositionState {
+                initial_capital: 10_000.0,
+                positions: vec![],
+                total_realized_pnl: 0.0,
+                last_prices: vec![],
+            },
+            strategy_states: vec![StrategyState {
+                name: "PairsTrading".to_string(),
+                state_variables: vec![
+                    (
+                        "pair_state".to_string(),
+                        SerializedValue::Struct {
+                            type_name: "PairState".to_string(),
+                            fields: vec![
+                                ("mean_spread".to_string(), SerializedValue::Float(2.35)),
+                                ("z_score".to_string(), SerializedValue::Float(-1.8)),
+                                ("lookback".to_string(), SerializedValue::Int(20)),
+                                ("active".to_string(), SerializedValue::Bool(true)),
+                                ("name".to_string(), SerializedValue::Str("AAPL_MSFT".to_string())),
+                            ],
+                        },
+                    ),
+                    (
+                        "config".to_string(),
+                        SerializedValue::Struct {
+                            type_name: "Config".to_string(),
+                            fields: vec![
+                                ("threshold".to_string(), SerializedValue::Float(2.0)),
+                                ("max_positions".to_string(), SerializedValue::Int(5)),
+                                (
+                                    "symbols".to_string(),
+                                    SerializedValue::List(vec![
+                                        SerializedValue::Str("AAPL".to_string()),
+                                        SerializedValue::Str("MSFT".to_string()),
+                                    ]),
+                                ),
+                            ],
+                        },
+                    ),
+                ],
+                indicator_buffers: vec![("spread_sma".to_string(), vec![1.0, 1.5, 2.0, 2.35])],
+            }],
+            fill_count: 10,
+            checkpoint_timestamp: "2024-06-15T14:30:00.000Z".to_string(),
+            bars_processed: 200,
+        };
+
+        save_state(&state, &state_path).unwrap();
+        let loaded = load_state(&state_path).unwrap().unwrap();
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn deeply_nested_combinations_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let state_path = dir.path().join("nested_state.json");
+
+        // HashMap containing Struct containing List
+        let hashmap_with_struct = SerializedValue::HashMap(vec![
+            (
+                "AAPL".to_string(),
+                SerializedValue::Struct {
+                    type_name: "SymbolState".to_string(),
+                    fields: vec![
+                        ("pivot".to_string(), SerializedValue::Float(185.0)),
+                        (
+                            "history".to_string(),
+                            SerializedValue::List(vec![
+                                SerializedValue::Float(180.0),
+                                SerializedValue::Float(182.5),
+                                SerializedValue::Float(185.0),
+                            ]),
+                        ),
+                        ("count".to_string(), SerializedValue::Int(3)),
+                    ],
+                },
+            ),
+            (
+                "MSFT".to_string(),
+                SerializedValue::Struct {
+                    type_name: "SymbolState".to_string(),
+                    fields: vec![
+                        ("pivot".to_string(), SerializedValue::Float(380.0)),
+                        (
+                            "history".to_string(),
+                            SerializedValue::List(vec![
+                                SerializedValue::Float(375.0),
+                                SerializedValue::Float(378.0),
+                            ]),
+                        ),
+                        ("count".to_string(), SerializedValue::Int(2)),
+                    ],
+                },
+            ),
+        ]);
+
+        // Struct containing HashMap
+        let struct_with_hashmap = SerializedValue::Struct {
+            type_name: "PortfolioState".to_string(),
+            fields: vec![
+                (
+                    "weights".to_string(),
+                    SerializedValue::HashMap(vec![
+                        ("AAPL".to_string(), SerializedValue::Float(0.4)),
+                        ("MSFT".to_string(), SerializedValue::Float(0.6)),
+                    ]),
+                ),
+                ("total_value".to_string(), SerializedValue::Float(50_000.0)),
+                ("rebalanced".to_string(), SerializedValue::Bool(false)),
+            ],
+        };
+
+        // List containing HashMap and Struct
+        let list_with_mixed = SerializedValue::List(vec![
+            SerializedValue::HashMap(vec![
+                ("key1".to_string(), SerializedValue::Int(100)),
+                ("key2".to_string(), SerializedValue::Str("value".to_string())),
+            ]),
+            SerializedValue::Struct {
+                type_name: "Entry".to_string(),
+                fields: vec![
+                    ("id".to_string(), SerializedValue::Int(1)),
+                    ("active".to_string(), SerializedValue::Bool(true)),
+                ],
+            },
+            SerializedValue::Float(42.0),
+        ]);
+
+        // Deeply nested: HashMap → Struct → HashMap → List
+        let deep_nested = SerializedValue::HashMap(vec![(
+            "strategy_registry".to_string(),
+            SerializedValue::Struct {
+                type_name: "Registry".to_string(),
+                fields: vec![(
+                    "entries".to_string(),
+                    SerializedValue::HashMap(vec![(
+                        "momentum".to_string(),
+                        SerializedValue::List(vec![
+                            SerializedValue::Float(0.5),
+                            SerializedValue::Float(0.75),
+                            SerializedValue::Float(1.0),
+                        ]),
+                    )]),
+                )],
+            },
+        )]);
+
+        let state = HarnessState {
+            version: STATE_VERSION,
+            positions: PositionState {
+                initial_capital: 100_000.0,
+                positions: vec![SerializedPosition {
+                    symbol: "AAPL".to_string(),
+                    qty: 200.0,
+                    avg_entry_price: 182.0,
+                    realized_pnl: 0.0,
+                }],
+                total_realized_pnl: 1500.0,
+                last_prices: vec![
+                    ("AAPL".to_string(), 185.0),
+                    ("MSFT".to_string(), 380.0),
+                ],
+            },
+            strategy_states: vec![StrategyState {
+                name: "MultiStrategy".to_string(),
+                state_variables: vec![
+                    ("symbol_states".to_string(), hashmap_with_struct),
+                    ("portfolio".to_string(), struct_with_hashmap),
+                    ("history".to_string(), list_with_mixed),
+                    ("registry".to_string(), deep_nested),
+                ],
+                indicator_buffers: vec![
+                    ("sma_20".to_string(), vec![150.0, 151.0, 152.0]),
+                    ("ema_12".to_string(), vec![149.5, 150.5]),
+                ],
+            }],
+            fill_count: 25,
+            checkpoint_timestamp: "2024-06-15T15:00:00.000Z".to_string(),
+            bars_processed: 500,
         };
 
         save_state(&state, &state_path).unwrap();

@@ -19,7 +19,7 @@ use tempfile::TempDir;
 /// Build a HarnessState with known positions and strategy state for testing.
 fn build_test_state() -> HarnessState {
     HarnessState {
-        version: 1, // STATE_VERSION
+        version: 2, // STATE_VERSION
         positions: PositionState {
             initial_capital: 50_000.0,
             positions: vec![
@@ -74,6 +74,9 @@ fn build_test_state() -> HarnessState {
                 ],
             },
         ],
+        fill_count: 10,
+        checkpoint_timestamp: "2024-06-15T14:30:00.000Z".to_string(),
+        bars_processed: 200,
     }
 }
 
@@ -234,7 +237,7 @@ async fn load_version_mismatch_returns_error() {
     match result.unwrap_err() {
         StateError::IncompatibleVersion { found, expected } => {
             assert_eq!(found, 99);
-            assert_eq!(expected, 1); // STATE_VERSION = 1
+            assert_eq!(expected, 2); // STATE_VERSION = 2
         }
         other => panic!("expected IncompatibleVersion error, got: {:?}", other),
     }

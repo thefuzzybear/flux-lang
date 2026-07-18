@@ -66,6 +66,8 @@ fn make_harness(strategies: Vec<StrategyModule>) -> LiveHarness {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
+        None,
     )
 }
 

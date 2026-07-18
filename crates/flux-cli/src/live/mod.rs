@@ -5,6 +5,7 @@
 //! via pluggable connectors, aggregates signals through portfolio-level risk
 //! constraints, and persists state across restarts.
 
+pub mod checkpoint;
 pub mod connector;
 pub mod harness;
 pub mod aggregator;
@@ -15,3 +16,5 @@ pub mod reconnect;
 pub mod replay_connector;
 pub mod ws_connector;
 pub mod poll_connector;
+pub mod fill_logger;
+pub mod replay;

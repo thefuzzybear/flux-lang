@@ -363,6 +363,50 @@ impl PositionTracker {
             open_position_count: self.open_position_count(),
         }
     }
+
+    /// Restore position tracker state from persisted data.
+    ///
+    /// This is used during crash recovery to rebuild the tracker to its
+    /// previous state without replaying all fills. Directly sets positions,
+    /// realized P&L, and last prices from the saved checkpoint.
+    ///
+    /// # Arguments
+    /// - `positions`: Vec of (symbol, qty, avg_entry_price, realized_pnl) tuples
+    /// - `total_realized_pnl`: The total realized P&L at checkpoint time
+    /// - `last_prices`: Vec of (symbol, price) tuples for mark-to-market
+    pub fn restore_from_state(
+        &mut self,
+        positions: Vec<(String, f64, f64, f64)>,
+        total_realized_pnl: f64,
+        last_prices: Vec<(String, f64)>,
+    ) {
+        self.positions.clear();
+        self.total_realized_pnl = total_realized_pnl;
+
+        for (symbol, qty, avg_entry_price, realized_pnl) in positions {
+            let position = Position {
+                symbol: symbol.clone(),
+                qty,
+                avg_entry_price,
+                unrealized_pnl: 0.0,
+                realized_pnl,
+                open_bar: 0,
+                last_update_bar: 0,
+            };
+            self.positions.insert(symbol, position);
+        }
+
+        // Restore last prices and update unrealized P&L
+        for (symbol, price) in last_prices {
+            self.last_prices.insert(symbol.clone(), price);
+            if let Some(position) = self.positions.get_mut(&symbol) {
+                if position.qty != 0.0 {
+                    position.unrealized_pnl =
+                        (price - position.avg_entry_price) * position.qty;
+                }
+            }
+        }
+    }
 }
 
 

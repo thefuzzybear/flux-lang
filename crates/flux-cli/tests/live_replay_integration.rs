@@ -105,6 +105,8 @@ async fn replay_connector_matches_backtest_output() {
         None,                       // no state file
         ReconnectPolicy::default(),
         Duration::from_secs(3600),  // long heartbeat — won't fire in test
+        None,
+        None,
     );
 
     // Create the replay connector with instant playback
@@ -217,6 +219,8 @@ async fn replay_connector_produces_fills() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(3600),
+        None,
+        None,
     );
 
     let mut connector = ReplayConnector::new("replay-test", csv_path, 0.0);

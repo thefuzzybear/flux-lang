@@ -2818,6 +2818,9 @@ impl TypeChecker {
                 } else if *left_ty == FluxType::Null || *right_ty == FluxType::Null {
                     // Gradual typing: Null is comparable with any type
                     FluxType::Bool
+                } else if matches!(left_ty, FluxType::TypeParam(_)) || matches!(right_ty, FluxType::TypeParam(_)) {
+                    // Gradual typing: TypeParam (e.g., from HashMap.keys() iteration) is comparable with any type
+                    FluxType::Bool
                 } else {
                     let op_str = if op == BinOp::Eq { "==" } else { "!=" };
                     return Err(self.type_error(

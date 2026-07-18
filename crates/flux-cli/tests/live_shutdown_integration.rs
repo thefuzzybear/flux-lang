@@ -57,6 +57,8 @@ async fn graceful_shutdown_persists_state_file() {
         Some(state_path.clone()),
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
+        None,
     );
 
     // Open positions in the tracker
@@ -88,7 +90,7 @@ async fn graceful_shutdown_persists_state_file() {
         .expect("load_state should not error")
         .expect("state file should contain valid state");
 
-    assert_eq!(loaded.version, 1);
+    assert_eq!(loaded.version, 2);
     assert_eq!(loaded.positions.initial_capital, 10_000.0);
     assert_eq!(loaded.positions.positions.len(), 2);
 
@@ -129,6 +131,8 @@ async fn shutdown_after_channel_close_persists_state() {
         Some(state_path.clone()),
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
+        None,
     );
 
     // Open a position before running
@@ -186,6 +190,8 @@ async fn graceful_shutdown_without_state_file_does_not_crash() {
         None, // No state file
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
+        None,
     );
 
     // Open a position
@@ -213,6 +219,8 @@ async fn state_file_contains_last_prices() {
         Some(state_path.clone()),
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
+        None,
     );
 
     // Open position and mark to market
@@ -261,6 +269,8 @@ async fn state_roundtrip_positions_match_after_shutdown() {
         Some(state_path.clone()),
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
+        None,
     );
 
     // Build up some positions and a partial close for realized P&L
