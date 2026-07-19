@@ -107,6 +107,7 @@ async fn replay_connector_matches_backtest_output() {
         Duration::from_secs(3600),  // long heartbeat — won't fire in test
         None,
         None,
+        None,
     );
 
     // Create the replay connector with instant playback
@@ -219,6 +220,7 @@ async fn replay_connector_produces_fills() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(3600),
+        None,
         None,
         None,
     );

@@ -103,6 +103,7 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         Duration::from_secs(args.heartbeat),
         None, // TODO: wire up FillLogger from args
         None, // TODO: wire up CheckpointScheduler from args
+        None, // TODO: wire up RiskLimits from config
     );
 
     // 5. Restore state if state file exists (corruption → log warning, start fresh)

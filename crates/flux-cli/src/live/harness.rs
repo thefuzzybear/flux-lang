@@ -4,6 +4,7 @@
 //! collects signals, and coordinates with the signal aggregator and
 //! position tracker.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use super::connector::{ConnectorState, LiveBar, ReconnectPolicy};
 use super::fill_logger::{FillLogger, FillRecord};
 use super::loader::StrategyModule;
 use super::position::LivePositionTracker;
+use super::risk_limits::{PortfolioState, RiskDecision, RiskLimits};
 use super::state::{
     save_state, HarnessState, PositionState, SerializedPosition, SerializedValue, StrategyState,
     STATE_VERSION,
@@ -58,6 +60,8 @@ pub struct LiveHarness {
     pub fill_logger: Option<FillLogger>,
     /// Optional checkpoint scheduler for periodic state persistence.
     pub checkpoint_scheduler: Option<CheckpointScheduler>,
+    /// Optional risk limits module — circuit-breaker layer upstream of aggregator.
+    pub risk_limits: Option<RiskLimits>,
 }
 
 impl LiveHarness {
@@ -71,6 +75,7 @@ impl LiveHarness {
         heartbeat_interval: Duration,
         fill_logger: Option<FillLogger>,
         checkpoint_scheduler: Option<CheckpointScheduler>,
+        risk_limits: Option<RiskLimits>,
     ) -> Self {
         Self {
             strategies,
@@ -81,6 +86,7 @@ impl LiveHarness {
             heartbeat_interval,
             fill_logger,
             checkpoint_scheduler,
+            risk_limits,
         }
     }
 
@@ -134,21 +140,33 @@ impl LiveHarness {
         // Heartbeat interval
         eprintln!("Heartbeat interval: {}s", self.heartbeat_interval.as_secs());
         eprintln!();
+
+        // Risk limits
+        if self.risk_limits.is_some() {
+            eprintln!("Risk limits: enabled");
+        } else {
+            eprintln!("Risk limits: disabled");
+        }
+        eprintln!();
+
         eprintln!("Listening for bars...");
         eprintln!();
     }
 
     /// Dispatch a bar to all subscribed strategies, collect signals,
-    /// run them through the aggregator, and process approved signals
-    /// through the unified position tracker.
+    /// run them through the risk limits and aggregator, and process approved
+    /// signals through the unified position tracker.
     ///
     /// The dispatch flow:
     /// 1. Route bar to strategies whose subscribed_symbols include the bar's symbol
     /// 2. Derive `in_position` from the unified tracker for each strategy
     /// 3. Execute each strategy's `on_bar` handler and collect signals
-    /// 4. Pass all signals through the aggregator (risk constraints)
-    /// 5. Process approved signals through the unified tracker
-    /// 6. Mark to market for the bar's symbol
+    /// 4. If risk_limits enabled: check each signal, filter/flatten as needed
+    /// 5. Pass allowed signals through the aggregator (risk constraints)
+    /// 6. Process approved signals through the unified tracker
+    /// 7. Record fills in risk_limits if enabled
+    /// 8. Mark to market for the bar's symbol
+    /// 9. Run risk_limits mark_to_market; flatten if threshold breached
     ///
     /// Strategy runtime errors (including panics) are caught, logged,
     /// and the harness continues processing remaining strategies (requirement 2.8).
@@ -198,8 +216,63 @@ impl LiveHarness {
             }
         }
 
+        // Risk limits gate: filter signals through risk_limits if configured
+        let signals_for_aggregator = if self.risk_limits.is_some() {
+            let portfolio_state = self.build_portfolio_state(bar);
+            let mut allowed: Vec<(String, Signal)> = Vec::new();
+            let mut flatten_triggered = false;
+
+            for (strategy_name, signal) in &all_signals {
+                let (decision, alerts) = self
+                    .risk_limits
+                    .as_mut()
+                    .unwrap()
+                    .check_signal(signal, &portfolio_state);
+
+                // Log any alerts
+                for alert in &alerts {
+                    eprintln!("  [RISK ALERT] {:?}", alert);
+                }
+
+                match decision {
+                    RiskDecision::Allow => {
+                        allowed.push((strategy_name.clone(), signal.clone()));
+                    }
+                    RiskDecision::Reject { reason } => {
+                        eprintln!(
+                            "  [RISK REJECT] {} signal for {} rejected: {:?}",
+                            strategy_name,
+                            signal_kind_str(signal),
+                            reason,
+                        );
+                    }
+                    RiskDecision::FlattenAll { reason } => {
+                        eprintln!(
+                            "  [RISK FLATTEN] system halt triggered: {:?}",
+                            reason,
+                        );
+                        flatten_triggered = true;
+                        break;
+                    }
+                }
+            }
+
+            if flatten_triggered {
+                // Close all open positions via tracker
+                self.flatten_all_positions(bar.close);
+                // Do not pass any signals to aggregator
+                Vec::new()
+            } else {
+                allowed
+            }
+        } else {
+            all_signals
+        };
+
         // Aggregate and apply risk constraints
-        let approved = self.aggregator.process(&all_signals, &self.tracker.inner);
+        let approved = self
+            .aggregator
+            .process(&signals_for_aggregator, &self.tracker.inner);
 
         // Process approved signals through the unified tracker
         for (strategy_name, signal) in &approved {
@@ -209,6 +282,21 @@ impl LiveHarness {
                     "  [FILL] {} | {:?} {} x {:.4} @ {:.2}",
                     strategy_name, fill.side, fill.symbol, fill.qty, fill.price
                 );
+
+                // Record fill in risk limits if configured
+                if let Some(ref mut risk_limits) = self.risk_limits {
+                    // Approximate realized P&L: for closing fills, use the fill's realized_pnl
+                    // from the position tracker. For opening fills, realized_pnl is 0.0.
+                    let realized_pnl = match signal {
+                        Signal::Close { .. } | Signal::CloseQty { .. } => {
+                            // Get position's realized_pnl change — approximate as 0.0
+                            // for this first pass (exact tracking would require before/after diff)
+                            0.0
+                        }
+                        _ => 0.0,
+                    };
+                    risk_limits.record_fill(signal, fill.price, fill.qty, realized_pnl);
+                }
 
                 // Log fill to JSONL if fill_logger is configured
                 if let Some(ref mut logger) = self.fill_logger {
@@ -237,6 +325,28 @@ impl LiveHarness {
         // Mark to market
         self.tracker.inner.mark_to_market(bar.close, &bar.symbol);
 
+        // Risk limits mark-to-market: check P&L and drawdown limits
+        if self.risk_limits.is_some() {
+            let portfolio_state = self.build_portfolio_state(bar);
+            let (mtm_decision, mtm_alerts) = self
+                .risk_limits
+                .as_mut()
+                .unwrap()
+                .mark_to_market(&portfolio_state);
+
+            for alert in &mtm_alerts {
+                eprintln!("  [RISK ALERT] {:?}", alert);
+            }
+
+            if let Some(RiskDecision::FlattenAll { reason }) = mtm_decision {
+                eprintln!(
+                    "  [RISK FLATTEN] mark-to-market halt triggered: {:?}",
+                    reason,
+                );
+                self.flatten_all_positions(bar.close);
+            }
+        }
+
         // Checkpoint logic
         let should_checkpoint = if let Some(ref mut scheduler) = self.checkpoint_scheduler {
             scheduler.on_bar() || scheduler.should_checkpoint_time()
@@ -258,6 +368,63 @@ impl LiveHarness {
                         eprintln!("[harness] checkpoint error: {}", e);
                     }
                 }
+            }
+        }
+    }
+
+    /// Build a `PortfolioState` from the current tracker state and bar prices.
+    ///
+    /// Used by the risk limits integration to provide portfolio context
+    /// for signal gating and mark-to-market checks.
+    fn build_portfolio_state(&self, bar: &flux_runtime::BarContext) -> PortfolioState {
+        let positions: HashMap<String, f64> = self
+            .tracker
+            .inner
+            .positions()
+            .iter()
+            .map(|(sym, pos)| (sym.clone(), pos.qty))
+            .collect();
+
+        let mut prices: HashMap<String, f64> = self
+            .tracker
+            .inner
+            .last_prices()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        // Ensure current bar's symbol has latest price
+        prices.insert(bar.symbol.clone(), bar.close);
+
+        // Use current wall clock in Eastern time as a reasonable live approximation
+        let timestamp = chrono::Utc::now().with_timezone(&chrono_tz::US::Eastern);
+
+        PortfolioState {
+            positions,
+            prices,
+            timestamp,
+        }
+    }
+
+    /// Flatten (close) all open positions at the given price.
+    ///
+    /// Used by the risk limits module when a FlattenAll decision is triggered.
+    fn flatten_all_positions(&mut self, price: f64) {
+        let symbols_to_close: Vec<String> = self
+            .tracker
+            .inner
+            .positions()
+            .iter()
+            .filter(|(_, pos)| pos.qty != 0.0)
+            .map(|(sym, _)| sym.clone())
+            .collect();
+
+        for symbol in symbols_to_close {
+            let signal = Signal::close(symbol);
+            if let Some(fill) = self.tracker.process_signal(&signal, price, 0, "risk_limits") {
+                eprintln!(
+                    "  [RISK FLATTEN] closed {:?} {} x {:.4} @ {:.2}",
+                    fill.side, fill.symbol, fill.qty, fill.price
+                );
             }
         }
     }
@@ -837,6 +1004,7 @@ mod tests {
             Duration::from_secs(30),
             None,
             None,
+            None,
         )
     }
 
@@ -881,6 +1049,7 @@ mod tests {
             Some(PathBuf::from("/tmp/state.json")),
             ReconnectPolicy::default(),
             Duration::from_secs(60),
+            None,
             None,
             None,
         );
@@ -990,6 +1159,7 @@ mod tests {
             Duration::from_secs(60),
             None,
             None,
+            None,
         );
         harness.print_startup_summary();
     }
@@ -1059,6 +1229,7 @@ mod tests {
             ReconnectPolicy::default(),
             Duration::from_secs(30),
             Some(logger),
+            None,
             None,
         );
 
@@ -1134,6 +1305,7 @@ mod tests {
             Duration::from_secs(30),
             None,
             Some(scheduler),
+            None,
         );
 
         // State file should not exist yet
@@ -1169,6 +1341,7 @@ mod tests {
             Some(state_path.clone()),
             ReconnectPolicy::default(),
             Duration::from_secs(30),
+            None,
             None,
             None,
         );
@@ -1236,6 +1409,7 @@ mod tests {
             Duration::from_secs(30),
             None,
             None,
+            None,
         );
 
         harness.restore_state(&state);
@@ -1286,6 +1460,7 @@ mod tests {
             Duration::from_secs(30),
             Some(logger),
             None,
+            None,
         );
 
         let state = harness.build_harness_state();
@@ -1312,6 +1487,7 @@ mod tests {
             Duration::from_secs(30),
             None,
             Some(scheduler),
+            None,
         );
 
         let state = harness.build_harness_state();

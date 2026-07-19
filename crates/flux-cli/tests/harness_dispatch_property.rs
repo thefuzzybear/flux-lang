@@ -68,6 +68,7 @@ fn make_harness(strategies: Vec<StrategyModule>) -> LiveHarness {
         Duration::from_secs(30),
         None,
         None,
+        None,
     )
 }
 
