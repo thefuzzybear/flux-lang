@@ -80,6 +80,16 @@ pub struct TrackedBacktestResult {
 }
 
 /// Stateful processor: signals → fills → positions → P&L.
+///
+/// Tracks open positions, computes realized/unrealized P&L, and manages
+/// mark-to-market state. Supports per-symbol contract multipliers for
+/// derivatives (futures, options) where 1 point of price change produces
+/// more than $1 of P&L per contract.
+///
+/// # Multipliers
+/// - Default multiplier is 1.0 (equities: 1 share × $1 price move = $1 P&L)
+/// - Futures example: ES has multiplier 50.0 (1 contract × $1 price move = $50 P&L)
+/// - Set via `new_with_multipliers()` or `set_multiplier()`
 #[derive(Debug)]
 pub struct PositionTracker {
     pub(crate) initial_capital: f64,
@@ -88,10 +98,13 @@ pub struct PositionTracker {
     pub(crate) total_realized_pnl: f64,
     /// Most recent mark-to-market price per symbol
     pub(crate) last_prices: HashMap<String, f64>,
+    /// Per-symbol contract multiplier (point value). Default 1.0.
+    pub(crate) multipliers: HashMap<String, f64>,
 }
 
 impl PositionTracker {
     /// Create a new tracker with the given initial capital.
+    /// All symbols default to multiplier 1.0.
     /// Panics if initial_capital < 0.0.
     pub fn new(initial_capital: f64) -> Self {
         assert!(
@@ -105,7 +118,42 @@ impl PositionTracker {
             fills: Vec::new(),
             total_realized_pnl: 0.0,
             last_prices: HashMap::new(),
+            multipliers: HashMap::new(),
         }
+    }
+
+    /// Create a new tracker with per-symbol multipliers.
+    ///
+    /// # Arguments
+    /// - `initial_capital`: Starting capital
+    /// - `multipliers`: Map of symbol → point value (e.g., "ES=F" → 50.0)
+    ///
+    /// Symbols not in the map default to multiplier 1.0.
+    pub fn new_with_multipliers(initial_capital: f64, multipliers: HashMap<String, f64>) -> Self {
+        assert!(
+            initial_capital >= 0.0,
+            "PositionTracker::new_with_multipliers: initial_capital must be >= 0.0, got {}",
+            initial_capital
+        );
+        Self {
+            initial_capital,
+            positions: HashMap::new(),
+            fills: Vec::new(),
+            total_realized_pnl: 0.0,
+            last_prices: HashMap::new(),
+            multipliers,
+        }
+    }
+
+    /// Set the contract multiplier for a symbol.
+    /// Returns the previous multiplier if one was set.
+    pub fn set_multiplier(&mut self, symbol: &str, multiplier: f64) -> Option<f64> {
+        self.multipliers.insert(symbol.to_string(), multiplier)
+    }
+
+    /// Get the contract multiplier for a symbol (defaults to 1.0).
+    pub fn multiplier_for(&self, symbol: &str) -> f64 {
+        self.multipliers.get(symbol).copied().unwrap_or(1.0)
     }
 
     /// Process a single signal at the given fill price and bar index.
@@ -205,9 +253,10 @@ impl PositionTracker {
             }
 
             Signal::Close { symbol } => {
+                let mult = self.multiplier_for(symbol);
                 let position = self.positions.get_mut(symbol)?;
                 let close_qty = position.qty;
-                let realized = (price - position.avg_entry_price) * close_qty;
+                let realized = (price - position.avg_entry_price) * close_qty * mult;
 
                 let fill = Fill {
                     symbol: symbol.clone(),
@@ -226,6 +275,7 @@ impl PositionTracker {
             }
 
             Signal::CloseQty { symbol, qty } => {
+                let mult = self.multiplier_for(symbol);
                 let position = self.positions.get_mut(symbol)?;
                 // For longs: reduce qty. For shorts: reduce abs(qty) toward zero.
                 let actual_qty = if position.qty > 0.0 {
@@ -234,7 +284,7 @@ impl PositionTracker {
                     qty.min(position.qty.abs())
                 };
                 let signed_qty = if position.qty > 0.0 { actual_qty } else { -actual_qty };
-                let realized = (price - position.avg_entry_price) * signed_qty;
+                let realized = (price - position.avg_entry_price) * signed_qty * mult;
 
                 let fill = Fill {
                     symbol: symbol.clone(),
@@ -273,11 +323,12 @@ impl PositionTracker {
     }
 
     /// Update mark-to-market for a single position.
-    /// Stores the price and updates unrealized P&L.
+    /// Stores the price and updates unrealized P&L (multiplier-aware).
     pub fn mark_to_market(&mut self, price: f64, symbol: &str) {
         self.last_prices.insert(symbol.to_string(), price);
         if let Some(position) = self.positions.get_mut(symbol) {
-            position.unrealized_pnl = (price - position.avg_entry_price) * position.qty;
+            let mult = self.multipliers.get(symbol).copied().unwrap_or(1.0);
+            position.unrealized_pnl = (price - position.avg_entry_price) * position.qty * mult;
         }
     }
 
@@ -294,19 +345,21 @@ impl PositionTracker {
         self.initial_capital + self.total_realized_pnl + total_unrealized
     }
 
-    /// Gross exposure: sum(|qty * last_price|) across open positions.
+    /// Gross exposure: sum(|qty * price * multiplier|) across open positions.
     pub fn gross_exposure(&self) -> f64 {
         self.positions.values().map(|p| {
             let price = self.last_prices.get(&p.symbol).copied().unwrap_or(p.avg_entry_price);
-            (p.qty * price).abs()
+            let mult = self.multipliers.get(&p.symbol).copied().unwrap_or(1.0);
+            (p.qty * price * mult).abs()
         }).sum()
     }
 
-    /// Net exposure: sum(qty * last_price) across open positions.
+    /// Net exposure: sum(qty * price * multiplier) across open positions.
     pub fn net_exposure(&self) -> f64 {
         self.positions.values().map(|p| {
             let price = self.last_prices.get(&p.symbol).copied().unwrap_or(p.avg_entry_price);
-            p.qty * price
+            let mult = self.multipliers.get(&p.symbol).copied().unwrap_or(1.0);
+            p.qty * price * mult
         }).sum()
     }
 

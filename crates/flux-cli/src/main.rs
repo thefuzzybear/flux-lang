@@ -69,6 +69,10 @@ enum Commands {
         /// Path to L2 data file (required for fidelity 2)
         #[arg(long)]
         l2_data: Option<PathBuf>,
+        /// Per-symbol contract multiplier (point value) as SYMBOL:VALUE pairs
+        /// e.g., --multiplier "ES=F:50,NQ=F:20,RTY=F:50,YM=F:5"
+        #[arg(long)]
+        multiplier: Option<String>,
     },
     /// Initialize a new Flux project
     Init {
@@ -169,9 +173,13 @@ fn run() -> i32 {
                 Err(_e) => FAILURE,
             }
         }
-        Commands::Backtest { file, data, capital, fidelity, depth, spread, liquidity, l2_data } => {
+        Commands::Backtest { file, data, capital, fidelity, depth, spread, liquidity, l2_data, multiplier } => {
             let data_refs: Vec<&std::path::Path> = data.iter().map(|p| p.as_path()).collect();
-            match commands::backtest::run_backtest_cmd(&file, &data_refs, capital, fidelity, depth, spread, liquidity, l2_data.as_deref()) {
+            // Parse multiplier string: "ES=F:50,NQ=F:20" → HashMap
+            let multipliers = multiplier.as_deref().map(|s| {
+                commands::backtest::parse_multipliers(s)
+            }).unwrap_or_default();
+            match commands::backtest::run_backtest_cmd(&file, &data_refs, capital, fidelity, depth, spread, liquidity, l2_data.as_deref(), &multipliers) {
                 Ok(()) => SUCCESS,
                 Err(e) => {
                     match &e {

@@ -169,6 +169,21 @@ pub enum IndicatorStateEntry {
         count: usize,
         n_assets: usize,
     },
+    /// Rolling state for rolling_rank: stores the circular buffer of past values
+    /// to compute the percentile rank of the current value within its window.
+    RollingRank {
+        buffer: Vec<f64>,
+        period: usize,
+        index: usize,
+        count: usize,
+    },
+    /// State for lag: stores the last N values and returns the value from N bars ago.
+    Lag {
+        buffer: Vec<f64>,
+        period: usize,
+        index: usize,
+        count: usize,
+    },
 }
 
 /// A lightweight AST interpreter that walks the TypedProgram and evaluates

@@ -29,6 +29,8 @@ pub fn eval_stat_indicator(
         "corr" | "covariance" => eval_rolling_pair(name, args, indicators, call_site_key),
         "rsi" => eval_rsi(args, indicators, call_site_key),
         "atr" => eval_atr(args, indicators, call_site_key),
+        "rolling_rank" => eval_rolling_rank(args, indicators, call_site_key),
+        "lag" => eval_lag(args, indicators, call_site_key),
         _ => Ok(None),
     }
 }
@@ -462,6 +464,141 @@ fn eval_atr(
         _ => return Err("indicator state mismatch for atr".to_string()),
     };
     Ok(Some(Value::Float(result)))
+}
+
+// ---------------------------------------------------------------------------
+// rolling_rank(value, period) — percentile rank within trailing window (0.0 to 1.0)
+// ---------------------------------------------------------------------------
+
+/// Compute the percentile rank of the current value within its trailing window.
+/// Returns the fraction of values in the window that are strictly less than the current value.
+/// Equivalent to: `series.rolling(period).rank(pct=True)` in pandas.
+///
+/// - Returns 0.0 during warmup (fewer than 2 observations)
+/// - Returns value in [0.0, 1.0] once window has >= 2 values
+fn eval_rolling_rank(
+    args: &[Value],
+    indicators: &mut HashMap<String, IndicatorStateEntry>,
+    call_site_key: &str,
+) -> Result<Option<Value>, String> {
+    check_arity("rolling_rank", args, 2)?;
+    let value = to_f64("rolling_rank", &args[0])?;
+    let period = to_period("rolling_rank", &args[1])?;
+
+    let state = indicators
+        .entry(call_site_key.to_string())
+        .or_insert_with(|| IndicatorStateEntry::RollingRank {
+            buffer: vec![0.0; period],
+            period,
+            index: 0,
+            count: 0,
+        });
+
+    if let IndicatorStateEntry::RollingRank {
+        buffer,
+        period: p,
+        index,
+        count,
+    } = state
+    {
+        // Insert new value
+        buffer[*index] = value;
+        *index = (*index + 1) % *p;
+        if *count < *p {
+            *count += 1;
+        }
+
+        // Need at least 2 values for a meaningful rank
+        if *count < 2 {
+            return Ok(Some(Value::Float(0.0)));
+        }
+
+        // Count how many values in the window are strictly less than current value
+        let n = *count;
+        let mut less_count = 0usize;
+        for i in 0..n {
+            if buffer[i] < value {
+                less_count += 1;
+            }
+        }
+
+        // Percentile rank: fraction of values that are less than current
+        // This matches pandas rank(pct=True) with method='average' for non-ties
+        let rank = less_count as f64 / (n - 1) as f64;
+
+        Ok(Some(Value::Float(rank.clamp(0.0, 1.0))))
+    } else {
+        Ok(Some(Value::Float(0.0)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lag(value, period) — returns the value from `period` bars ago
+// ---------------------------------------------------------------------------
+
+/// Return the value from N bars ago. During warmup (fewer than period+1 observations),
+/// returns the oldest available value.
+///
+/// lag(close, 1) → previous bar's close (equivalent to prev_close)
+/// lag(close, 5) → close from 5 bars ago
+fn eval_lag(
+    args: &[Value],
+    indicators: &mut HashMap<String, IndicatorStateEntry>,
+    call_site_key: &str,
+) -> Result<Option<Value>, String> {
+    check_arity("lag", args, 2)?;
+    let value = to_f64("lag", &args[0])?;
+    let period = to_period("lag", &args[1])?;
+
+    // We need a buffer of size period+1 to store current + N past values
+    let buf_size = period + 1;
+
+    let state = indicators
+        .entry(call_site_key.to_string())
+        .or_insert_with(|| IndicatorStateEntry::Lag {
+            buffer: vec![0.0; buf_size],
+            period: buf_size,
+            index: 0,
+            count: 0,
+        });
+
+    if let IndicatorStateEntry::Lag {
+        buffer,
+        period: p,
+        index,
+        count,
+    } = state
+    {
+        // Insert current value
+        buffer[*index] = value;
+
+        // The lagged value is at position (index - period) mod buf_size
+        // But we need to handle warmup: if count < period+1, return oldest available
+        if *count < *p {
+            *count += 1;
+        }
+
+        // Advance index for next call
+        let current_index = *index;
+        *index = (*index + 1) % *p;
+
+        if *count <= period {
+            // Not enough history yet — return the oldest value we have
+            // (which is the first value pushed, at earliest position)
+            let oldest_idx = if *count < *p {
+                0
+            } else {
+                *index // next position to be overwritten = oldest
+            };
+            return Ok(Some(Value::Float(buffer[oldest_idx])));
+        }
+
+        // Normal case: return value from `period` steps ago
+        let lag_idx = (current_index + *p - period) % *p;
+        Ok(Some(Value::Float(buffer[lag_idx])))
+    } else {
+        Ok(Some(Value::Float(value)))
+    }
 }
 
 #[cfg(test)]

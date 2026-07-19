@@ -12,6 +12,27 @@ use crate::error::{CliError, CompileErrorWithSpan};
 use crate::interpreter::{Interpreter, Value};
 use crate::module_resolver;
 
+/// Parse a multiplier specification string into a HashMap.
+/// Format: "SYMBOL:VALUE,SYMBOL:VALUE,..." (e.g., "ES=F:50,NQ=F:20,RTY=F:50,YM=F:5")
+/// Invalid entries are silently skipped.
+pub fn parse_multipliers(spec: &str) -> HashMap<String, f64> {
+    let mut map = HashMap::new();
+    for pair in spec.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((sym, val_str)) = pair.rsplit_once(':') {
+            if let Ok(val) = val_str.parse::<f64>() {
+                if val > 0.0 {
+                    map.insert(sym.to_string(), val);
+                }
+            }
+        }
+    }
+    map
+}
+
 /// Parameters for constructing an Order from a Signal.
 ///
 /// This is a Rust-side bridge struct that captures the essential fields
@@ -245,7 +266,7 @@ pub fn format_summary(results: &[(usize, Signal)]) -> String {
     )
 }
 
-pub fn run_backtest_cmd(file: &Path, data_paths: &[&Path], initial_capital: f64, fidelity: u8, depth: Option<u32>, spread: Option<f64>, liquidity: Option<f64>, l2_data: Option<&Path>) -> Result<(), CliError> {
+pub fn run_backtest_cmd(file: &Path, data_paths: &[&Path], initial_capital: f64, fidelity: u8, depth: Option<u32>, spread: Option<f64>, liquidity: Option<f64>, l2_data: Option<&Path>, multipliers: &HashMap<String, f64>) -> Result<(), CliError> {
     // === Fidelity Level Routing ===
     //
     // Backward compatibility guarantee (Requirements 4.7, 11.7):
@@ -441,10 +462,10 @@ pub fn run_backtest_cmd(file: &Path, data_paths: &[&Path], initial_capital: f64,
                 all_bars.extend(loaded.bars);
                 all_timestamps.extend(loaded.timestamps);
             }
-            run_fidelity_zero_backtest_interleaved(&typed_program, &all_bars, &all_timestamps, initial_capital)?;
+            run_fidelity_zero_backtest_interleaved(&typed_program, &all_bars, &all_timestamps, initial_capital, multipliers)?;
         } else {
             // Single-symbol: existing sequential path (unchanged)
-            run_fidelity_zero_backtest(&typed_program, &bars, initial_capital)?;
+            run_fidelity_zero_backtest(&typed_program, &bars, initial_capital, multipliers)?;
         }
     }
 
@@ -457,10 +478,11 @@ fn run_fidelity_zero_backtest(
     typed_program: &TypedProgram,
     bars: &[BarContext],
     initial_capital: f64,
+    multipliers: &HashMap<String, f64>,
 ) -> Result<(), CliError> {
     // Create interpreter and position tracker
     let mut interpreter = Interpreter::new(typed_program);
-    let mut tracker = PositionTracker::new(initial_capital);
+    let mut tracker = PositionTracker::new_with_multipliers(initial_capital, multipliers.clone());
 
     let mut results: Vec<(usize, Signal)> = Vec::new();
     for (i, bar) in bars.iter().enumerate() {
@@ -534,16 +556,21 @@ fn run_fidelity_zero_backtest(
 /// Run fidelity 0 backtest with timestamp-interleaved multi-symbol processing.
 ///
 /// Groups bars by timestamp and processes all symbols for each timestamp before
-/// advancing. This enables cross-symbol portfolio strategies that accumulate
-/// shared state via HashMap.
+/// advancing. Uses a two-pass approach per group:
+///   Pass 1: Run on_bar for all symbols (updates indicators, fires exits, marks pending entries)
+///   Pass 2: Re-run on_bar for symbols with pending entries (fills at same-day close)
+///
+/// This ensures cross-symbol ranking decisions see all products' updated scores
+/// before making entry decisions, matching vectorized research logic.
 fn run_fidelity_zero_backtest_interleaved(
     typed_program: &TypedProgram,
     bars: &[BarContext],
     timestamps: &[String],
     initial_capital: f64,
+    multipliers: &HashMap<String, f64>,
 ) -> Result<(), CliError> {
     let mut interpreter = Interpreter::new(typed_program);
-    let mut tracker = PositionTracker::new(initial_capital);
+    let mut tracker = PositionTracker::new_with_multipliers(initial_capital, multipliers.clone());
     let mut results: Vec<(usize, Signal)> = Vec::new();
 
     // Group bars by timestamp for interleaved processing
@@ -556,7 +583,13 @@ fn run_fidelity_zero_backtest_interleaved(
         // Update interpreter with all close prices for this timestamp group
         interpreter.update_prices(&group.closes);
 
-        // Process each symbol's bar within this timestamp group
+        let group_start_index = global_bar_index;
+
+        // ─── Pass 1: Process all bars in this group ───
+        // This runs indicators, updates scores, fires exits, and sets pending entries.
+        // OPEN signals are collected but we also track which symbols might need
+        // a second pass (if they had no position and were processed before the
+        // rotation boundary set their pending flag).
         for bar in &group.bars {
             // Set per-symbol in_position from tracker
             interpreter.in_position = tracker.position(&bar.symbol)
@@ -578,6 +611,43 @@ fn run_fidelity_zero_backtest_interleaved(
             tracker.mark_to_market(bar.close, &bar.symbol);
 
             global_bar_index += 1;
+        }
+
+        // ─── Pass 2: Re-process symbols that now have pending entries ───
+        // After pass 1, the rotation boundary has fired and pending_entry_map
+        // is populated. Symbols processed *before* the boundary in pass 1
+        // missed their entry. Re-run their on_bar to pick up the pending flag.
+        // Only re-run for symbols not already in position and not already signalled.
+        for (i, bar) in group.bars.iter().enumerate() {
+            let bar_index = group_start_index + i;
+
+            // Only re-process if symbol has no position (entry candidate)
+            let already_in = tracker.position(&bar.symbol)
+                .map(|p| p.qty != 0.0)
+                .unwrap_or(false);
+
+            if already_in {
+                continue;
+            }
+
+            // Set in_position for this second pass
+            interpreter.in_position = false;
+
+            // Re-run on_bar — this will check pending_entry_map and fire OPEN
+            let signals = interpreter.on_bar(bar);
+
+            // Only process OPEN signals from pass 2 (ignore duplicates of other types)
+            let open_signals: Vec<Signal> = signals.into_iter().filter(|s| {
+                matches!(s, Signal::Open { .. })
+            }).collect();
+
+            if !open_signals.is_empty() {
+                tracker.process_signals(&open_signals, bar.close, bar_index);
+                for signal in open_signals {
+                    results.push((bar_index, signal));
+                }
+                tracker.mark_to_market(bar.close, &bar.symbol);
+            }
         }
     }
 

@@ -133,6 +133,14 @@ pub(crate) fn math_function_bindings() -> Vec<(&'static str, FluxType)> {
             params: FnParams::VariadicNumeric,
             ret: Box::new(FluxType::Float),
         }),
+        ("rolling_rank", FluxType::Fn {
+            params: FnParams::VariadicNumeric,
+            ret: Box::new(FluxType::Float),
+        }),
+        ("lag", FluxType::Fn {
+            params: FnParams::VariadicNumeric,
+            ret: Box::new(FluxType::Float),
+        }),
 
         // ── Tier 3: Matrix Operations ──
         ("mat_mul", FluxType::Fn {

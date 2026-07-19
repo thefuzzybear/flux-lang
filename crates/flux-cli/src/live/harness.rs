@@ -662,6 +662,8 @@ fn extract_indicator_buffer(entry: &crate::interpreter::IndicatorStateEntry) -> 
             // Flatten the window into a single vec
             Some(window.iter().flatten().copied().collect())
         }
+        IndicatorStateEntry::RollingRank { buffer, .. } => Some(buffer.clone()),
+        IndicatorStateEntry::Lag { buffer, .. } => Some(buffer.clone()),
     }
 }
 
@@ -770,6 +772,32 @@ fn restore_indicator_buffer(entry: &mut crate::interpreter::IndicatorStateEntry,
             // Unflatten the vec back into rows of n_assets
             if *n_assets > 0 && buffer.len() % *n_assets == 0 {
                 *window = buffer.chunks(*n_assets).map(|c| c.to_vec()).collect();
+            }
+        }
+        IndicatorStateEntry::RollingRank {
+            buffer: ref mut buf,
+            period,
+            ref mut index,
+            ref mut count,
+            ..
+        } => {
+            if buffer.len() <= *period {
+                *buf = buffer.to_vec();
+                *count = buffer.len();
+                *index = buffer.len() % *period;
+            }
+        }
+        IndicatorStateEntry::Lag {
+            buffer: ref mut buf,
+            period,
+            ref mut index,
+            ref mut count,
+            ..
+        } => {
+            if buffer.len() <= *period {
+                *buf = buffer.to_vec();
+                *count = buffer.len();
+                *index = buffer.len() % *period;
             }
         }
     }
