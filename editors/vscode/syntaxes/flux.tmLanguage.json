@@ -44,7 +44,7 @@
     "keywords-declaration": {
       "patterns": [
         {
-          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector|struct|enum|impl|trait)\\b",
+          "match": "\\b(strategy|params|state|on|from|import|fn|data|connector|struct|enum|impl|trait|account|gateway|database|risk|products|strategies)\\b",
           "name": "keyword.other.flux"
         }
       ]
@@ -95,7 +95,7 @@
     "builtin-functions": {
       "patterns": [
         {
-          "match": "\\b(sma|ema|stddev|variance|zscore|rsi|atr|corr|covariance|abs|sqrt|exp|log|floor|ceil|round|sign|pow|min|max|range)\\b",
+          "match": "\\b(sma|ema|stddev|variance|zscore|rsi|atr|corr|covariance|abs|sqrt|exp|log|floor|ceil|round|sign|pow|min|max|range|env)\\b",
           "name": "support.function.builtin.flux"
         }
       ]

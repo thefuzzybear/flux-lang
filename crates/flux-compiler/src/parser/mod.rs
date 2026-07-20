@@ -3,6 +3,7 @@
 //! Transforms a token stream into an Abstract Syntax Tree (AST).
 
 pub mod ast;
+pub mod manifest;
 mod parser_state;
 mod expr;
 mod stmt;
@@ -28,6 +29,7 @@ mod tests_import_path_property;
 mod tests_for_loop_property;
 
 pub use ast::*;
+pub use manifest::parse_manifest;
 
 use crate::error::Result;
 use crate::lexer::SpannedToken;

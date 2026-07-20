@@ -229,9 +229,10 @@ pub fn classify_token(token: &Token) -> TokenCategory {
         | Token::ColonColon
         | Token::Semicolon => TokenCategory::Delimiter,
 
-        // Identifiers — check for signal functions
+        // Identifiers — check for signal functions and manifest keywords
         Token::Ident(name) => match name.as_str() {
             "OPEN" | "CLOSE" | "CLOSE_QTY" => TokenCategory::SignalFunction,
+            "account" | "gateway" | "database" | "risk" | "products" | "strategies" | "env" => TokenCategory::Keyword,
             _ => TokenCategory::Identifier,
         },
 

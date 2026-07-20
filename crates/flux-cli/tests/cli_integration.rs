@@ -731,3 +731,90 @@ fn test_backtest_fidelity_0_matches_default_output() {
     assert!(stdout_default.contains("--- Portfolio Summary ---"), "Missing Portfolio Summary section");
     assert!(stdout_default.contains("--- Summary ---"), "Missing Summary section");
 }
+
+
+// =============================================================================
+// flux live — directory mode (account manifest)
+// =============================================================================
+
+/// Validates: Requirement 6.1, 6.2
+/// `flux live <dir>` with a valid account.flux should parse and validate.
+/// Note: The command will panic with todo!() since AccountRuntime isn't implemented yet.
+/// We verify it gets far enough to hit the todo (exit code 101 = panic).
+#[test]
+fn live_directory_with_valid_account_flux_reaches_todo() {
+    let dir = fixture_path("account_manifest");
+    let output = flux_cmd()
+        .args(["live", dir.to_str().unwrap()])
+        .output()
+        .expect("failed to execute");
+
+    // The command should panic with the todo!() since AccountRuntime isn't implemented
+    // Panic gives exit code 101 on Unix
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not yet implemented") || stderr.contains("AccountRuntime"),
+        "Expected todo!() panic in stderr, got: {}",
+        stderr
+    );
+}
+
+/// Validates: Requirement 6.4
+/// `flux live <dir>` without account.flux should produce an error.
+#[test]
+fn live_directory_without_account_flux_errors() {
+    let dir = fixture_path("empty_dir");
+    let output = flux_cmd()
+        .args(["live", dir.to_str().unwrap()])
+        .output()
+        .expect("failed to execute");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no account.flux found in directory"),
+        "Expected 'no account.flux found' error, got: {}",
+        stderr
+    );
+}
+
+/// Validates: Requirement 6.5
+/// `flux live <nonexistent_dir>` should produce a "does not exist" error.
+#[test]
+fn live_nonexistent_directory_errors() {
+    let output = flux_cmd()
+        .args(["live", "/tmp/flux_nonexistent_dir_12345"])
+        .output()
+        .expect("failed to execute");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not exist") || stderr.contains("No such file"),
+        "Expected 'does not exist' error, got: {}",
+        stderr
+    );
+}
+
+/// Validates: Requirement 7.3
+/// `flux live README.md` (neither dir, .flux, nor .toml) should produce guidance error.
+#[test]
+fn live_unsupported_path_type_errors() {
+    // Use a file that exists but isn't .flux or .toml
+    let readme = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent().unwrap().parent().unwrap()
+        .join("README.md");
+    let output = flux_cmd()
+        .args(["live", readme.to_str().unwrap()])
+        .output()
+        .expect("failed to execute");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("path must be a directory"),
+        "Expected guidance error message, got: {}",
+        stderr
+    );
+}

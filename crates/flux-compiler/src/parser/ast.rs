@@ -465,3 +465,58 @@ pub struct TraitMethodSig {
     pub return_type: Option<TypeAnnotation>,
     pub span: Span,
 }
+
+// --- Account Manifest AST Nodes ---
+
+/// Root AST node for an account manifest file (account.flux).
+/// Separate from Program — manifest files have no strategy, no functions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestProgram {
+    pub blocks: Vec<ManifestBlock>,
+    pub span: Span,
+}
+
+/// A single top-level manifest block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestBlock {
+    pub kind: ManifestBlockKind,
+    pub span: Span,
+}
+
+/// The different manifest block types.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestBlockKind {
+    Account(Vec<ManifestField>),
+    Gateway(Vec<ManifestField>),
+    Data(Vec<ManifestField>),
+    Database(Vec<ManifestField>),
+    Risk(Vec<ManifestField>),
+    Products(Vec<ManifestEntry>),
+    Strategies(Vec<ManifestEntry>),
+}
+
+/// A key = value field inside a simple block (account, gateway, etc.).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestField {
+    pub name: String,
+    pub value: ManifestValue,
+    pub span: Span,
+}
+
+/// A named entry in a products/strategies block: `KEY = { fields... }`
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManifestEntry {
+    pub name: String,
+    pub fields: Vec<ManifestField>,
+    pub span: Span,
+}
+
+/// Possible values in manifest fields.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifestValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+    StringList(Vec<String>),
+    EnvCall(String),
+}

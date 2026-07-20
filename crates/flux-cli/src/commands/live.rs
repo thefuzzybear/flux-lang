@@ -24,7 +24,7 @@ use crate::live::state::load_state;
 /// Multi-strategy mode:  `flux live config.toml`
 #[derive(Parser, Debug)]
 pub struct LiveArgs {
-    /// Path to a .flux strategy file or .toml configuration file
+    /// Path to a .flux strategy file, .toml configuration file, or directory containing account.flux
     pub file: PathBuf,
 
     /// Initial portfolio capital (default: 10000.0)
@@ -70,6 +70,49 @@ pub struct LiveArgs {
 /// - Strategy runtime errors → logged and skipped (exit code 0)
 /// - State file corruption → logged as warning, start fresh (exit code 0)
 pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Directory mode: look for account.flux in the directory
+    if args.file.is_dir() {
+        let manifest_path = args.file.join("account.flux");
+        if !manifest_path.exists() {
+            let abs_path = args.file.canonicalize().unwrap_or_else(|_| args.file.clone());
+            return Err(format!(
+                "no account.flux found in directory: {}",
+                abs_path.display()
+            ).into());
+        }
+        let source = std::fs::read_to_string(&manifest_path)?;
+        let tokens = flux_compiler::lexer::lex_with_spans(&source)
+            .map_err(|e| format!("failed to parse account.flux: {}", e))?;
+        let ast = flux_compiler::parser::parse_manifest(tokens)
+            .map_err(|e| format!("failed to parse account.flux: {}", e))?;
+        let (config, _env_sources) = crate::live::account_config::extract_config(&ast)
+            .map_err(|errs| {
+                let msgs: Vec<String> = errs.iter().map(|e| format!("  - {:?}", e)).collect();
+                format!("account.flux configuration error:\n{}", msgs.join("\n"))
+            })?;
+        crate::live::account_config::validate_config(&config)
+            .map_err(|errs| {
+                let msgs: Vec<String> = errs.iter().map(|e| format!("  - {:?}", e)).collect();
+                format!("account.flux validation error:\n{}", msgs.join("\n"))
+            })?;
+        // AccountConfig validated — hand off to runtime (future spec)
+        todo!("AccountRuntime boot from AccountConfig")
+    }
+
+    // Check if path is neither .flux, .toml, nor directory
+    if !args.file.extension().map_or(false, |e| e == "flux" || e == "toml") {
+        if !args.file.exists() {
+            return Err(format!(
+                "directory does not exist: {}",
+                args.file.display()
+            ).into());
+        }
+        return Err(format!(
+            "path must be a directory containing account.flux, a .flux strategy file, or a .toml configuration file: {}",
+            args.file.display()
+        ).into());
+    }
+
     // 1. Load strategies
     let strategies = load_strategies(&args.file).map_err(|errors| {
         for e in &errors {
