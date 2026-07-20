@@ -546,6 +546,7 @@ impl LiveHarness {
             positions,
             prices,
             timestamp,
+            available_margin: f64::MAX,
         }
     }
 

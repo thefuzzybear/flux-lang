@@ -10,6 +10,8 @@ use chrono::{Datelike, DateTime, NaiveTime};
 use chrono_tz::Tz;
 use flux_runtime::Signal;
 
+use crate::live::product_registry::ProductRegistry;
+
 /// Configuration for the risk limits module.
 /// Designed to be deserializable from TOML.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -94,6 +96,14 @@ pub enum RejectionReason {
         additional: f64,
         limit: f64,
     },
+    UnknownSymbol {
+        symbol: String,
+    },
+    MarginExceeded {
+        symbol: String,
+        required: f64,
+        available: f64,
+    },
     SystemHalted { reason: HaltReason },
 }
 
@@ -106,6 +116,8 @@ pub enum AlertEvent {
     DrawdownBreached { drawdown_pct: f64, limit: f64 },
     PositionLimitRejected { symbol: String, current: u32, limit: u32 },
     NotionalLimitRejected { current: f64, limit: f64 },
+    UnknownSymbolRejected { symbol: String },
+    MarginExceededRejected { symbol: String, required: f64, available: f64 },
     CorrelationWarning { long_count: usize, symbols: Vec<String> },
     SystemHalted { reason: HaltReason },
 }
@@ -119,11 +131,15 @@ pub struct PortfolioState {
     pub prices: HashMap<String, f64>,
     /// Current timestamp of the bar being processed.
     pub timestamp: DateTime<Tz>,
+    /// Available margin for new positions.
+    pub available_margin: f64,
 }
 
 /// The stateful risk limits engine.
 pub struct RiskLimits {
     config: RiskLimitsConfig,
+    /// Product registry for symbol lookups.
+    registry: ProductRegistry,
     /// Accumulated daily P&L (realized + unrealized at last mark).
     daily_pnl: f64,
     /// Accumulated weekly P&L (realized + unrealized at last mark).
@@ -168,7 +184,7 @@ impl RiskLimits {
     ///
     /// Calls `config.validate()` and returns an error if invalid.
     /// Initializes all accumulators to zero/clean state.
-    pub fn new(config: RiskLimitsConfig) -> Result<Self, String> {
+    pub fn new(config: RiskLimitsConfig, registry: ProductRegistry) -> Result<Self, String> {
         config.validate()?;
 
         let epoch_eastern = chrono::DateTime::UNIX_EPOCH.with_timezone(&chrono_tz::US::Eastern);
@@ -177,6 +193,7 @@ impl RiskLimits {
             equity_peak: config.initial_equity,
             current_equity: config.initial_equity,
             config,
+            registry,
             daily_pnl: 0.0,
             weekly_pnl: 0.0,
             position_sizes: HashMap::new(),
@@ -302,8 +319,46 @@ impl RiskLimits {
             _ => {}
         }
 
-        // Step 4: Per-product position limit
+        // Step 4: Extract symbol and qty, then check unknown symbol
         let (symbol, qty) = signal_symbol_qty(signal);
+
+        // Step 4a: Unknown symbol check
+        let spec = match self.registry.get(&symbol) {
+            Some(spec) => spec,
+            None => {
+                alerts.push(AlertEvent::UnknownSymbolRejected {
+                    symbol: symbol.clone(),
+                });
+                return (
+                    RiskDecision::Reject {
+                        reason: RejectionReason::UnknownSymbol { symbol },
+                    },
+                    alerts,
+                );
+            }
+        };
+
+        // Step 4b: Margin pre-check
+        let required_margin = qty * spec.margin_initial;
+        if required_margin > state.available_margin {
+            alerts.push(AlertEvent::MarginExceededRejected {
+                symbol: symbol.clone(),
+                required: required_margin,
+                available: state.available_margin,
+            });
+            return (
+                RiskDecision::Reject {
+                    reason: RejectionReason::MarginExceeded {
+                        symbol,
+                        required: required_margin,
+                        available: state.available_margin,
+                    },
+                },
+                alerts,
+            );
+        }
+
+        // Step 5: Per-product position limit
         let current_pos = self.position_sizes.get(&symbol).copied().unwrap_or(0);
         let requested = current_pos + qty as u32;
         if requested > self.config.max_position_per_product {
@@ -325,9 +380,9 @@ impl RiskLimits {
             );
         }
 
-        // Step 5: Total notional limit
+        // Step 6: Total notional limit (multiplier-aware)
         let price = state.prices.get(&symbol).copied().unwrap_or(0.0);
-        let additional_notional = qty * price;
+        let additional_notional = qty * price * spec.multiplier;
         if self.total_notional + additional_notional > self.config.max_total_notional {
             alerts.push(AlertEvent::NotionalLimitRejected {
                 current: self.total_notional,
@@ -345,7 +400,7 @@ impl RiskLimits {
             );
         }
 
-        // Step 6: Correlation warning (non-blocking)
+        // Step 7: Correlation warning (non-blocking)
         if let Some(warning) = self.check_correlation_warning(state) {
             alerts.push(warning);
         }
@@ -383,12 +438,19 @@ impl RiskLimits {
     pub fn record_fill(&mut self, signal: &Signal, fill_price: f64, qty: f64, realized_pnl: f64) {
         let (symbol, _) = signal_symbol_qty(signal);
 
+        // Look up multiplier (default to 1.0 if not found — shouldn't happen post-check)
+        let multiplier = self
+            .registry
+            .get(&symbol)
+            .map(|spec| spec.multiplier)
+            .unwrap_or(1.0);
+
         match signal {
             Signal::Open { .. } | Signal::Short { .. } => {
                 // Opening fill: increase position and cost basis
                 let current = self.position_sizes.get(&symbol).copied().unwrap_or(0);
                 self.position_sizes.insert(symbol, current + qty as u32);
-                self.total_notional += qty * fill_price;
+                self.total_notional += qty * fill_price * multiplier;
             }
             Signal::Close { .. } | Signal::CloseQty { .. } => {
                 // Closing fill: decrease position and adjust cost basis
@@ -402,7 +464,8 @@ impl RiskLimits {
                 }
 
                 // Reduce cost basis proportionally
-                self.total_notional = (self.total_notional - qty * fill_price).max(0.0);
+                self.total_notional =
+                    (self.total_notional - qty * fill_price * multiplier).max(0.0);
 
                 // Record realized P&L
                 self.realized_pnl_today += realized_pnl;
@@ -504,6 +567,7 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use chrono_tz::US::Eastern;
+    use crate::live::product_registry::ProductRegistry;
 
     fn valid_config() -> RiskLimitsConfig {
         RiskLimitsConfig {
@@ -515,6 +579,24 @@ mod tests {
             correlation_warning_threshold: 4,
             initial_equity: 500_000.0,
         }
+    }
+
+    fn empty_registry() -> ProductRegistry {
+        ProductRegistry::from_entries(&[])
+    }
+
+    /// Registry with common test symbols (multiplier=1.0, tick_size=0.01, margin=1000.0).
+    fn test_registry() -> ProductRegistry {
+        use crate::live::account_config::ProductEntry;
+        let entries = vec![
+            ProductEntry { name: "AAPL".to_string(), multiplier: 1.0, tick_size: 0.01, margin: 1000.0 },
+            ProductEntry { name: "MSFT".to_string(), multiplier: 1.0, tick_size: 0.01, margin: 1000.0 },
+            ProductEntry { name: "GOOG".to_string(), multiplier: 1.0, tick_size: 0.01, margin: 1000.0 },
+            ProductEntry { name: "AMZN".to_string(), multiplier: 1.0, tick_size: 0.01, margin: 1000.0 },
+            ProductEntry { name: "TSLA".to_string(), multiplier: 1.0, tick_size: 0.01, margin: 1000.0 },
+            ProductEntry { name: "ES".to_string(), multiplier: 50.0, tick_size: 0.25, margin: 15000.0 },
+        ];
+        ProductRegistry::from_entries(&entries)
     }
 
     fn test_timestamp() -> DateTime<Tz> {
@@ -530,6 +612,7 @@ mod tests {
             positions: HashMap::new(),
             prices: HashMap::new(),
             timestamp: test_timestamp(),
+            available_margin: f64::MAX,
         }
     }
 
@@ -612,7 +695,7 @@ mod tests {
 
     #[test]
     fn test_new_initializes_clean_state() {
-        let rl = RiskLimits::new(valid_config()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         assert_eq!(rl.daily_pnl, 0.0);
         assert_eq!(rl.weekly_pnl, 0.0);
         assert_eq!(rl.equity_peak, 500_000.0);
@@ -630,14 +713,14 @@ mod tests {
     fn test_new_rejects_invalid_config() {
         let mut config = valid_config();
         config.max_daily_loss = 100.0;
-        assert!(RiskLimits::new(config).is_err());
+        assert!(RiskLimits::new(config, empty_registry()).is_err());
     }
 
     // --- Task 2.2: check_signal tests ---
 
     #[test]
     fn test_close_signals_pass_when_halted() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -16_000.0,
@@ -659,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_open_signals_rejected_when_halted() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -16_000.0,
@@ -698,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_position_limit_rejection() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
         // Set current position to 8 for AAPL (limit is 10)
         rl.position_sizes.insert("AAPL".to_string(), 8);
 
@@ -724,15 +807,15 @@ mod tests {
 
     #[test]
     fn test_notional_limit_rejection() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
         // Set total notional close to limit (3_000_000)
         rl.total_notional = 2_900_000.0;
 
         let mut state = empty_portfolio_state();
         state.prices.insert("ES".to_string(), 50_000.0);
 
-        // Request 5 contracts × $50,000 = $250,000 → 2_900_000 + 250_000 = 3_150_000 > 3_000_000
-        // (5 contracts is within position limit of 10)
+        // Request 5 contracts × $50,000 × 50 (multiplier) = $12,500,000
+        // 2_900_000 + 12_500_000 > 3_000_000 → reject
         let signal = Signal::open("ES".to_string(), 5.0);
         let (decision, alerts) = rl.check_signal(&signal, &state);
         assert_eq!(
@@ -740,7 +823,7 @@ mod tests {
             RiskDecision::Reject {
                 reason: RejectionReason::NotionalLimitExceeded {
                     current_notional: 2_900_000.0,
-                    additional: 250_000.0,
+                    additional: 12_500_000.0,
                     limit: 3_000_000.0,
                 },
             }
@@ -751,12 +834,12 @@ mod tests {
 
     #[test]
     fn test_allows_signal_within_limits() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
 
         let mut state = empty_portfolio_state();
         state.prices.insert("AAPL".to_string(), 150.0);
 
-        // 5 contracts × $150 = $750 notional, well within limits
+        // 5 contracts × $150 × 1.0 (multiplier) = $750 notional, well within limits
         let signal = Signal::open("AAPL".to_string(), 5.0);
         let (decision, alerts) = rl.check_signal(&signal, &state);
         assert_eq!(decision, RiskDecision::Allow);
@@ -765,7 +848,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_is_non_blocking() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
 
         let mut state = empty_portfolio_state();
         // Set up 4 long positions (threshold is 4)
@@ -821,7 +904,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_below_threshold() {
-        let rl = RiskLimits::new(valid_config()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
 
         let mut state = empty_portfolio_state();
         // Only 3 long positions (threshold is 4) → no warning
@@ -834,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_at_threshold() {
-        let rl = RiskLimits::new(valid_config()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
 
         let mut state = empty_portfolio_state();
         // Exactly 4 long positions (threshold is 4) → warning
@@ -855,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_ignores_short_positions() {
-        let rl = RiskLimits::new(valid_config()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
 
         let mut state = empty_portfolio_state();
         // 3 long + 1 short → only 3 long → no warning
@@ -871,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_no_breach() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         // Small position, no breach
         rl.total_notional = 10_000.0;
         let mut state = empty_portfolio_state();
@@ -887,7 +970,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_daily_loss_breach() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         // Simulate a big unrealized loss
         rl.total_notional = 1_000_000.0; // cost basis
         rl.realized_pnl_today = -5_000.0; // already lost 5k realized today
@@ -912,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_drawdown_breach() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         // Set equity peak higher (like it grew to 550k then fell)
         rl.equity_peak = 550_000.0;
         // We need drawdown >= 8% without tripping daily loss (-15k) first.
@@ -944,7 +1027,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_equity_peak_only_increases() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.total_notional = 10_000.0;
 
         // First mark: profit
@@ -963,7 +1046,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_halted_returns_none() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -20_000.0,
@@ -980,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_crosses_session_boundary() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.daily_pnl = -5_000.0;
         rl.realized_pnl_today = -5_000.0;
         // last_daily_reset is at UNIX_EPOCH, so any 09:30 ET should trigger
@@ -996,7 +1079,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_clears_daily_halt() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -16_000.0,
@@ -1012,7 +1095,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_does_not_clear_weekly_halt() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::WeeklyLoss {
             pnl: -35_000.0,
@@ -1031,7 +1114,7 @@ mod tests {
 
     #[test]
     fn test_weekly_reset_on_monday() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.weekly_pnl = -10_000.0;
         rl.realized_pnl_week = -10_000.0;
 
@@ -1045,7 +1128,7 @@ mod tests {
 
     #[test]
     fn test_no_reset_before_session_open() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.daily_pnl = -5_000.0;
         rl.realized_pnl_today = -5_000.0;
         // Set last_daily_reset to yesterday's session open so we don't trigger from EPOCH
@@ -1063,7 +1146,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_does_not_clear_drawdown_halt() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::MaxDrawdown {
             drawdown_pct: 0.09,
@@ -1083,7 +1166,7 @@ mod tests {
 
     #[test]
     fn test_weekly_reset_midweek_does_not_reset_weekly() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.weekly_pnl = -10_000.0;
         rl.realized_pnl_week = -10_000.0;
         // Set last_weekly_reset to this week's Monday open (already triggered this week)
@@ -1101,7 +1184,7 @@ mod tests {
 
     #[test]
     fn test_monday_resets_both_daily_and_weekly() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.daily_pnl = -5_000.0;
         rl.realized_pnl_today = -5_000.0;
         rl.weekly_pnl = -20_000.0;
@@ -1126,7 +1209,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_open_increases_position() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
 
         let signal = Signal::open("ES".to_string(), 3.0);
         rl.record_fill(&signal, 5000.0, 3.0, 0.0);
@@ -1137,7 +1220,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_short_increases_position() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
 
         let signal = Signal::short("NQ".to_string(), 2.0);
         rl.record_fill(&signal, 18_000.0, 2.0, 0.0);
@@ -1148,7 +1231,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_decreases_position() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.position_sizes.insert("ES".to_string(), 5);
         rl.total_notional = 25_000.0;
 
@@ -1164,7 +1247,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_full_position() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.position_sizes.insert("AAPL".to_string(), 10);
         rl.total_notional = 15_000.0;
 
@@ -1180,7 +1263,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_accumulates_realized_pnl() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.position_sizes.insert("ES".to_string(), 5);
         rl.total_notional = 25_000.0;
 
@@ -1199,7 +1282,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_open_accumulates_positions() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
 
         // First open: 3 contracts
         let signal = Signal::open("ES".to_string(), 3.0);
@@ -1215,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_clamps_notional_to_zero() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.position_sizes.insert("AAPL".to_string(), 2);
         rl.total_notional = 100.0; // Very small notional
 
@@ -1229,7 +1312,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_more_than_position() {
-        let mut rl = RiskLimits::new(valid_config()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
         rl.position_sizes.insert("AAPL".to_string(), 3);
         rl.total_notional = 3000.0;
 
@@ -1238,5 +1321,261 @@ mod tests {
         rl.record_fill(&signal, 100.0, 5.0, 0.0);
 
         assert!(rl.position_sizes.get("AAPL").is_none()); // Removed (clamped to 0)
+    }
+
+    // --- Task 5.2: Unknown symbol rejection tests ---
+
+    #[test]
+    fn test_open_unknown_symbol_rejected() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let state = empty_portfolio_state();
+
+        let signal = Signal::open("UNKNOWN".to_string(), 1.0);
+        let (decision, alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(
+            decision,
+            RiskDecision::Reject {
+                reason: RejectionReason::UnknownSymbol {
+                    symbol: "UNKNOWN".to_string(),
+                },
+            }
+        );
+        assert_eq!(alerts.len(), 1);
+        assert!(matches!(
+            &alerts[0],
+            AlertEvent::UnknownSymbolRejected { symbol } if symbol == "UNKNOWN"
+        ));
+    }
+
+    #[test]
+    fn test_short_unknown_symbol_rejected() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let state = empty_portfolio_state();
+
+        let signal = Signal::short("NOPE".to_string(), 2.0);
+        let (decision, alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(
+            decision,
+            RiskDecision::Reject {
+                reason: RejectionReason::UnknownSymbol {
+                    symbol: "NOPE".to_string(),
+                },
+            }
+        );
+        assert_eq!(alerts.len(), 1);
+        assert!(matches!(
+            &alerts[0],
+            AlertEvent::UnknownSymbolRejected { symbol } if symbol == "NOPE"
+        ));
+    }
+
+    #[test]
+    fn test_unknown_symbol_alert_event_emitted() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let state = empty_portfolio_state();
+
+        let signal = Signal::open("XYZ".to_string(), 1.0);
+        let (_decision, alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(alerts.len(), 1);
+        match &alerts[0] {
+            AlertEvent::UnknownSymbolRejected { symbol } => {
+                assert_eq!(symbol, "XYZ");
+            }
+            other => panic!("Expected UnknownSymbolRejected, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_known_symbols_pass_unknown_check() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut state = empty_portfolio_state();
+        state.prices.insert("AAPL".to_string(), 150.0);
+        state.prices.insert("ES".to_string(), 5000.0);
+
+        // AAPL is in the registry — should not reject as UnknownSymbol
+        let signal = Signal::open("AAPL".to_string(), 1.0);
+        let (decision, _alerts) = rl.check_signal(&signal, &state);
+        assert_eq!(decision, RiskDecision::Allow);
+
+        // ES is in the registry — should not reject as UnknownSymbol
+        let signal = Signal::short("ES".to_string(), 1.0);
+        let (decision, _alerts) = rl.check_signal(&signal, &state);
+        assert_eq!(decision, RiskDecision::Allow);
+    }
+
+    // --- Task 5.3: Margin pre-check tests ---
+
+    #[test]
+    fn test_open_exceeding_margin_rejected() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut state = empty_portfolio_state();
+        state.available_margin = 500.0; // Only $500 available
+        state.prices.insert("AAPL".to_string(), 150.0);
+
+        // AAPL margin_initial = 1000.0, qty=1 → required = 1*1000 = 1000 > 500
+        let signal = Signal::open("AAPL".to_string(), 1.0);
+        let (decision, alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(
+            decision,
+            RiskDecision::Reject {
+                reason: RejectionReason::MarginExceeded {
+                    symbol: "AAPL".to_string(),
+                    required: 1000.0,
+                    available: 500.0,
+                },
+            }
+        );
+        assert_eq!(alerts.len(), 1);
+        assert!(matches!(&alerts[0], AlertEvent::MarginExceededRejected { .. }));
+    }
+
+    #[test]
+    fn test_short_exceeding_margin_rejected() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut state = empty_portfolio_state();
+        state.available_margin = 10_000.0; // $10k available
+        state.prices.insert("ES".to_string(), 5000.0);
+
+        // ES margin_initial = 15000.0, qty=1 → required = 1*15000 = 15000 > 10000
+        let signal = Signal::short("ES".to_string(), 1.0);
+        let (decision, alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(
+            decision,
+            RiskDecision::Reject {
+                reason: RejectionReason::MarginExceeded {
+                    symbol: "ES".to_string(),
+                    required: 15000.0,
+                    available: 10_000.0,
+                },
+            }
+        );
+        assert_eq!(alerts.len(), 1);
+        assert!(matches!(&alerts[0], AlertEvent::MarginExceededRejected { .. }));
+    }
+
+    #[test]
+    fn test_signal_within_margin_passes() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut state = empty_portfolio_state();
+        state.available_margin = 5000.0; // $5k available
+        state.prices.insert("AAPL".to_string(), 150.0);
+
+        // AAPL margin_initial = 1000.0, qty=2 → required = 2*1000 = 2000 <= 5000
+        let signal = Signal::open("AAPL".to_string(), 2.0);
+        let (decision, _alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(decision, RiskDecision::Allow);
+    }
+
+    #[test]
+    fn test_margin_alert_contains_correct_values() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut state = empty_portfolio_state();
+        state.available_margin = 2500.0;
+        state.prices.insert("MSFT".to_string(), 400.0);
+
+        // MSFT margin_initial = 1000.0, qty=3 → required = 3*1000 = 3000 > 2500
+        let signal = Signal::open("MSFT".to_string(), 3.0);
+        let (_decision, alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(alerts.len(), 1);
+        match &alerts[0] {
+            AlertEvent::MarginExceededRejected {
+                symbol,
+                required,
+                available,
+            } => {
+                assert_eq!(symbol, "MSFT");
+                assert_eq!(*required, 3000.0);
+                assert_eq!(*available, 2500.0);
+            }
+            other => panic!("Expected MarginExceededRejected, got {:?}", other),
+        }
+    }
+
+    // --- Task 5.4: Multiplier-aware notional tests ---
+
+    #[test]
+    fn test_notional_uses_multiplier() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut state = empty_portfolio_state();
+        state.prices.insert("ES".to_string(), 5000.0);
+
+        // ES multiplier = 50.0
+        // Set total_notional close to limit so we can verify multiplier is used
+        // additional_notional = qty(1) × price(5000) × multiplier(50) = 250_000
+        // If multiplier wasn't used, it would be 1 × 5000 = 5000 (well within limit)
+        rl.total_notional = 2_800_000.0;
+
+        // 2_800_000 + 250_000 = 3_050_000 > 3_000_000 limit → reject
+        let signal = Signal::open("ES".to_string(), 1.0);
+        let (decision, _alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(
+            decision,
+            RiskDecision::Reject {
+                reason: RejectionReason::NotionalLimitExceeded {
+                    current_notional: 2_800_000.0,
+                    additional: 250_000.0, // qty × price × multiplier = 1 × 5000 × 50
+                    limit: 3_000_000.0,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn test_record_fill_updates_notional_with_multiplier() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+
+        // ES multiplier = 50.0
+        let signal = Signal::open("ES".to_string(), 2.0);
+        rl.record_fill(&signal, 5000.0, 2.0, 0.0);
+
+        // total_notional = qty(2) × fill_price(5000) × multiplier(50) = 500_000
+        assert_eq!(rl.total_notional, 500_000.0);
+
+        // AAPL multiplier = 1.0
+        let signal2 = Signal::open("AAPL".to_string(), 10.0);
+        rl.record_fill(&signal2, 150.0, 10.0, 0.0);
+
+        // total_notional += qty(10) × fill_price(150) × multiplier(1) = 1_500
+        assert_eq!(rl.total_notional, 501_500.0);
+    }
+
+    // --- Task 5.5: Check ordering (unknown → margin → position) ---
+
+    #[test]
+    fn test_check_ordering_margin_before_position() {
+        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+
+        // Set position at the limit for AAPL (max_position_per_product = 10)
+        rl.position_sizes.insert("AAPL".to_string(), 10);
+
+        let mut state = empty_portfolio_state();
+        state.available_margin = 500.0; // Only $500, AAPL requires 1000 per qty
+        state.prices.insert("AAPL".to_string(), 150.0);
+
+        // This signal would fail BOTH:
+        // - Margin check: qty(1) × margin(1000) = 1000 > 500 available
+        // - Position limit: 10 + 1 = 11 > 10 limit
+        // Should reject with MarginExceeded (checked first), NOT PositionLimitExceeded
+        let signal = Signal::open("AAPL".to_string(), 1.0);
+        let (decision, _alerts) = rl.check_signal(&signal, &state);
+
+        assert_eq!(
+            decision,
+            RiskDecision::Reject {
+                reason: RejectionReason::MarginExceeded {
+                    symbol: "AAPL".to_string(),
+                    required: 1000.0,
+                    available: 500.0,
+                },
+            }
+        );
     }
 }
