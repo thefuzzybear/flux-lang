@@ -1,0 +1,28 @@
+[[session]]
+exchange = "CME"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+
+[[session]]
+exchange = "NYSE"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+
+[holidays_2026]
+dates = [
+    "2026-01-01",
+    "2026-01-19",
+    "2026-02-16",
+    "2026-04-03",
+    "2026-05-25",
+    "2026-07-03",
+    "2026-09-07",
+    "2026-11-26",
+    "2026-12-25",
+]
+
+[half_days_2026]
+dates = ["2026-11-27", "2026-12-24"]
+early_close = "13:00"

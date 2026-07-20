@@ -102,9 +102,10 @@ async fn replay_connector_matches_backtest_output() {
         vec![strategy_module],
         aggregator,
         tracker,
-        None,                       // no state file
+        None,
         ReconnectPolicy::default(),
-        Duration::from_secs(3600),  // long heartbeat — won't fire in test
+        Duration::from_secs(3600),
+        None,
         None,
         None,
         None,
@@ -221,6 +222,7 @@ async fn replay_connector_produces_fills() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(3600),
+        None,
         None,
         None,
         None,

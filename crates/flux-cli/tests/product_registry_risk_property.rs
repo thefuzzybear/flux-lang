@@ -18,6 +18,7 @@ use chrono::TimeZone;
 use proptest::prelude::*;
 
 use flux_cli::live::account_config::ProductEntry;
+use flux_cli::live::market_calendar::MarketCalendar;
 use flux_cli::live::product_registry::ProductRegistry;
 use flux_cli::live::risk_limits::{
     AlertEvent, PortfolioState, RejectionReason, RiskDecision, RiskLimits, RiskLimitsConfig,
@@ -56,6 +57,18 @@ fn generous_portfolio_state() -> PortfolioState {
         timestamp: prop_timestamp(),
         available_margin: f64::MAX,
     }
+}
+
+/// A minimal valid MarketCalendar for property tests.
+fn default_calendar() -> MarketCalendar {
+    let toml_str = r#"
+[[session]]
+exchange = "CME"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+"#;
+    MarketCalendar::from_toml(toml_str).unwrap()
 }
 
 // =============================================================================
@@ -154,7 +167,7 @@ proptest! {
         prop_assert!(!known_names.contains(&unknown_symbol));
 
         let config = prop_config();
-        let mut rl = RiskLimits::new(config, registry).unwrap();
+        let mut rl = RiskLimits::new(config, registry, default_calendar()).unwrap();
 
         let signal = if use_short {
             Signal::short(unknown_symbol.clone(), qty)
@@ -218,7 +231,7 @@ proptest! {
             margin: 100.0, // small margin so margin check passes
         };
         let registry = ProductRegistry::from_entries(&[entry]);
-        let mut rl = RiskLimits::new(config, registry).unwrap();
+        let mut rl = RiskLimits::new(config, registry, default_calendar()).unwrap();
 
         let signal = Signal::open("TEST".to_string(), qty);
         let mut state = generous_portfolio_state();
@@ -260,7 +273,7 @@ proptest! {
             margin: 100.0, // small margin so margin check passes
         };
         let registry = ProductRegistry::from_entries(&[entry]);
-        let mut rl = RiskLimits::new(config, registry).unwrap();
+        let mut rl = RiskLimits::new(config, registry, default_calendar()).unwrap();
 
         let signal = Signal::open("TEST".to_string(), qty);
         let mut state = generous_portfolio_state();
@@ -314,7 +327,7 @@ proptest! {
             margin: 1.0, // tiny margin so margin check never blocks
         };
         let registry = ProductRegistry::from_entries(&[entry]);
-        let mut rl = RiskLimits::new(config, registry).unwrap();
+        let mut rl = RiskLimits::new(config, registry, default_calendar()).unwrap();
 
         // Record an opening fill
         let open_signal = Signal::open("TEST".to_string(), qty);
@@ -369,7 +382,7 @@ proptest! {
             margin: margin_initial,
         };
         let registry = ProductRegistry::from_entries(&[entry]);
-        let mut rl = RiskLimits::new(prop_config(), registry).unwrap();
+        let mut rl = RiskLimits::new(prop_config(), registry, default_calendar()).unwrap();
 
         let signal = if use_short {
             Signal::short("TEST".to_string(), qty)
@@ -439,7 +452,7 @@ proptest! {
             margin: margin_initial,
         };
         let registry = ProductRegistry::from_entries(&[entry]);
-        let mut rl = RiskLimits::new(config, registry).unwrap();
+        let mut rl = RiskLimits::new(config, registry, default_calendar()).unwrap();
 
         // Use qty >= 2.0 so position limit (max=1) would also fail
         let test_qty = qty.max(2.0);

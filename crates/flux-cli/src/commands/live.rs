@@ -15,6 +15,7 @@ use crate::live::aggregator::{RiskConstraints, SignalAggregator};
 use crate::live::connector::ReconnectPolicy;
 use crate::live::harness::LiveHarness;
 use crate::live::loader::{build_connectors, build_connectors_from_block, load_strategies, LiveConfig};
+use crate::live::market_calendar::MarketCalendar;
 use crate::live::position::LivePositionTracker;
 use crate::live::state::load_state;
 
@@ -194,7 +195,31 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         max_positions: args.max_positions,
     };
 
-    // 4. Create harness
+    // 4. Load market calendar (optional — graceful if absent)
+    let calendar = {
+        let project_dir = args.file.parent().unwrap_or(std::path::Path::new("."));
+        let calendar_path = project_dir.join("market_calendar.toml");
+
+        if calendar_path.exists() {
+            match MarketCalendar::from_file(&calendar_path) {
+                Ok(cal) => {
+                    eprintln!("[live] loaded market calendar from {:?}", calendar_path);
+                    Some(cal)
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "failed to parse market_calendar.toml: {}",
+                        e
+                    )
+                    .into());
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    // 5. Create harness
     let mut harness = LiveHarness::new(
         strategies,
         SignalAggregator::new(constraints),
@@ -206,9 +231,10 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         None, // TODO: wire up CheckpointScheduler from args
         None, // TODO: wire up RiskLimits from config
         None, // TODO: wire up StorageBackend from account config
+        calendar.clone(),
     );
 
-    // 5. Restore state if state file exists (corruption → log warning, start fresh)
+    // 6. Restore state if state file exists (corruption → log warning, start fresh)
     if let Some(ref path) = args.state_file {
         match load_state(path) {
             Ok(Some(state)) => {
@@ -224,10 +250,10 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         }
     }
 
-    // 6. Print startup summary
+    // 7. Print startup summary
     harness.print_startup_summary();
 
-    // 7. Start connectors and run the event loop
+    // 8. Start connectors and run the event loop
     let (bar_tx, bar_rx) = mpsc::channel(256);
 
     for mut connector in connectors {

@@ -10,6 +10,7 @@ use chrono::{Datelike, DateTime, NaiveTime};
 use chrono_tz::Tz;
 use flux_runtime::Signal;
 
+use crate::live::market_calendar::MarketCalendar;
 use crate::live::product_registry::ProductRegistry;
 
 /// Configuration for the risk limits module.
@@ -140,6 +141,8 @@ pub struct RiskLimits {
     config: RiskLimitsConfig,
     /// Product registry for symbol lookups.
     registry: ProductRegistry,
+    /// Market calendar for session awareness.
+    calendar: MarketCalendar,
     /// Accumulated daily P&L (realized + unrealized at last mark).
     daily_pnl: f64,
     /// Accumulated weekly P&L (realized + unrealized at last mark).
@@ -184,7 +187,7 @@ impl RiskLimits {
     ///
     /// Calls `config.validate()` and returns an error if invalid.
     /// Initializes all accumulators to zero/clean state.
-    pub fn new(config: RiskLimitsConfig, registry: ProductRegistry) -> Result<Self, String> {
+    pub fn new(config: RiskLimitsConfig, registry: ProductRegistry, calendar: MarketCalendar) -> Result<Self, String> {
         config.validate()?;
 
         let epoch_eastern = chrono::DateTime::UNIX_EPOCH.with_timezone(&chrono_tz::US::Eastern);
@@ -194,6 +197,7 @@ impl RiskLimits {
             current_equity: config.initial_equity,
             config,
             registry,
+            calendar,
             daily_pnl: 0.0,
             weekly_pnl: 0.0,
             position_sizes: HashMap::new(),
@@ -210,25 +214,37 @@ impl RiskLimits {
 
     /// Reset daily/weekly P&L accumulators when session boundaries are crossed.
     ///
-    /// Daily reset: triggered when timestamp >= today's 09:30 ET and last_daily_reset < today's 09:30 ET.
-    /// Weekly reset: triggered when timestamp >= this week's Monday 09:30 ET and last_weekly_reset < Monday 09:30 ET.
+    /// Skips all resets on non-trading days (holidays and weekends).
+    /// Daily reset: triggered when timestamp >= today's session open and last_daily_reset < today's session open.
+    /// Weekly reset: triggered when timestamp >= this week's Monday session open and last_weekly_reset < Monday session open.
     ///
     /// Daily loss halts are auto-cleared on daily reset. Weekly/drawdown halts are NOT auto-cleared.
     pub fn maybe_reset_session(&mut self, timestamp: DateTime<Tz>) {
         let eastern = chrono_tz::US::Eastern;
-        let session_open_time = NaiveTime::from_hms_opt(9, 30, 0).unwrap();
+        let date = timestamp.with_timezone(&eastern).date_naive();
+
+        // Skip all resets on non-trading days (holidays and weekends)
+        if !self.calendar.is_trading_day(date) {
+            return;
+        }
+
+        // Use calendar-provided session open for reset boundary
+        let session_open_time = match self.calendar.session_times_for_date("CME", date) {
+            Ok((open, _close)) => open,
+            Err(_) => NaiveTime::from_hms_opt(9, 30, 0).unwrap(), // fallback
+        };
 
         // Convert timestamp to Eastern for session boundary calculations
         let ts_eastern = timestamp.with_timezone(&eastern);
 
-        // Compute today's session open (09:30 ET on the timestamp's date)
+        // Compute today's session open in the exchange timezone
         let today_open = ts_eastern
             .date_naive()
             .and_time(session_open_time)
             .and_local_timezone(eastern)
             .unwrap();
 
-        // Daily reset: if we've crossed 09:30 ET since last reset
+        // Daily reset: if we've crossed session open since last reset
         if ts_eastern >= today_open && self.last_daily_reset < today_open {
             self.daily_pnl = 0.0;
             self.realized_pnl_today = 0.0;
@@ -241,7 +257,7 @@ impl RiskLimits {
             }
         }
 
-        // Weekly reset: compute this week's Monday 09:30 ET
+        // Weekly reset: compute this week's Monday session open
         let days_since_monday = ts_eastern.weekday().num_days_from_monday();
         let monday_date =
             ts_eastern.date_naive() - chrono::Duration::days(days_since_monday as i64);
@@ -567,7 +583,19 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use chrono_tz::US::Eastern;
+    use crate::live::market_calendar::MarketCalendar;
     use crate::live::product_registry::ProductRegistry;
+
+    fn default_calendar() -> MarketCalendar {
+        let toml_str = r#"
+[[session]]
+exchange = "CME"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+"#;
+        MarketCalendar::from_toml(toml_str).unwrap()
+    }
 
     fn valid_config() -> RiskLimitsConfig {
         RiskLimitsConfig {
@@ -695,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_new_initializes_clean_state() {
-        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         assert_eq!(rl.daily_pnl, 0.0);
         assert_eq!(rl.weekly_pnl, 0.0);
         assert_eq!(rl.equity_peak, 500_000.0);
@@ -713,14 +741,14 @@ mod tests {
     fn test_new_rejects_invalid_config() {
         let mut config = valid_config();
         config.max_daily_loss = 100.0;
-        assert!(RiskLimits::new(config, empty_registry()).is_err());
+        assert!(RiskLimits::new(config, empty_registry(), default_calendar()).is_err());
     }
 
     // --- Task 2.2: check_signal tests ---
 
     #[test]
     fn test_close_signals_pass_when_halted() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -16_000.0,
@@ -742,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_open_signals_rejected_when_halted() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -16_000.0,
@@ -781,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_position_limit_rejection() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         // Set current position to 8 for AAPL (limit is 10)
         rl.position_sizes.insert("AAPL".to_string(), 8);
 
@@ -807,7 +835,7 @@ mod tests {
 
     #[test]
     fn test_notional_limit_rejection() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         // Set total notional close to limit (3_000_000)
         rl.total_notional = 2_900_000.0;
 
@@ -834,7 +862,7 @@ mod tests {
 
     #[test]
     fn test_allows_signal_within_limits() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
 
         let mut state = empty_portfolio_state();
         state.prices.insert("AAPL".to_string(), 150.0);
@@ -848,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_is_non_blocking() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
 
         let mut state = empty_portfolio_state();
         // Set up 4 long positions (threshold is 4)
@@ -904,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_below_threshold() {
-        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
 
         let mut state = empty_portfolio_state();
         // Only 3 long positions (threshold is 4) → no warning
@@ -917,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_at_threshold() {
-        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
 
         let mut state = empty_portfolio_state();
         // Exactly 4 long positions (threshold is 4) → warning
@@ -938,7 +966,7 @@ mod tests {
 
     #[test]
     fn test_correlation_warning_ignores_short_positions() {
-        let rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
 
         let mut state = empty_portfolio_state();
         // 3 long + 1 short → only 3 long → no warning
@@ -954,7 +982,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_no_breach() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         // Small position, no breach
         rl.total_notional = 10_000.0;
         let mut state = empty_portfolio_state();
@@ -970,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_daily_loss_breach() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         // Simulate a big unrealized loss
         rl.total_notional = 1_000_000.0; // cost basis
         rl.realized_pnl_today = -5_000.0; // already lost 5k realized today
@@ -995,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_drawdown_breach() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         // Set equity peak higher (like it grew to 550k then fell)
         rl.equity_peak = 550_000.0;
         // We need drawdown >= 8% without tripping daily loss (-15k) first.
@@ -1027,7 +1055,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_equity_peak_only_increases() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.total_notional = 10_000.0;
 
         // First mark: profit
@@ -1046,7 +1074,7 @@ mod tests {
 
     #[test]
     fn test_mark_to_market_halted_returns_none() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -20_000.0,
@@ -1063,7 +1091,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_crosses_session_boundary() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.daily_pnl = -5_000.0;
         rl.realized_pnl_today = -5_000.0;
         // last_daily_reset is at UNIX_EPOCH, so any 09:30 ET should trigger
@@ -1079,7 +1107,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_clears_daily_halt() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::DailyLoss {
             pnl: -16_000.0,
@@ -1095,7 +1123,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_does_not_clear_weekly_halt() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::WeeklyLoss {
             pnl: -35_000.0,
@@ -1114,7 +1142,7 @@ mod tests {
 
     #[test]
     fn test_weekly_reset_on_monday() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.weekly_pnl = -10_000.0;
         rl.realized_pnl_week = -10_000.0;
 
@@ -1128,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_no_reset_before_session_open() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.daily_pnl = -5_000.0;
         rl.realized_pnl_today = -5_000.0;
         // Set last_daily_reset to yesterday's session open so we don't trigger from EPOCH
@@ -1146,7 +1174,7 @@ mod tests {
 
     #[test]
     fn test_daily_reset_does_not_clear_drawdown_halt() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.halted = true;
         rl.halt_reason = Some(HaltReason::MaxDrawdown {
             drawdown_pct: 0.09,
@@ -1166,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_weekly_reset_midweek_does_not_reset_weekly() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.weekly_pnl = -10_000.0;
         rl.realized_pnl_week = -10_000.0;
         // Set last_weekly_reset to this week's Monday open (already triggered this week)
@@ -1184,7 +1212,7 @@ mod tests {
 
     #[test]
     fn test_monday_resets_both_daily_and_weekly() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.daily_pnl = -5_000.0;
         rl.realized_pnl_today = -5_000.0;
         rl.weekly_pnl = -20_000.0;
@@ -1209,7 +1237,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_open_increases_position() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
 
         let signal = Signal::open("ES".to_string(), 3.0);
         rl.record_fill(&signal, 5000.0, 3.0, 0.0);
@@ -1220,7 +1248,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_short_increases_position() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
 
         let signal = Signal::short("NQ".to_string(), 2.0);
         rl.record_fill(&signal, 18_000.0, 2.0, 0.0);
@@ -1231,7 +1259,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_decreases_position() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.position_sizes.insert("ES".to_string(), 5);
         rl.total_notional = 25_000.0;
 
@@ -1247,7 +1275,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_full_position() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.position_sizes.insert("AAPL".to_string(), 10);
         rl.total_notional = 15_000.0;
 
@@ -1263,7 +1291,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_accumulates_realized_pnl() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.position_sizes.insert("ES".to_string(), 5);
         rl.total_notional = 25_000.0;
 
@@ -1282,7 +1310,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_open_accumulates_positions() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
 
         // First open: 3 contracts
         let signal = Signal::open("ES".to_string(), 3.0);
@@ -1298,7 +1326,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_clamps_notional_to_zero() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.position_sizes.insert("AAPL".to_string(), 2);
         rl.total_notional = 100.0; // Very small notional
 
@@ -1312,7 +1340,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_close_more_than_position() {
-        let mut rl = RiskLimits::new(valid_config(), empty_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
         rl.position_sizes.insert("AAPL".to_string(), 3);
         rl.total_notional = 3000.0;
 
@@ -1327,7 +1355,7 @@ mod tests {
 
     #[test]
     fn test_open_unknown_symbol_rejected() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let state = empty_portfolio_state();
 
         let signal = Signal::open("UNKNOWN".to_string(), 1.0);
@@ -1350,7 +1378,7 @@ mod tests {
 
     #[test]
     fn test_short_unknown_symbol_rejected() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let state = empty_portfolio_state();
 
         let signal = Signal::short("NOPE".to_string(), 2.0);
@@ -1373,7 +1401,7 @@ mod tests {
 
     #[test]
     fn test_unknown_symbol_alert_event_emitted() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let state = empty_portfolio_state();
 
         let signal = Signal::open("XYZ".to_string(), 1.0);
@@ -1390,7 +1418,7 @@ mod tests {
 
     #[test]
     fn test_known_symbols_pass_unknown_check() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let mut state = empty_portfolio_state();
         state.prices.insert("AAPL".to_string(), 150.0);
         state.prices.insert("ES".to_string(), 5000.0);
@@ -1410,7 +1438,7 @@ mod tests {
 
     #[test]
     fn test_open_exceeding_margin_rejected() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let mut state = empty_portfolio_state();
         state.available_margin = 500.0; // Only $500 available
         state.prices.insert("AAPL".to_string(), 150.0);
@@ -1435,7 +1463,7 @@ mod tests {
 
     #[test]
     fn test_short_exceeding_margin_rejected() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let mut state = empty_portfolio_state();
         state.available_margin = 10_000.0; // $10k available
         state.prices.insert("ES".to_string(), 5000.0);
@@ -1460,7 +1488,7 @@ mod tests {
 
     #[test]
     fn test_signal_within_margin_passes() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let mut state = empty_portfolio_state();
         state.available_margin = 5000.0; // $5k available
         state.prices.insert("AAPL".to_string(), 150.0);
@@ -1474,7 +1502,7 @@ mod tests {
 
     #[test]
     fn test_margin_alert_contains_correct_values() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let mut state = empty_portfolio_state();
         state.available_margin = 2500.0;
         state.prices.insert("MSFT".to_string(), 400.0);
@@ -1502,7 +1530,7 @@ mod tests {
 
     #[test]
     fn test_notional_uses_multiplier() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
         let mut state = empty_portfolio_state();
         state.prices.insert("ES".to_string(), 5000.0);
 
@@ -1530,7 +1558,7 @@ mod tests {
 
     #[test]
     fn test_record_fill_updates_notional_with_multiplier() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
 
         // ES multiplier = 50.0
         let signal = Signal::open("ES".to_string(), 2.0);
@@ -1551,7 +1579,7 @@ mod tests {
 
     #[test]
     fn test_check_ordering_margin_before_position() {
-        let mut rl = RiskLimits::new(valid_config(), test_registry()).unwrap();
+        let mut rl = RiskLimits::new(valid_config(), test_registry(), default_calendar()).unwrap();
 
         // Set position at the limit for AAPL (max_position_per_product = 10)
         rl.position_sizes.insert("AAPL".to_string(), 10);
@@ -1577,5 +1605,108 @@ mod tests {
                 },
             }
         );
+    }
+
+    // --- Task 2.3: Calendar-aware session reset tests ---
+
+    /// Calendar with 2026-01-01 as a holiday (New Year's Day).
+    fn calendar_with_holiday() -> MarketCalendar {
+        let toml_str = r#"
+[[session]]
+exchange = "CME"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+
+[holidays_2026]
+dates = ["2026-01-01"]
+"#;
+        MarketCalendar::from_toml(toml_str).unwrap()
+    }
+
+    /// Calendar with CME open at a custom time.
+    fn calendar_with_open(open_time: &str) -> MarketCalendar {
+        let toml_str = format!(
+            r#"
+[[session]]
+exchange = "CME"
+open = "{}"
+close = "16:00"
+timezone = "US/Eastern"
+"#,
+            open_time
+        );
+        MarketCalendar::from_toml(&toml_str).unwrap()
+    }
+
+    #[test]
+    fn test_maybe_reset_session_holiday_no_reset() {
+        let mut rl =
+            RiskLimits::new(valid_config(), empty_registry(), calendar_with_holiday()).unwrap();
+        rl.daily_pnl = -5_000.0;
+        rl.realized_pnl_today = -5_000.0;
+
+        // 2026-01-01 is a holiday (Thursday) — no reset should occur
+        let ts = Eastern.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
+        rl.maybe_reset_session(ts.with_timezone(&chrono_tz::US::Eastern));
+
+        assert_eq!(rl.daily_pnl, -5_000.0);
+        assert_eq!(rl.realized_pnl_today, -5_000.0);
+    }
+
+    #[test]
+    fn test_maybe_reset_session_weekend_no_reset() {
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
+        rl.daily_pnl = -3_000.0;
+        rl.realized_pnl_today = -3_000.0;
+        rl.weekly_pnl = -3_000.0;
+        rl.realized_pnl_week = -3_000.0;
+
+        // 2026-01-03 is a Saturday — no reset should occur
+        let ts = Eastern.with_ymd_and_hms(2026, 1, 3, 10, 0, 0).unwrap();
+        rl.maybe_reset_session(ts.with_timezone(&chrono_tz::US::Eastern));
+
+        assert_eq!(rl.daily_pnl, -3_000.0);
+        assert_eq!(rl.realized_pnl_today, -3_000.0);
+        assert_eq!(rl.weekly_pnl, -3_000.0);
+        assert_eq!(rl.realized_pnl_week, -3_000.0);
+    }
+
+    #[test]
+    fn test_maybe_reset_session_trading_day_resets() {
+        let mut rl = RiskLimits::new(valid_config(), empty_registry(), default_calendar()).unwrap();
+        rl.daily_pnl = -5_000.0;
+        rl.realized_pnl_today = -5_000.0;
+
+        // 2026-01-05 is a Monday (trading day), 10:00 ET is after session open (09:30)
+        let ts = Eastern.with_ymd_and_hms(2026, 1, 5, 10, 0, 0).unwrap();
+        rl.maybe_reset_session(ts.with_timezone(&chrono_tz::US::Eastern));
+
+        assert_eq!(rl.daily_pnl, 0.0);
+        assert_eq!(rl.realized_pnl_today, 0.0);
+    }
+
+    #[test]
+    fn test_maybe_reset_session_uses_calendar_open_time() {
+        // Calendar with CME open at 10:00 instead of 09:30
+        let mut rl =
+            RiskLimits::new(valid_config(), empty_registry(), calendar_with_open("10:00")).unwrap();
+        rl.daily_pnl = -5_000.0;
+        rl.realized_pnl_today = -5_000.0;
+
+        // 2026-01-05 is a Monday (trading day).
+        // At 09:45 ET — before the calendar open of 10:00, no reset should occur
+        let ts_before = Eastern.with_ymd_and_hms(2026, 1, 5, 9, 45, 0).unwrap();
+        rl.maybe_reset_session(ts_before.with_timezone(&chrono_tz::US::Eastern));
+
+        assert_eq!(rl.daily_pnl, -5_000.0);
+        assert_eq!(rl.realized_pnl_today, -5_000.0);
+
+        // At 10:15 ET — after the calendar open of 10:00, reset should occur
+        let ts_after = Eastern.with_ymd_and_hms(2026, 1, 5, 10, 15, 0).unwrap();
+        rl.maybe_reset_session(ts_after.with_timezone(&chrono_tz::US::Eastern));
+
+        assert_eq!(rl.daily_pnl, 0.0);
+        assert_eq!(rl.realized_pnl_today, 0.0);
     }
 }

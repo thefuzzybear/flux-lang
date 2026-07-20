@@ -70,6 +70,7 @@ fn make_harness(strategies: Vec<StrategyModule>) -> LiveHarness {
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -243,7 +244,8 @@ proptest! {
                 match sig {
                     flux_runtime::Signal::Open { .. } => backtest_in_position = true,
                     flux_runtime::Signal::Close { .. } => backtest_in_position = false,
-                    flux_runtime::Signal::CloseQty { .. } => {}
+                    flux_runtime::Signal::CloseQty { .. } => {},
+                    flux_runtime::Signal::Short { .. } => {},
                 }
             }
             backtest_signals.push(signals);

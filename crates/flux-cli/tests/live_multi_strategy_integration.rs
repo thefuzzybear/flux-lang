@@ -121,6 +121,7 @@ async fn two_strategies_maintain_independent_state() {
         None,
         None,
         None,
+        None,
     );
 
     // Feed 3 bars and verify state evolves independently
@@ -175,6 +176,7 @@ async fn two_strategies_generate_signals_independently() {
         None,
         None,
         None,
+        None,
     );
 
     // Bar where close > open BUT close < high * 0.95
@@ -210,6 +212,7 @@ async fn both_strategies_signal_and_fills_are_attributed_correctly() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(60),
+        None,
         None,
         None,
         None,
@@ -254,6 +257,7 @@ async fn strategies_share_unified_position_for_in_position_derivation() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(60),
+        None,
         None,
         None,
         None,
@@ -303,6 +307,7 @@ async fn harness_runs_via_channel_with_multiple_strategies() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(60),
+        None,
         None,
         None,
         None,
@@ -374,6 +379,7 @@ async fn strategies_on_different_symbols_dont_interfere() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(60),
+        None,
         None,
         None,
         None,

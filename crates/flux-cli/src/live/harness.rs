@@ -17,6 +17,7 @@ use super::checkpoint::CheckpointScheduler;
 use super::connector::{ConnectorState, LiveBar, ReconnectPolicy};
 use super::fill_logger::{FillLogger, FillRecord};
 use super::loader::StrategyModule;
+use super::market_calendar::MarketCalendar;
 use super::position::LivePositionTracker;
 use super::risk_limits::{PortfolioState, RiskDecision, RiskLimits};
 use super::state::{
@@ -69,6 +70,11 @@ pub struct LiveHarness {
     /// Uses `Arc` to allow cloning into spawned tokio tasks for fire-and-forget
     /// async writes from within the synchronous `dispatch_bar` method.
     pub storage: Option<Arc<dyn StorageBackend>>,
+    /// Optional market calendar for trading session awareness.
+    ///
+    /// When present, enables session-aware behavior (trading day checks,
+    /// half-day detection, session time queries per exchange).
+    pub calendar: Option<MarketCalendar>,
 }
 
 impl LiveHarness {
@@ -84,6 +90,7 @@ impl LiveHarness {
         checkpoint_scheduler: Option<CheckpointScheduler>,
         risk_limits: Option<RiskLimits>,
         storage: Option<Arc<dyn StorageBackend>>,
+        calendar: Option<MarketCalendar>,
     ) -> Self {
         Self {
             strategies,
@@ -96,6 +103,7 @@ impl LiveHarness {
             checkpoint_scheduler,
             risk_limits,
             storage,
+            calendar,
         }
     }
 
@@ -158,6 +166,19 @@ impl LiveHarness {
         }
         eprintln!();
 
+        // Calendar status
+        if let Some(ref cal) = self.calendar {
+            let exchange_names = cal.exchanges();
+            eprintln!(
+                "Calendar: enabled ({} exchanges: {})",
+                exchange_names.len(),
+                exchange_names.join(", ")
+            );
+        } else {
+            eprintln!("Calendar: disabled (no calendar file)");
+        }
+        eprintln!();
+
         eprintln!("Listening for bars...");
         eprintln!();
     }
@@ -180,6 +201,18 @@ impl LiveHarness {
     /// Strategy runtime errors (including panics) are caught, logged,
     /// and the harness continues processing remaining strategies (requirement 2.8).
     pub fn dispatch_bar(&mut self, live_bar: &LiveBar) {
+        // Calendar gate: skip all processing on non-trading days (requirement 7.1, 7.2, 7.3)
+        if let Some(ref calendar) = self.calendar {
+            let today = live_bar
+                .received_at
+                .with_timezone(&chrono_tz::US::Eastern)
+                .date_naive();
+            if !calendar.is_trading_day(today) {
+                eprintln!("[harness] market holiday — idle, skipping bar");
+                return;
+            }
+        }
+
         let bar = &live_bar.bar;
         let mut all_signals: Vec<(String, Signal)> = Vec::new();
 
@@ -514,6 +547,12 @@ impl LiveHarness {
                 });
             }
         }
+
+        // Half-day / session close flatten check
+        if self.should_flatten_at_close() {
+            eprintln!("[harness] session close reached — flattening all positions");
+            self.flatten_all_positions(live_bar.bar.close);
+        }
     }
 
     /// Build a `PortfolioState` from the current tracker state and bar prices.
@@ -548,6 +587,29 @@ impl LiveHarness {
             timestamp,
             available_margin: f64::MAX,
         }
+    }
+
+    /// Check if the current time has reached the session close time,
+    /// accounting for half-day early close.
+    ///
+    /// Returns `true` when the calendar indicates we are at or past the
+    /// session close (either early close on half-days or normal close).
+    /// Returns `false` if no calendar is configured (backward-compatible).
+    fn should_flatten_at_close(&self) -> bool {
+        if let Some(ref calendar) = self.calendar {
+            let now = chrono::Utc::now().with_timezone(&chrono_tz::US::Eastern);
+            let today = now.date_naive();
+
+            if let Some(early_close) = calendar.half_day_close(today) {
+                return now.time() >= early_close;
+            }
+
+            // Normal close check using calendar session times
+            if let Ok((_open, close)) = calendar.session_times_for_date("CME", today) {
+                return now.time() >= close;
+            }
+        }
+        false
     }
 
     /// Flatten (close) all open positions at the given price.
@@ -1227,6 +1289,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1271,6 +1334,7 @@ mod tests {
             Some(PathBuf::from("/tmp/state.json")),
             ReconnectPolicy::default(),
             Duration::from_secs(60),
+            None,
             None,
             None,
             None,
@@ -1384,6 +1448,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         harness.print_startup_summary();
     }
@@ -1453,6 +1518,7 @@ mod tests {
             ReconnectPolicy::default(),
             Duration::from_secs(30),
             Some(logger),
+            None,
             None,
             None,
             None,
@@ -1532,6 +1598,7 @@ mod tests {
             Some(scheduler),
             None,
             None,
+            None,
         );
 
         // State file should not exist yet
@@ -1567,6 +1634,7 @@ mod tests {
             Some(state_path.clone()),
             ReconnectPolicy::default(),
             Duration::from_secs(30),
+            None,
             None,
             None,
             None,
@@ -1638,6 +1706,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         harness.restore_state(&state);
@@ -1690,6 +1759,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let state = harness.build_harness_state();
@@ -1716,6 +1786,7 @@ mod tests {
             Duration::from_secs(30),
             None,
             Some(scheduler),
+            None,
             None,
             None,
         );
@@ -1814,6 +1885,7 @@ mod tests {
             None,
             None,
             Some(Arc::new(mock.clone())),
+            None,
         )
     }
 
@@ -1937,6 +2009,7 @@ mod tests {
             Some(scheduler),
             None,
             Some(Arc::new(mock.clone())),
+            None,
         );
 
         // Dispatch a bar to trigger checkpoint
@@ -1989,5 +2062,167 @@ mod tests {
         harness.dispatch_bar(&bar);
 
         // No crash = success
+    }
+
+    // ---------------------------------------------------------------
+    // Calendar integration tests (Task 4.4)
+    // ---------------------------------------------------------------
+
+    use super::MarketCalendar;
+
+    /// Helper to create a test calendar with known holidays and half-days.
+    fn make_test_calendar() -> MarketCalendar {
+        let toml_str = r#"
+[[session]]
+exchange = "CME"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+
+[holidays_2026]
+dates = ["2026-01-01", "2026-12-25"]
+
+[half_days_2026]
+dates = ["2026-11-27"]
+early_close = "13:00"
+"#;
+        MarketCalendar::from_toml(toml_str).unwrap()
+    }
+
+    /// Helper to create a LiveBar with a specific received_at timestamp.
+    fn make_live_bar_at(
+        symbol: &str,
+        close: f64,
+        open: f64,
+        received_at: chrono::DateTime<chrono::Utc>,
+    ) -> LiveBar {
+        LiveBar {
+            bar: BarContext {
+                close,
+                open,
+                high: close + 1.0,
+                low: open - 1.0,
+                volume: 1000.0,
+                symbol: symbol.to_string(),
+                in_position: false,
+            },
+            connector_id: "test-connector".to_string(),
+            received_at,
+        }
+    }
+
+    /// Helper to create a harness with a calendar configured.
+    fn make_harness_with_calendar(calendar: MarketCalendar) -> LiveHarness {
+        LiveHarness::new(
+            vec![],
+            SignalAggregator::new(RiskConstraints::default()),
+            LivePositionTracker::new(10_000.0),
+            None,
+            ReconnectPolicy::default(),
+            Duration::from_secs(30),
+            None,
+            None,
+            None,
+            None,
+            Some(calendar),
+        )
+    }
+
+    #[test]
+    fn dispatch_bar_is_noop_on_holidays() {
+        let calendar = make_test_calendar();
+        let mut harness = make_harness_with_calendar(calendar);
+
+        // Open a position so we can verify no mark-to-market happens
+        let signal = Signal::open("AAPL".to_string(), 100.0);
+        harness.tracker.process_signal(&signal, 150.0, 0, "manual");
+
+        // Create a bar with received_at on a holiday (2026-01-01, a Thursday)
+        // Use 14:00 ET = 19:00 UTC on that day
+        let holiday_ts = chrono::NaiveDate::from_ymd_opt(2026, 1, 1)
+            .unwrap()
+            .and_hms_opt(19, 0, 0)
+            .unwrap()
+            .and_utc();
+        let bar = make_live_bar_at("AAPL", 160.0, 155.0, holiday_ts);
+
+        // Dispatch — should be a no-op (holiday gate skips all processing)
+        harness.dispatch_bar(&bar);
+
+        // Position's unrealized P&L should remain at 0 since mark-to-market
+        // was NOT applied (dispatch_bar returned early)
+        let position = harness.tracker.inner.position("AAPL").unwrap();
+        assert!(
+            (position.unrealized_pnl - 0.0).abs() < 0.01,
+            "expected no mark-to-market on holiday, got unrealized_pnl={}",
+            position.unrealized_pnl
+        );
+    }
+
+    #[test]
+    fn dispatch_bar_processes_normally_on_trading_days() {
+        let calendar = make_test_calendar();
+        let mut harness = make_harness_with_calendar(calendar);
+
+        // Open a position so we can verify mark-to-market happens
+        let signal = Signal::open("AAPL".to_string(), 100.0);
+        harness.tracker.process_signal(&signal, 150.0, 0, "manual");
+
+        // Create a bar with received_at on a normal trading day
+        // 2026-01-05 is a Monday (not a holiday)
+        // Use 14:00 ET = 19:00 UTC
+        let trading_day_ts = chrono::NaiveDate::from_ymd_opt(2026, 1, 5)
+            .unwrap()
+            .and_hms_opt(19, 0, 0)
+            .unwrap()
+            .and_utc();
+        let bar = make_live_bar_at("AAPL", 160.0, 155.0, trading_day_ts);
+
+        // Dispatch — should process normally
+        harness.dispatch_bar(&bar);
+
+        // Position should reflect mark-to-market at the new price
+        let position = harness.tracker.inner.position("AAPL").unwrap();
+        // unrealized_pnl = (160 - 150) * 100 = 1000
+        assert!(
+            (position.unrealized_pnl - 1000.0).abs() < 0.01,
+            "expected mark-to-market on trading day, got unrealized_pnl={}",
+            position.unrealized_pnl
+        );
+    }
+
+    #[test]
+    fn should_flatten_at_close_returns_false_when_calendar_is_none() {
+        let harness = make_empty_harness();
+        // With calendar=None, should_flatten_at_close always returns false
+        assert!(harness.calendar.is_none());
+        assert!(
+            !harness.should_flatten_at_close(),
+            "should_flatten_at_close must return false when calendar is None"
+        );
+    }
+
+    #[test]
+    fn harness_works_normally_when_calendar_is_none() {
+        // Backward compatibility: calendar=None means no calendar gate
+        let mut harness = make_empty_harness();
+        assert!(harness.calendar.is_none());
+
+        // Open a position
+        let signal = Signal::open("AAPL".to_string(), 100.0);
+        harness.tracker.process_signal(&signal, 150.0, 0, "manual");
+
+        // Dispatch a bar — should work regardless of what day/time it is
+        let bar = make_live_bar("AAPL", 160.0, 155.0);
+        harness.dispatch_bar(&bar);
+
+        // Position should be marked to market normally
+        let position = harness.tracker.inner.position("AAPL").unwrap();
+        // unrealized_pnl = (160 - 150) * 100 = 1000
+        assert!(
+            (position.unrealized_pnl - 1000.0).abs() < 0.01,
+            "harness should work normally without a calendar, got unrealized_pnl={}",
+            position.unrealized_pnl
+        );
     }
 }
