@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7a029e7ee076b60262d3a12b2d48f16e11286e37cf33b68cf776f1a4e223c2e6 # shrinks to state = HarnessState { version: 2, positions: PositionState { initial_capital: 10000.0, positions: [], total_realized_pnl: 0.0, last_prices: [] }, strategy_states: [], fill_count: 0, checkpoint_timestamp: "2024-06-15T14:30:00.000Z", bars_processed: 0 }, positions = [("AA", 1.0, 112.03158949343297)]
+cc 655e2f71d2945b9d09c8107070a928d6b0a01352beb1f5b365ed943de6fe5e4e # shrinks to state = HarnessState { version: 2, positions: PositionState { initial_capital: 10000.0, positions: [], total_realized_pnl: 0.0, last_prices: [] }, strategy_states: [], fill_count: 0, checkpoint_timestamp: "2024-06-15T14:30:00.000Z", bars_processed: 0 }, positions = [("AA", 1736.2845694150637, 0.01)]
+cc 48097fbfaef318a8719200f0e502840bf60b1778a8f6394990cba5c40bb1e215 # shrinks to snapshot = EquitySnapshot { timestamp: 1970-01-01T00:00:00Z, equity: 0.01, equity_peak: 0.01, daily_pnl: 9145.029760965223, weekly_pnl: 0.0, drawdown_pct: 0.0, open_positions: 0 }

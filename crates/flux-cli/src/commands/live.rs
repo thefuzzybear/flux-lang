@@ -95,6 +95,64 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
                 let msgs: Vec<String> = errs.iter().map(|e| format!("  - {:?}", e)).collect();
                 format!("account.flux validation error:\n{}", msgs.join("\n"))
             })?;
+
+        // Construct storage backend based on account manifest config
+        let _storage: Option<Box<dyn crate::live::storage::StorageBackend>> = {
+            if !config.database.url.is_empty() && !config.database.schema.is_empty() {
+                // PostgreSQL configured — attempt connection
+                match crate::live::storage::postgres::PostgresBackend::new(
+                    &config.database.url,
+                    &config.database.schema,
+                )
+                .await
+                {
+                    Ok(pg) => {
+                        eprintln!(
+                            "[storage] connected to PostgreSQL (schema: {})",
+                            config.database.schema
+                        );
+                        Some(Box::new(pg))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[storage] PostgreSQL connection failed: {} — falling back to file backend",
+                            e
+                        );
+                        let state_dir = args.file.join(".state");
+                        match crate::live::storage::file::FileBackend::new(state_dir.clone()) {
+                            Ok(fb) => {
+                                eprintln!(
+                                    "[storage] using file backend at {}",
+                                    state_dir.display()
+                                );
+                                Some(Box::new(fb))
+                            }
+                            Err(e) => {
+                                eprintln!("[storage] file backend creation failed: {}", e);
+                                None
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No database configured — use file backend
+                let state_dir = args.file.join(".state");
+                match crate::live::storage::file::FileBackend::new(state_dir.clone()) {
+                    Ok(fb) => {
+                        eprintln!(
+                            "[storage] using file backend at {}",
+                            state_dir.display()
+                        );
+                        Some(Box::new(fb))
+                    }
+                    Err(e) => {
+                        eprintln!("[storage] file backend creation failed: {}", e);
+                        None
+                    }
+                }
+            }
+        };
+
         // AccountConfig validated — hand off to runtime (future spec)
         todo!("AccountRuntime boot from AccountConfig")
     }
@@ -147,6 +205,7 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         None, // TODO: wire up FillLogger from args
         None, // TODO: wire up CheckpointScheduler from args
         None, // TODO: wire up RiskLimits from config
+        None, // TODO: wire up StorageBackend from account config
     );
 
     // 5. Restore state if state file exists (corruption → log warning, start fresh)
