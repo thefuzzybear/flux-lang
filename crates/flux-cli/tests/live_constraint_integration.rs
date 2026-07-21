@@ -102,6 +102,7 @@ async fn constraint_rejects_open_exceeding_max_position_size() {
         None,
         None,
         None,
+        None,
     );
 
     // 3. Send a bar via mpsc channel where the strategy generates OPEN(AAPL, 200.0)
@@ -167,6 +168,7 @@ async fn constraint_approves_open_within_max_position_size() {
         None,
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
         None,
         None,
         None,

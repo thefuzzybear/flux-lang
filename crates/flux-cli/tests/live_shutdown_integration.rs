@@ -62,6 +62,7 @@ async fn graceful_shutdown_persists_state_file() {
         None,
         None,
         None,
+        None,
     );
 
     // Open positions in the tracker
@@ -139,6 +140,7 @@ async fn shutdown_after_channel_close_persists_state() {
         None,
         None,
         None,
+        None,
     );
 
     // Open a position before running
@@ -201,6 +203,7 @@ async fn graceful_shutdown_without_state_file_does_not_crash() {
         None,
         None,
         None,
+        None,
     );
 
     // Open a position
@@ -228,6 +231,7 @@ async fn state_file_contains_last_prices() {
         Some(state_path.clone()),
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
         None,
         None,
         None,
@@ -281,6 +285,7 @@ async fn state_roundtrip_positions_match_after_shutdown() {
         Some(state_path.clone()),
         ReconnectPolicy::default(),
         Duration::from_secs(30),
+        None,
         None,
         None,
         None,

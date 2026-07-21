@@ -71,6 +71,7 @@ fn make_harness(strategies: Vec<StrategyModule>) -> LiveHarness {
         None,
         None,
         None,
+        None,
     )
 }
 

@@ -24,3 +24,4 @@ pub mod manifest_format;
 pub mod product_registry;
 pub mod storage;
 pub mod market_calendar;
+pub mod notifications;

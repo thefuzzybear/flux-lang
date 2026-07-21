@@ -19,7 +19,8 @@ use super::fill_logger::{FillLogger, FillRecord};
 use super::loader::StrategyModule;
 use super::market_calendar::MarketCalendar;
 use super::position::LivePositionTracker;
-use super::risk_limits::{PortfolioState, RiskDecision, RiskLimits};
+use super::notifications::NotificationDispatcher;
+use super::risk_limits::{AlertEvent, PortfolioState, RiskDecision, RiskLimits};
 use super::state::{
     save_state, HarnessState, PositionState, SerializedPosition, SerializedValue, StrategyState,
     STATE_VERSION,
@@ -75,6 +76,11 @@ pub struct LiveHarness {
     /// When present, enables session-aware behavior (trading day checks,
     /// half-day detection, session time queries per exchange).
     pub calendar: Option<MarketCalendar>,
+    /// Optional notification dispatcher for routing risk alerts to sinks.
+    ///
+    /// Uses `Arc` to allow cloning into spawned tokio tasks for fire-and-forget
+    /// async dispatch from within the synchronous `dispatch_bar` method.
+    pub notifications: Option<Arc<NotificationDispatcher>>,
 }
 
 impl LiveHarness {
@@ -91,6 +97,7 @@ impl LiveHarness {
         risk_limits: Option<RiskLimits>,
         storage: Option<Arc<dyn StorageBackend>>,
         calendar: Option<MarketCalendar>,
+        notifications: Option<Arc<NotificationDispatcher>>,
     ) -> Self {
         Self {
             strategies,
@@ -104,6 +111,7 @@ impl LiveHarness {
             risk_limits,
             storage,
             calendar,
+            notifications,
         }
     }
 
@@ -263,6 +271,7 @@ impl LiveHarness {
             let portfolio_state = self.build_portfolio_state(bar);
             let mut allowed: Vec<(String, Signal)> = Vec::new();
             let mut flatten_triggered = false;
+            let mut all_alert_events: Vec<AlertEvent> = Vec::new();
 
             for (strategy_name, signal) in &all_signals {
                 let (decision, alerts) = self
@@ -275,6 +284,7 @@ impl LiveHarness {
                 for alert in &alerts {
                     eprintln!("  [RISK ALERT] {:?}", alert);
                 }
+                all_alert_events.extend(alerts);
 
                 match decision {
                     RiskDecision::Allow => {
@@ -346,6 +356,17 @@ impl LiveHarness {
                         flatten_triggered = true;
                         break;
                     }
+                }
+            }
+
+            // Dispatch collected check_signal alerts to notification pipeline
+            if !all_alert_events.is_empty() {
+                if let Some(ref notifier) = self.notifications {
+                    let n = notifier.clone();
+                    let events = all_alert_events;
+                    tokio::spawn(async move {
+                        n.dispatch(events).await;
+                    });
                 }
             }
 
@@ -488,6 +509,17 @@ impl LiveHarness {
 
             for alert in &mtm_alerts {
                 eprintln!("  [RISK ALERT] {:?}", alert);
+            }
+
+            // Collect mtm alerts and dispatch to notification pipeline
+            if !mtm_alerts.is_empty() {
+                if let Some(ref notifier) = self.notifications {
+                    let n = notifier.clone();
+                    let events = mtm_alerts.clone();
+                    tokio::spawn(async move {
+                        n.dispatch(events).await;
+                    });
+                }
             }
 
             if let Some(RiskDecision::FlattenAll { reason }) = mtm_decision {
@@ -1290,6 +1322,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1334,6 +1367,7 @@ mod tests {
             Some(PathBuf::from("/tmp/state.json")),
             ReconnectPolicy::default(),
             Duration::from_secs(60),
+            None,
             None,
             None,
             None,
@@ -1449,6 +1483,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         harness.print_startup_summary();
     }
@@ -1518,6 +1553,7 @@ mod tests {
             ReconnectPolicy::default(),
             Duration::from_secs(30),
             Some(logger),
+            None,
             None,
             None,
             None,
@@ -1599,6 +1635,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         // State file should not exist yet
@@ -1634,6 +1671,7 @@ mod tests {
             Some(state_path.clone()),
             ReconnectPolicy::default(),
             Duration::from_secs(30),
+            None,
             None,
             None,
             None,
@@ -1707,6 +1745,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         harness.restore_state(&state);
@@ -1760,6 +1799,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let state = harness.build_harness_state();
@@ -1786,6 +1826,7 @@ mod tests {
             Duration::from_secs(30),
             None,
             Some(scheduler),
+            None,
             None,
             None,
             None,
@@ -1885,6 +1926,7 @@ mod tests {
             None,
             None,
             Some(Arc::new(mock.clone())),
+            None,
             None,
         )
     }
@@ -2010,6 +2052,7 @@ mod tests {
             None,
             Some(Arc::new(mock.clone())),
             None,
+            None,
         );
 
         // Dispatch a bar to trigger checkpoint
@@ -2125,6 +2168,7 @@ early_close = "13:00"
             None,
             None,
             Some(calendar),
+            None,
         )
     }
 
