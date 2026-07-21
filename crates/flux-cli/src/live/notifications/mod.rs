@@ -94,6 +94,9 @@ impl Alert {
                             drawdown_pct, limit
                         )
                     }
+                    HaltReason::BrokerDisconnectionTimeout => {
+                        "BrokerDisconnectionTimeout".to_string()
+                    }
                 };
                 (
                     Severity::Critical,
@@ -152,6 +155,33 @@ impl Alert {
                     symbols.join(", ")
                 ),
             ),
+            AlertEvent::OrderRejected { order_id, reason } => (
+                Severity::High,
+                "order_rejected",
+                format!("order_rejected: order_id={}, reason={}", order_id, reason),
+                format!("order_id={}, reason={}", order_id, reason),
+            ),
+            AlertEvent::BrokerDisconnected { duration_secs } => (
+                Severity::Critical,
+                "broker_disconnected",
+                format!(
+                    "broker_disconnected: duration_secs={}",
+                    duration_secs
+                ),
+                format!("duration_secs={}", duration_secs),
+            ),
+            AlertEvent::PositionMismatch { symbol, local_qty, broker_qty } => (
+                Severity::High,
+                "position_mismatch",
+                format!(
+                    "position_mismatch: symbol={}, local_qty={:.2}, broker_qty={:.2}",
+                    symbol, local_qty, broker_qty
+                ),
+                format!(
+                    "symbol={}, local_qty={:.2}, broker_qty={:.2}",
+                    symbol, local_qty, broker_qty
+                ),
+            ),
         };
 
         Alert {
@@ -201,6 +231,9 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "margin_exceeded_rejected",
     "correlation_warning",
     "system_halted",
+    "order_rejected",
+    "broker_disconnected",
+    "position_mismatch",
 ];
 
 /// Configuration for the notification pipeline, parsed from `[alerts]` in account manifest.

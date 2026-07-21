@@ -915,6 +915,9 @@ proptest! {
                 Signal::Open { symbol, qty } => {
                     *expected_qty.entry(symbol.clone()).or_insert(0.0) += qty;
                 }
+                Signal::Short { symbol, qty } => {
+                    *expected_qty.entry(symbol.clone()).or_insert(0.0) -= qty;
+                }
                 Signal::Close { symbol } => {
                     // Close removes the entire position
                     expected_qty.insert(symbol.clone(), 0.0);
@@ -1214,6 +1217,9 @@ strategy MinVariance {
                 Signal::Open { symbol, .. } => {
                     group.closes.get(symbol).copied().unwrap_or(primary_bar.close)
                 }
+                Signal::Short { symbol, .. } => {
+                    group.closes.get(symbol).copied().unwrap_or(primary_bar.close)
+                }
                 Signal::Close { symbol } => {
                     group.closes.get(symbol).copied().unwrap_or(primary_bar.close)
                 }
@@ -1397,6 +1403,7 @@ strategy SimpleMA {
             let fill_price = group.closes
                 .get(match signal {
                     Signal::Open { symbol, .. } => symbol,
+                    Signal::Short { symbol, .. } => symbol,
                     Signal::Close { symbol } => symbol,
                     Signal::CloseQty { symbol, .. } => symbol,
                 })

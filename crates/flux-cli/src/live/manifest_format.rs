@@ -216,14 +216,19 @@ mod tests {
                     path: "aether/strategy/strategy.flux".to_string(),
                     allocation: 0.6,
                     priority: 1,
+                    execution: None,
+                    execution_offset_ticks: None,
                 },
                 StrategyEntry {
                     name: "kairos".to_string(),
                     path: "kairos/strategy/strategy.flux".to_string(),
                     allocation: 0.4,
                     priority: 2,
+                    execution: None,
+                    execution_offset_ticks: None,
                 },
             ],
+            execution_default: None,
         }
     }
 

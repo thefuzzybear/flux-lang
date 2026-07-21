@@ -160,6 +160,8 @@ fn arb_valid_account_config() -> impl Strategy<Value = AccountConfig> {
                             path: spath.clone(),
                             allocation: alloc_each,
                             priority: *prio,
+                            execution: None,
+                            execution_offset_ticks: None,
                         })
                         .collect();
 
@@ -194,6 +196,7 @@ fn arb_valid_account_config() -> impl Strategy<Value = AccountConfig> {
                         },
                         products,
                         strategies,
+                        execution_default: None,
                     }
                 })
             })
@@ -299,6 +302,8 @@ fn arb_unconstrained_account_config() -> impl Strategy<Value = AccountConfig> {
                         path: spath.clone(),
                         allocation: *alloc,
                         priority: *prio,
+                        execution: None,
+                        execution_offset_ticks: None,
                     })
                     .collect();
 
@@ -333,6 +338,7 @@ fn arb_unconstrained_account_config() -> impl Strategy<Value = AccountConfig> {
                     },
                     products,
                     strategies,
+                    execution_default: None,
                 }
             })
         })

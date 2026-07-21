@@ -33,6 +33,7 @@ serde_json = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+ibapi = "3.3"
 async-trait = "0.1"
 toml = "0.8"
 rand = "0.8"

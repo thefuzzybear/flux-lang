@@ -123,6 +123,9 @@ async fn two_strategies_maintain_independent_state() {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     );
 
     // Feed 3 bars and verify state evolves independently
@@ -179,6 +182,9 @@ async fn two_strategies_generate_signals_independently() {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     );
 
     // Bar where close > open BUT close < high * 0.95
@@ -220,6 +226,9 @@ async fn both_strategies_signal_and_fills_are_attributed_correctly() {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     );
 
     // Bar where BOTH strategies trigger:
@@ -266,6 +275,9 @@ async fn strategies_share_unified_position_for_in_position_derivation() {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     );
 
     // Bar 1: Only A triggers (close > open, but close < high*0.95)
@@ -317,6 +329,9 @@ async fn harness_runs_via_channel_with_multiple_strategies() {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     );
 
     let (tx, rx) = mpsc::channel::<LiveBar>(16);
@@ -390,6 +405,9 @@ async fn strategies_on_different_symbols_dont_interfere() {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     );
 
     // Send an AAPL bar — only strategy A should process it

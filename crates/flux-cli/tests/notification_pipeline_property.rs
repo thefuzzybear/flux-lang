@@ -39,6 +39,7 @@ fn arb_halt_reason() -> impl Strategy<Value = HaltReason> {
         (arb_f64(), arb_f64()).prop_map(|(pnl, limit)| HaltReason::WeeklyLoss { pnl, limit }),
         (arb_f64(), arb_f64())
             .prop_map(|(drawdown_pct, limit)| HaltReason::MaxDrawdown { drawdown_pct, limit }),
+        Just(HaltReason::BrokerDisconnectionTimeout),
     ]
 }
 
@@ -75,6 +76,13 @@ fn arb_alert_event() -> impl Strategy<Value = AlertEvent> {
             }
         ),
         arb_halt_reason().prop_map(|reason| AlertEvent::SystemHalted { reason }),
+        (arb_symbol(), arb_symbol()).prop_map(|(order_id, reason)| {
+            AlertEvent::OrderRejected { order_id, reason }
+        }),
+        (1u64..3600u64).prop_map(|duration_secs| AlertEvent::BrokerDisconnected { duration_secs }),
+        (arb_symbol(), arb_f64(), arb_f64()).prop_map(|(symbol, local_qty, broker_qty)| {
+            AlertEvent::PositionMismatch { symbol, local_qty, broker_qty }
+        }),
     ]
 }
 
@@ -93,6 +101,9 @@ const VALID_EVENT_TYPES: &[&str] = &[
     "margin_exceeded_rejected",
     "correlation_warning",
     "system_halted",
+    "order_rejected",
+    "broker_disconnected",
+    "position_mismatch",
 ];
 
 /// Valid backend values that should pass validation.
@@ -105,10 +116,13 @@ fn expected_severity(event: &AlertEvent) -> Severity {
         AlertEvent::WeeklyLossBreached { .. } => Severity::Critical,
         AlertEvent::DrawdownBreached { .. } => Severity::Critical,
         AlertEvent::SystemHalted { .. } => Severity::Critical,
+        AlertEvent::BrokerDisconnected { .. } => Severity::Critical,
         AlertEvent::PositionLimitRejected { .. } => Severity::Medium,
         AlertEvent::NotionalLimitRejected { .. } => Severity::Medium,
         AlertEvent::UnknownSymbolRejected { .. } => Severity::Medium,
         AlertEvent::MarginExceededRejected { .. } => Severity::Medium,
+        AlertEvent::OrderRejected { .. } => Severity::High,
+        AlertEvent::PositionMismatch { .. } => Severity::High,
         AlertEvent::CorrelationWarning { .. } => Severity::Low,
     }
 }
@@ -125,6 +139,9 @@ fn expected_detail_fields(event: &AlertEvent) -> Vec<&'static str> {
         AlertEvent::MarginExceededRejected { .. } => vec!["symbol", "required", "available"],
         AlertEvent::CorrelationWarning { .. } => vec!["long_count", "symbols"],
         AlertEvent::SystemHalted { .. } => vec!["reason"],
+        AlertEvent::OrderRejected { .. } => vec!["order_id", "reason"],
+        AlertEvent::BrokerDisconnected { .. } => vec!["duration_secs"],
+        AlertEvent::PositionMismatch { .. } => vec!["symbol", "local_qty", "broker_qty"],
     }
 }
 
@@ -144,11 +161,15 @@ fn f64_values_from_event(event: &AlertEvent) -> Vec<f64> {
             HaltReason::DailyLoss { pnl, limit } => vec![*pnl, *limit],
             HaltReason::WeeklyLoss { pnl, limit } => vec![*pnl, *limit],
             HaltReason::MaxDrawdown { drawdown_pct, limit } => vec![*drawdown_pct, *limit],
+            HaltReason::BrokerDisconnectionTimeout => vec![],
         },
+        AlertEvent::PositionMismatch { local_qty, broker_qty, .. } => vec![*local_qty, *broker_qty],
         // These variants have no f64 fields to check:
         AlertEvent::PositionLimitRejected { .. } => vec![],
         AlertEvent::UnknownSymbolRejected { .. } => vec![],
         AlertEvent::CorrelationWarning { .. } => vec![],
+        AlertEvent::OrderRejected { .. } => vec![],
+        AlertEvent::BrokerDisconnected { .. } => vec![],
     }
 }
 

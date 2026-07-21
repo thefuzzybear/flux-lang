@@ -20,6 +20,8 @@ pub struct AccountConfig {
     pub risk: RiskSection,
     pub products: Vec<ProductEntry>,
     pub strategies: Vec<StrategyEntry>,
+    /// Account-level default execution policy (None = Market).
+    pub execution_default: Option<String>,
 }
 
 /// The `account` block: identity and mode.
@@ -81,6 +83,10 @@ pub struct StrategyEntry {
     pub path: String,
     pub allocation: f64,
     pub priority: i64,
+    /// Execution policy override (None = use account default).
+    pub execution: Option<String>,
+    /// Offset ticks for AggressiveLimit policy.
+    pub execution_offset_ticks: Option<i32>,
 }
 
 /// Tracks which fields in AccountConfig were resolved from `env()` calls.
@@ -389,6 +395,7 @@ pub fn extract_config(
         risk: risk.unwrap(),
         products: products.unwrap(),
         strategies: strategies.unwrap(),
+        execution_default: None, // parsed when execution block support is added to manifest parser
     };
 
     Ok((config, env_sources))
@@ -532,17 +539,39 @@ fn extract_strategies(
             extract_float(&entry.fields, "allocation", "strategies", errors).unwrap_or_default();
         let priority =
             extract_int(&entry.fields, "priority", "strategies", errors).unwrap_or_default();
+        let execution = extract_optional_string(&entry.fields, "execution");
+        let execution_offset_ticks = extract_optional_int(&entry.fields, "execution_offset_ticks");
         strategies.push(StrategyEntry {
             name,
             path,
             allocation,
             priority,
+            execution,
+            execution_offset_ticks,
         });
     }
     strategies
 }
 
 // ─── Field Extraction Helpers ────────────────────────────────────────────────
+
+/// Extract an optional string field from a list of ManifestFields.
+/// Returns None if the field is not present (does NOT push an error).
+fn extract_optional_string(fields: &[ManifestField], field_name: &str) -> Option<String> {
+    fields.iter().find(|f| f.name == field_name).and_then(|f| match &f.value {
+        ManifestValue::String(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+/// Extract an optional integer field from a list of ManifestFields.
+/// Returns None if the field is not present (does NOT push an error).
+fn extract_optional_int(fields: &[ManifestField], field_name: &str) -> Option<i32> {
+    fields.iter().find(|f| f.name == field_name).and_then(|f| match &f.value {
+        ManifestValue::Int(i) => Some(*i as i32),
+        _ => None,
+    })
+}
 
 /// Extract a string field from a list of ManifestFields.
 /// Resolves env() calls and records them in EnvSources.
@@ -1207,7 +1236,10 @@ strategies {{
                 path: "aether/strategy.flux".to_string(),
                 allocation: 0.6,
                 priority: 1,
+                execution: None,
+                execution_offset_ticks: None,
             }],
+            execution_default: None,
         }
     }
 
@@ -1329,12 +1361,16 @@ strategies {{
                     path: "a.flux".to_string(),
                     allocation: 0.7,
                     priority: 1,
+                    execution: None,
+                    execution_offset_ticks: None,
                 },
                 StrategyEntry {
                     name: "b".to_string(),
                     path: "b.flux".to_string(),
                     allocation: 0.5,
                     priority: 2,
+                    execution: None,
+                    execution_offset_ticks: None,
                 },
             ];
             let errors = validate_config(&config).unwrap_err();

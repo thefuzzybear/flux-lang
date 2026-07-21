@@ -13,6 +13,7 @@ use flux_runtime::Signal;
 use tokio::sync::mpsc;
 
 use super::aggregator::SignalAggregator;
+use super::broker::{BrokerAdapter, OrderUpdate, Side, execution::{ExecutionPolicy, DeduplicationGuard}};
 use super::checkpoint::CheckpointScheduler;
 use super::connector::{ConnectorState, LiveBar, ReconnectPolicy};
 use super::fill_logger::{FillLogger, FillRecord};
@@ -20,7 +21,7 @@ use super::loader::StrategyModule;
 use super::market_calendar::MarketCalendar;
 use super::position::LivePositionTracker;
 use super::notifications::NotificationDispatcher;
-use super::risk_limits::{AlertEvent, PortfolioState, RiskDecision, RiskLimits};
+use super::risk_limits::{AlertEvent, HaltReason, PortfolioState, RiskDecision, RiskLimits};
 use super::state::{
     save_state, HarnessState, PositionState, SerializedPosition, SerializedValue, StrategyState,
     STATE_VERSION,
@@ -81,6 +82,86 @@ pub struct LiveHarness {
     /// Uses `Arc` to allow cloning into spawned tokio tasks for fire-and-forget
     /// async dispatch from within the synchronous `dispatch_bar` method.
     pub notifications: Option<Arc<NotificationDispatcher>>,
+    /// Optional broker adapter for live order execution.
+    /// When None, harness operates in current mode (no live execution).
+    pub broker: Option<Arc<dyn BrokerAdapter>>,
+    /// Execution policy per strategy (from account.flux config).
+    pub execution_policies: HashMap<String, ExecutionPolicy>,
+    /// Deduplication guard for order IDs.
+    pub dedup: DeduplicationGuard,
+    /// Tracks when broker disconnection was first detected by the harness.
+    /// Used to determine when the 5-minute Critical alert threshold is reached.
+    pub broker_disconnect_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Tracks the last known broker connection state (true = connected).
+    /// Used to detect reconnection transitions and trigger position reconciliation.
+    pub broker_was_connected: bool,
+}
+
+/// Spawn the fill stream consumer task.
+///
+/// Processes broker `OrderUpdate` messages in a separate tokio task.
+/// - On Fill: persists to StorageBackend, logs fill details
+/// - On Rejection: logs reason, emits notification alert via NotificationDispatcher
+/// - On StatusChange: logs the state transition
+///
+/// The task runs for the lifetime of the harness and exits when the
+/// receiver channel is closed (broker disconnected or harness shutdown).
+fn spawn_fill_consumer(
+    mut rx: mpsc::Receiver<OrderUpdate>,
+    storage: Option<Arc<dyn StorageBackend>>,
+    notifications: Option<Arc<NotificationDispatcher>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(update) = rx.recv().await {
+            match update {
+                OrderUpdate::Fill(fill) => {
+                    eprintln!(
+                        "[broker-fill] {} | {} {:?} x {} @ {:.2}",
+                        fill.order_id.0, fill.symbol, fill.side, fill.qty, fill.price
+                    );
+
+                    // Persist fill to storage backend
+                    if let Some(ref storage) = storage {
+                        let side_str = match fill.side {
+                            Side::Buy => "buy".to_string(),
+                            Side::Sell => "sell".to_string(),
+                        };
+                        let record = storage::FillRecord {
+                            timestamp: fill.timestamp,
+                            strategy: "broker".to_string(),
+                            symbol: fill.symbol.clone(),
+                            side: side_str,
+                            qty: fill.qty as f64,
+                            price: fill.price,
+                            order_id: Some(fill.order_id.0.clone()),
+                            latency_ms: None,
+                            bar_index: 0,
+                        };
+                        if let Err(e) = storage.record_fill(&record).await {
+                            eprintln!("[broker-fill] storage error: {}", e);
+                        }
+                    }
+                }
+                OrderUpdate::Rejection { order_id, reason } => {
+                    eprintln!("[broker-reject] order {} rejected: {}", order_id.0, reason);
+
+                    // Emit notification alert for rejected orders
+                    if let Some(ref notifier) = notifications {
+                        notifier
+                            .dispatch(vec![AlertEvent::OrderRejected {
+                                order_id: order_id.0,
+                                reason,
+                            }])
+                            .await;
+                    }
+                }
+                OrderUpdate::StatusChange { order_id, status } => {
+                    eprintln!("[broker-status] order {} → {:?}", order_id.0, status);
+                }
+            }
+        }
+        eprintln!("[broker-fill] order update stream closed");
+    })
 }
 
 impl LiveHarness {
@@ -98,6 +179,9 @@ impl LiveHarness {
         storage: Option<Arc<dyn StorageBackend>>,
         calendar: Option<MarketCalendar>,
         notifications: Option<Arc<NotificationDispatcher>>,
+        broker: Option<Arc<dyn BrokerAdapter>>,
+        execution_policies: HashMap<String, ExecutionPolicy>,
+        dedup: DeduplicationGuard,
     ) -> Self {
         Self {
             strategies,
@@ -112,6 +196,11 @@ impl LiveHarness {
             storage,
             calendar,
             notifications,
+            broker,
+            execution_policies,
+            dedup,
+            broker_disconnect_since: None,
+            broker_was_connected: true,
         }
     }
 
@@ -495,6 +584,99 @@ impl LiveHarness {
             }
         }
 
+        // Broker submission: translate approved signals and submit to broker.
+        // This is in ADDITION to the local tracker processing above.
+        // When broker is None, this block is skipped (backward compatible).
+        if let Some(ref broker) = self.broker {
+            // Connection check: if broker is disconnected, discard all signals
+            if !broker.is_connected() {
+                if !approved.is_empty() {
+                    eprintln!(
+                        "[broker] disconnected — discarding {} signal(s)",
+                        approved.len()
+                    );
+                }
+                // Don't submit any orders while disconnected.
+                // The harness checks connection and emits alerts during run() heartbeat.
+            } else {
+            for (strategy_name, signal) in &approved {
+                // Get the execution policy for this strategy
+                let policy = self
+                    .execution_policies
+                    .get(strategy_name)
+                    .cloned()
+                    .unwrap_or_default(); // defaults to Market
+
+                // Get last price and tick size for the signal's symbol
+                let last_price = bar.close;
+                let tick_size = 0.25; // TODO: get from ProductRegistry for the symbol
+                let current_position_qty = self
+                    .tracker
+                    .inner
+                    .position(signal.symbol())
+                    .map(|p| p.qty)
+                    .unwrap_or(0.0);
+
+                // Translate signal to order
+                let bar_index = 0u64; // TODO: use actual bar index
+                let account = "default"; // TODO: get from AccountConfig
+
+                let order = super::broker::execution::translate_signal(
+                    signal,
+                    &policy,
+                    account,
+                    strategy_name,
+                    bar_index,
+                    last_price,
+                    tick_size,
+                    current_position_qty,
+                );
+
+                if let Some(order) = order {
+                    // Check dedup guard
+                    if self.dedup.is_duplicate(&order.id) {
+                        eprintln!("  [BROKER] duplicate order {} — skipping", order.id.0);
+                        continue;
+                    }
+
+                    // Check session gate
+                    if let Some(ref calendar) = self.calendar {
+                        let exchange = match order.symbol.as_str() {
+                            "YM" => "CBOT",
+                            _ => "CME",
+                        };
+                        let now = chrono::Utc::now();
+                        if super::broker::execution::check_session_gate(calendar, exchange, now)
+                            .is_err()
+                        {
+                            eprintln!(
+                                "  [BROKER] session closed for {} — skipping order",
+                                exchange
+                            );
+                            continue;
+                        }
+                    }
+
+                    // Mark submitted in dedup guard
+                    self.dedup.mark_submitted(order.id.clone());
+
+                    // Submit order (fire-and-forget via tokio::spawn)
+                    let broker = broker.clone();
+                    let order_id_str = order.id.0.clone();
+                    tokio::spawn(async move {
+                        match broker.submit_order(&order).await {
+                            Ok(id) => eprintln!("  [BROKER] order submitted: {}", id.0),
+                            Err(e) => eprintln!(
+                                "  [BROKER] submission error for {}: {}",
+                                order_id_str, e
+                            ),
+                        }
+                    });
+                }
+            }
+            }
+        }
+
         // Mark to market
         self.tracker.inner.mark_to_market(bar.close, &bar.symbol);
 
@@ -688,6 +870,23 @@ impl LiveHarness {
         mut bar_rx: mpsc::Receiver<LiveBar>,
         connector_count: usize,
     ) -> Result<(), LiveError> {
+        // Start fill stream consumer if broker is configured
+        let _fill_consumer = if let Some(ref broker) = self.broker {
+            match broker.subscribe_order_updates().await {
+                Ok(rx) => Some(spawn_fill_consumer(
+                    rx,
+                    self.storage.clone(),
+                    self.notifications.clone(),
+                )),
+                Err(e) => {
+                    eprintln!("[harness] failed to subscribe to order updates: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut heartbeat = tokio::time::interval(self.heartbeat_interval);
         let shutdown = tokio::signal::ctrl_c();
         tokio::pin!(shutdown);
@@ -717,6 +916,9 @@ impl LiveHarness {
                 }
                 _ = heartbeat.tick() => {
                     self.print_heartbeat();
+                    // Periodic broker health check: detect disconnect, emit alerts,
+                    // and handle reconnection with position reconciliation.
+                    self.check_broker_health().await;
                 }
                 _ = &mut shutdown => {
                     eprintln!("[harness] SIGINT received, shutting down...");
@@ -743,6 +945,191 @@ impl LiveHarness {
             realized_pnl,
             self.strategies.len(),
         );
+    }
+
+    /// Periodic broker health check.
+    ///
+    /// Detects broker disconnection/reconnection transitions and:
+    /// - Tracks disconnection timestamp for 5-minute alert threshold
+    /// - Emits Critical-level alert via NotificationDispatcher after 5 minutes disconnected
+    /// - On reconnection: reconciles positions with broker before resuming submissions
+    /// - On mismatch: emits Warning-level alert and updates PositionTracker to match broker state
+    async fn check_broker_health(&mut self) {
+        let Some(ref broker) = self.broker else {
+            return;
+        };
+
+        let connected = broker.is_connected();
+
+        if !connected {
+            // Broker is disconnected
+            if self.broker_was_connected {
+                // Transition: Connected → Disconnected
+                eprintln!("[broker] connection lost — signals will be discarded until reconnection");
+                self.broker_disconnect_since = Some(chrono::Utc::now());
+                self.broker_was_connected = false;
+            }
+
+            // Check 5-minute threshold for Critical alert
+            if let Some(since) = self.broker_disconnect_since {
+                let elapsed = chrono::Utc::now() - since;
+                if elapsed >= chrono::Duration::minutes(5) {
+                    let duration_secs = elapsed.num_seconds() as u64;
+                    eprintln!(
+                        "[broker] CRITICAL: disconnected for {} seconds — system halted",
+                        duration_secs
+                    );
+
+                    // Emit Critical-level alert
+                    if let Some(ref notifier) = self.notifications {
+                        let n = notifier.clone();
+                        tokio::spawn(async move {
+                            n.dispatch(vec![
+                                AlertEvent::SystemHalted {
+                                    reason: HaltReason::BrokerDisconnectionTimeout,
+                                },
+                                AlertEvent::BrokerDisconnected { duration_secs },
+                            ])
+                            .await;
+                        });
+                    }
+                }
+            }
+        } else if !self.broker_was_connected {
+            // Transition: Disconnected → Connected (reconnection)
+            let disconnect_duration = self
+                .broker_disconnect_since
+                .map(|since| (chrono::Utc::now() - since).num_seconds())
+                .unwrap_or(0);
+            eprintln!(
+                "[broker] reconnected after {} seconds — reconciling positions",
+                disconnect_duration
+            );
+
+            // Clear disconnect state
+            self.broker_disconnect_since = None;
+            self.broker_was_connected = true;
+
+            // Reconcile positions before resuming submissions
+            let broker = broker.clone();
+            match broker.get_positions().await {
+                Ok(broker_positions) => {
+                    self.reconcile_positions(&broker_positions);
+                }
+                Err(e) => {
+                    eprintln!("[broker] failed to get positions for reconciliation: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Reconcile local PositionTracker state with broker-reported positions.
+    ///
+    /// Compares each broker position against the local tracker. On mismatch,
+    /// emits a Warning-level alert and updates the local tracker to match
+    /// the broker's authoritative state.
+    fn reconcile_positions(&mut self, broker_positions: &[super::broker::BrokerPosition]) {
+        let mut mismatches: Vec<AlertEvent> = Vec::new();
+
+        for bp in broker_positions {
+            let local_qty = self
+                .tracker
+                .inner
+                .position(&bp.symbol)
+                .map(|p| p.qty)
+                .unwrap_or(0.0);
+
+            // Compare with a small tolerance for floating-point differences
+            if (local_qty - bp.qty).abs() > 0.001 {
+                eprintln!(
+                    "[broker] position mismatch for {}: local={:.4}, broker={:.4} — updating to broker state",
+                    bp.symbol, local_qty, bp.qty
+                );
+                mismatches.push(AlertEvent::PositionMismatch {
+                    symbol: bp.symbol.clone(),
+                    local_qty,
+                    broker_qty: bp.qty,
+                });
+
+                // Update local tracker to match broker state.
+                // We adjust by processing a synthetic signal to bring local in line with broker.
+                let diff = bp.qty - local_qty;
+                if diff > 0.0 {
+                    // Broker has more — simulate an open fill
+                    let signal = Signal::Open {
+                        symbol: bp.symbol.clone(),
+                        qty: diff,
+                    };
+                    self.tracker.process_signal(&signal, bp.avg_cost, 0, "reconciliation");
+                } else if diff < 0.0 {
+                    // Broker has less — simulate a close fill
+                    let signal = Signal::CloseQty {
+                        symbol: bp.symbol.clone(),
+                        qty: diff.abs(),
+                    };
+                    self.tracker.process_signal(&signal, bp.avg_cost, 0, "reconciliation");
+                }
+            }
+        }
+
+        // Also check for positions we have locally that the broker doesn't report
+        let local_symbols: Vec<String> = self
+            .tracker
+            .inner
+            .positions()
+            .iter()
+            .filter(|(_, p)| p.qty.abs() > 0.001)
+            .map(|(sym, _)| sym.clone())
+            .collect();
+
+        for sym in &local_symbols {
+            let broker_has = broker_positions.iter().any(|bp| &bp.symbol == sym);
+            if !broker_has {
+                let local_qty = self
+                    .tracker
+                    .inner
+                    .position(sym)
+                    .map(|p| p.qty)
+                    .unwrap_or(0.0);
+                eprintln!(
+                    "[broker] position mismatch for {}: local={:.4}, broker=0.0 — updating to broker state",
+                    sym, local_qty
+                );
+                mismatches.push(AlertEvent::PositionMismatch {
+                    symbol: sym.clone(),
+                    local_qty,
+                    broker_qty: 0.0,
+                });
+
+                // Close out the local position
+                let signal = Signal::Close {
+                    symbol: sym.clone(),
+                };
+                let price = self
+                    .tracker
+                    .inner
+                    .position(sym)
+                    .map(|p| p.avg_entry_price)
+                    .unwrap_or(0.0);
+                self.tracker.process_signal(&signal, price, 0, "reconciliation");
+            }
+        }
+
+        // Emit Warning-level alerts for all mismatches
+        if !mismatches.is_empty() {
+            eprintln!(
+                "[broker] {} position mismatch(es) detected and resolved",
+                mismatches.len()
+            );
+            if let Some(ref notifier) = self.notifications {
+                let n = notifier.clone();
+                tokio::spawn(async move {
+                    n.dispatch(mismatches).await;
+                });
+            }
+        } else {
+            eprintln!("[broker] positions reconciled — no mismatches");
+        }
     }
 
     /// Graceful shutdown sequence.
@@ -1323,6 +1710,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         )
     }
 
@@ -1373,6 +1763,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         assert!(harness.strategies.is_empty());
@@ -1484,6 +1877,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
         harness.print_startup_summary();
     }
@@ -1558,6 +1954,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         // Manually open a position in the tracker
@@ -1636,6 +2035,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         // State file should not exist yet
@@ -1677,6 +2079,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         // Open a position so we have something to serialize
@@ -1746,6 +2151,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         harness.restore_state(&state);
@@ -1800,6 +2208,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         let state = harness.build_harness_state();
@@ -1830,6 +2241,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         let state = harness.build_harness_state();
@@ -1928,6 +2342,9 @@ mod tests {
             Some(Arc::new(mock.clone())),
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         )
     }
 
@@ -2053,6 +2470,9 @@ mod tests {
             Some(Arc::new(mock.clone())),
             None,
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         );
 
         // Dispatch a bar to trigger checkpoint
@@ -2169,6 +2589,9 @@ early_close = "13:00"
             None,
             Some(calendar),
             None,
+            None,
+            HashMap::new(),
+            DeduplicationGuard::new(),
         )
     }
 

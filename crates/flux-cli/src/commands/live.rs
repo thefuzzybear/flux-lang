@@ -233,6 +233,9 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         None, // TODO: wire up StorageBackend from account config
         calendar.clone(),
         None, // notifications - TODO: wire up from AlertConfig when account manifest is available
+        None, // broker - TODO: wire up from account config
+        std::collections::HashMap::new(), // execution_policies - TODO: wire up from account config
+        crate::live::broker::DeduplicationGuard::new(),
     );
 
     // 6. Restore state if state file exists (corruption → log warning, start fresh)

@@ -81,6 +81,8 @@ pub enum HaltReason {
     DailyLoss { pnl: f64, limit: f64 },
     WeeklyLoss { pnl: f64, limit: f64 },
     MaxDrawdown { drawdown_pct: f64, limit: f64 },
+    /// Broker has been disconnected for more than 5 minutes.
+    BrokerDisconnectionTimeout,
 }
 
 /// Reason for rejecting a signal.
@@ -121,6 +123,12 @@ pub enum AlertEvent {
     MarginExceededRejected { symbol: String, required: f64, available: f64 },
     CorrelationWarning { long_count: usize, symbols: Vec<String> },
     SystemHalted { reason: HaltReason },
+    /// A broker order was rejected (e.g., insufficient margin, invalid contract).
+    OrderRejected { order_id: String, reason: String },
+    /// Broker has been disconnected beyond the 5-minute threshold.
+    BrokerDisconnected { duration_secs: u64 },
+    /// Position reconciliation detected a mismatch between broker and local state.
+    PositionMismatch { symbol: String, local_qty: f64, broker_qty: f64 },
 }
 
 /// Snapshot of current portfolio state passed to check_signal().

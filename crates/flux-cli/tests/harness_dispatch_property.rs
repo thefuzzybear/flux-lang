@@ -72,6 +72,9 @@ fn make_harness(strategies: Vec<StrategyModule>) -> LiveHarness {
         None,
         None,
         None,
+        None,
+        std::collections::HashMap::new(),
+        flux_cli::live::broker::DeduplicationGuard::new(),
     )
 }
 
