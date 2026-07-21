@@ -6,6 +6,7 @@
 //! prints a startup summary, and runs the event loop.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -98,7 +99,7 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
             })?;
 
         // Construct storage backend based on account manifest config
-        let _storage: Option<Box<dyn crate::live::storage::StorageBackend>> = {
+        let storage: Option<Box<dyn crate::live::storage::StorageBackend>> = {
             if !config.database.url.is_empty() && !config.database.schema.is_empty() {
                 // PostgreSQL configured — attempt connection
                 match crate::live::storage::postgres::PostgresBackend::new(
@@ -154,8 +155,15 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
             }
         };
 
-        // AccountConfig validated — hand off to runtime (future spec)
-        todo!("AccountRuntime boot from AccountConfig")
+        // AccountConfig validated — boot the account runtime
+        let storage_arc: Option<Arc<dyn crate::live::storage::StorageBackend>> =
+            storage.map(|b| Arc::from(b) as Arc<dyn crate::live::storage::StorageBackend>);
+        return crate::live::account_runtime::boot_account_runtime(
+            config,
+            &args.file,
+            storage_arc,
+        )
+        .await;
     }
 
     // Check if path is neither .flux, .toml, nor directory
