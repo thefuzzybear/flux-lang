@@ -27,3 +27,4 @@ pub mod market_calendar;
 pub mod notifications;
 pub mod broker;
 pub mod account_runtime;
+pub mod futures_roll;

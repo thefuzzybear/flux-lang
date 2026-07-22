@@ -17,6 +17,7 @@ use super::broker::{BrokerAdapter, OrderUpdate, Side, execution::{ExecutionPolic
 use super::checkpoint::CheckpointScheduler;
 use super::connector::{ConnectorState, LiveBar, ReconnectPolicy};
 use super::fill_logger::{FillLogger, FillRecord};
+use super::futures_roll::{FuturesRollManager, format_concrete};
 use super::loader::StrategyModule;
 use super::market_calendar::MarketCalendar;
 use super::position::LivePositionTracker;
@@ -95,6 +96,12 @@ pub struct LiveHarness {
     /// Tracks the last known broker connection state (true = connected).
     /// Used to detect reconnection transitions and trigger position reconciliation.
     pub broker_was_connected: bool,
+    /// Optional futures roll manager — intercepts raw contract bars and emits synthetic bars.
+    /// When None (no generic symbols in manifest), bars dispatch directly (zero overhead).
+    pub futures_roll_manager: Option<FuturesRollManager>,
+    /// Tracks the last date for which end_of_session was called on the roll manager.
+    /// Used to ensure we only call it once per trading day at session close.
+    pub last_roll_session_date: Option<chrono::NaiveDate>,
 }
 
 /// Spawn the fill stream consumer task.
@@ -182,6 +189,7 @@ impl LiveHarness {
         broker: Option<Arc<dyn BrokerAdapter>>,
         execution_policies: HashMap<String, ExecutionPolicy>,
         dedup: DeduplicationGuard,
+        futures_roll_manager: Option<FuturesRollManager>,
     ) -> Self {
         Self {
             strategies,
@@ -201,6 +209,8 @@ impl LiveHarness {
             dedup,
             broker_disconnect_since: None,
             broker_was_connected: true,
+            futures_roll_manager,
+            last_roll_session_date: None,
         }
     }
 
@@ -298,6 +308,94 @@ impl LiveHarness {
     /// Strategy runtime errors (including panics) are caught, logged,
     /// and the harness continues processing remaining strategies (requirement 2.8).
     pub fn dispatch_bar(&mut self, live_bar: &LiveBar) {
+        // Futures roll manager transform stage:
+        // Route through the roll manager when present, otherwise pass through directly.
+        // Use process_daily_bar for daily replay data (pushes volume directly into
+        // rolling buffers rather than accumulating intraday).
+        let (effective_bars, roll_event) = match &mut self.futures_roll_manager {
+            Some(frm) => {
+                let today = live_bar
+                    .received_at
+                    .with_timezone(&chrono_tz::US::Eastern)
+                    .date_naive();
+                let result = frm.process_daily_bar(live_bar, today);
+                (result.bars, result.roll_event)
+            }
+            None => (vec![live_bar.clone()], None),
+        };
+
+        // Handle roll event if triggered
+        if let Some(ref roll_event) = roll_event {
+            eprintln!(
+                "[futures-roll] ROLL {} | {} → {} | ratio: {:.6}",
+                roll_event.product_root,
+                format_concrete(&roll_event.old_contract),
+                format_concrete(&roll_event.new_contract),
+                roll_event.adjustment_ratio,
+            );
+
+            // Submit calendar spread order via BrokerAdapter if position exists
+            if let Some(ref broker) = self.broker {
+                if broker.is_connected() {
+                    let _broker = broker.clone();
+                    let old_contract = format_concrete(&roll_event.old_contract);
+                    let new_contract = format_concrete(&roll_event.new_contract);
+                    let _product_root = roll_event.product_root.clone();
+                    let _notifications = self.notifications.clone();
+
+                    // Attempt calendar spread order; fall back to sequential close/open
+                    // if broker doesn't support native spreads.
+                    // On failure: emit Critical notification and halt roll processing.
+                    tokio::spawn(async move {
+                        // TODO: Implement calendar spread order submission when
+                        // BrokerAdapter gains spread order support.
+                        // For now, log the intent. The actual order execution will be
+                        // wired when the BrokerAdapter trait adds spread_order() method.
+                        eprintln!(
+                            "[futures-roll] would submit calendar spread: close {} / open {}",
+                            old_contract, new_contract,
+                        );
+
+                        // On roll failure, emit Critical notification:
+                        // if let Some(ref notifier) = notifications {
+                        //     notifier.dispatch(vec![AlertEvent::RollFailed {
+                        //         product: product_root,
+                        //         reason: "...".to_string(),
+                        //     }]).await;
+                        // }
+                    });
+                } else {
+                    eprintln!(
+                        "[futures-roll] CRITICAL: broker disconnected — cannot execute roll for {}",
+                        roll_event.product_root,
+                    );
+                    // Emit Critical notification for roll failure.
+                    // Uses BrokerDisconnected alert to signal the issue via notification pipeline.
+                    if let Some(ref notifier) = self.notifications {
+                        let n = notifier.clone();
+                        tokio::spawn(async move {
+                            n.dispatch(vec![AlertEvent::BrokerDisconnected {
+                                duration_secs: 0,
+                            }])
+                            .await;
+                        });
+                    }
+                }
+            }
+        }
+
+        // Dispatch each effective bar through the standard pipeline
+        for effective_bar in &effective_bars {
+            self.dispatch_bar_inner(effective_bar);
+        }
+    }
+
+    /// Inner dispatch logic for a single bar — runs the standard strategy pipeline.
+    ///
+    /// This is the original `dispatch_bar` body, extracted to support the futures
+    /// roll manager transform stage which may produce multiple synthetic bars
+    /// from a single raw bar.
+    fn dispatch_bar_inner(&mut self, live_bar: &LiveBar) {
         // Calendar gate: skip all processing on non-trading days (requirement 7.1, 7.2, 7.3)
         if let Some(ref calendar) = self.calendar {
             let today = live_bar
@@ -762,6 +860,13 @@ impl LiveHarness {
             }
         }
 
+        // Futures roll manager: evaluate end_of_session after processing a bar.
+        // Only trigger for the specific product root that just received a bar,
+        // since end_of_session pushes intraday volume into the rolling buffer.
+        // For daily bars, each bar IS the full session for that contract.
+        // NOTE: This is intentionally a no-op here. Session evaluation is handled
+        // in dispatch_bar (the outer function) after effective bars are dispatched.
+
         // Half-day / session close flatten check
         if self.should_flatten_at_close() {
             eprintln!("[harness] session close reached — flattening all positions");
@@ -907,9 +1012,11 @@ impl LiveHarness {
                                     "[harness] all {} connector(s) disconnected — no data sources remain",
                                     connector_count
                                 );
+                                self.print_final_summary();
                                 return Err(LiveError::AllConnectorsFailed);
                             }
                             eprintln!("[harness] bar channel closed, exiting event loop");
+                            self.print_final_summary();
                             return Ok(());
                         }
                     }
@@ -945,6 +1052,46 @@ impl LiveHarness {
             realized_pnl,
             self.strategies.len(),
         );
+    }
+
+    /// Print a final performance summary when the harness exits.
+    ///
+    /// Shows total trades, realized P&L, final equity, open positions, and return.
+    fn print_final_summary(&self) {
+        let equity = self.tracker.inner.equity();
+        let realized_pnl = self.tracker.inner.realized_pnl();
+        let open_positions = self.tracker.inner.open_position_count();
+        let initial_equity = self.tracker.inner.initial_capital();
+        let total_return_pct = ((equity - initial_equity) / initial_equity) * 100.0;
+        let trade_count = self.tracker.inner.fills().len();
+
+        eprintln!();
+        eprintln!("═══════════════════════════════════════════════════");
+        eprintln!("  REPLAY COMPLETE — Performance Summary");
+        eprintln!("═══════════════════════════════════════════════════");
+        eprintln!("  Initial Equity:    ${:.2}", initial_equity);
+        eprintln!("  Final Equity:      ${:.2}", equity);
+        eprintln!("  Realized P&L:      ${:.2}", realized_pnl);
+        eprintln!("  Total Return:      {:.2}%", total_return_pct);
+        eprintln!("  Total Trades:      {}", trade_count);
+        eprintln!("  Open Positions:    {}", open_positions);
+
+        // Print per-position details if any are open
+        let positions = self.tracker.inner.positions();
+        if !positions.is_empty() {
+            eprintln!("  ─────────────────────────────────────────────────");
+            eprintln!("  Open Position Details:");
+            for (symbol, pos) in positions {
+                if pos.qty != 0.0 {
+                    eprintln!(
+                        "    {} | qty: {:.4} | avg entry: {:.2}",
+                        symbol, pos.qty, pos.avg_entry_price
+                    );
+                }
+            }
+        }
+        eprintln!("═══════════════════════════════════════════════════");
+        eprintln!();
     }
 
     /// Periodic broker health check.
@@ -1713,6 +1860,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         )
     }
 
@@ -1766,6 +1914,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         assert!(harness.strategies.is_empty());
@@ -1880,6 +2029,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
         harness.print_startup_summary();
     }
@@ -1957,6 +2107,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         // Manually open a position in the tracker
@@ -2038,6 +2189,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         // State file should not exist yet
@@ -2082,6 +2234,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         // Open a position so we have something to serialize
@@ -2154,6 +2307,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         harness.restore_state(&state);
@@ -2211,6 +2365,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         let state = harness.build_harness_state();
@@ -2244,6 +2399,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         let state = harness.build_harness_state();
@@ -2345,6 +2501,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         )
     }
 
@@ -2473,6 +2630,7 @@ mod tests {
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         );
 
         // Dispatch a bar to trigger checkpoint
@@ -2592,6 +2750,7 @@ early_close = "13:00"
             None,
             HashMap::new(),
             DeduplicationGuard::new(),
+            None,
         )
     }
 

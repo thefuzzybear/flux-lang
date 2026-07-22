@@ -182,6 +182,7 @@ mod tests {
                 source: "ibkr".to_string(),
                 symbols: vec!["ES".to_string(), "NQ".to_string(), "YM".to_string(), "RTY".to_string()],
                 interval: "1d".to_string(),
+                replay_file: None,
             },
             database: DatabaseSection {
                 url: "postgres://localhost/flux".to_string(),

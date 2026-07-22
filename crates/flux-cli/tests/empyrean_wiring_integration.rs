@@ -300,6 +300,7 @@ fn build_swing_config() -> AccountConfig {
             source: "mock".into(),
             symbols: vec!["ES".into(), "NQ".into()],
             interval: "1d".into(),
+            replay_file: None,
         },
         database: DatabaseSection {
             url: "".into(),

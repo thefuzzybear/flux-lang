@@ -244,6 +244,7 @@ pub async fn run_live_cmd(args: LiveArgs) -> Result<(), Box<dyn std::error::Erro
         None, // broker - TODO: wire up from account config
         std::collections::HashMap::new(), // execution_policies - TODO: wire up from account config
         crate::live::broker::DeduplicationGuard::new(),
+        None, // futures_roll_manager - TODO: wire up when generic symbols present
     );
 
     // 6. Restore state if state file exists (corruption → log warning, start fresh)

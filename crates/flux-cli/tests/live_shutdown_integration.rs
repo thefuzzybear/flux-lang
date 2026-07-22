@@ -66,6 +66,7 @@ async fn graceful_shutdown_persists_state_file() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // Open positions in the tracker
@@ -147,6 +148,7 @@ async fn shutdown_after_channel_close_persists_state() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // Open a position before running
@@ -213,6 +215,7 @@ async fn graceful_shutdown_without_state_file_does_not_crash() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // Open a position
@@ -249,6 +252,7 @@ async fn state_file_contains_last_prices() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // Open position and mark to market
@@ -306,6 +310,7 @@ async fn state_roundtrip_positions_match_after_shutdown() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // Build up some positions and a partial close for realized P&L

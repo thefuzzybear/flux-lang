@@ -35,6 +35,7 @@ fn aether_config() -> AccountConfig {
             source: "mock".into(),
             symbols: vec!["ES=F".into(), "NQ=F".into(), "RTY=F".into(), "YM=F".into()],
             interval: "1d".into(),
+            replay_file: None,
         },
         database: DatabaseSection { url: "".into(), schema: "".into() },
         risk: RiskSection {
@@ -159,6 +160,7 @@ async fn smoke_test_aether_real_daily() {
         None, // no broker
         policies,
         DeduplicationGuard::new(),
+        None, // futures_roll_manager
     );
 
     harness.print_startup_summary();

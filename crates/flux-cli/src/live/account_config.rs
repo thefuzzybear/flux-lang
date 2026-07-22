@@ -46,6 +46,8 @@ pub struct DataSection {
     pub source: String,
     pub symbols: Vec<String>,
     pub interval: String,
+    /// Optional path to a CSV file for replay mode (relative to account directory).
+    pub replay_file: Option<String>,
 }
 
 /// The `database` block: persistence layer.
@@ -447,11 +449,14 @@ fn extract_data_section(
     let symbols = extract_string_list(fields, "symbols", "data", errors).unwrap_or_default();
     let interval = extract_string(fields, "interval", "data", errors, env_sources)
         .unwrap_or_default();
+    // Optional: replay_file for replay mode (not an error if missing)
+    let replay_file = extract_string_optional(fields, "replay_file", env_sources);
 
     DataSection {
         source,
         symbols,
         interval,
+        replay_file,
     }
 }
 
@@ -606,6 +611,21 @@ fn extract_string(
                 None
             }
         },
+    }
+}
+
+/// Extract an optional string field — returns None if the field is missing (no error).
+/// Used for fields that are not required.
+fn extract_string_optional(
+    fields: &[ManifestField],
+    field_name: &str,
+    _env_sources: &mut EnvSources,
+) -> Option<String> {
+    let field = fields.iter().find(|f| f.name == field_name)?;
+    match &field.value {
+        ManifestValue::String(s) => Some(s.clone()),
+        ManifestValue::EnvCall(var) => std::env::var(var).ok(),
+        _ => None,
     }
 }
 
@@ -1211,6 +1231,7 @@ strategies {{
                 source: "ibkr".to_string(),
                 symbols: vec!["ES".to_string()],
                 interval: "1d".to_string(),
+                replay_file: None,
             },
             database: DatabaseSection {
                 url: "postgres://localhost/flux".to_string(),

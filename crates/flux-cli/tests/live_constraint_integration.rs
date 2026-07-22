@@ -106,6 +106,7 @@ async fn constraint_rejects_open_exceeding_max_position_size() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // 3. Send a bar via mpsc channel where the strategy generates OPEN(AAPL, 200.0)
@@ -180,6 +181,7 @@ async fn constraint_approves_open_within_max_position_size() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // 3. Send a bar via mpsc channel where the strategy generates OPEN(AAPL, 200.0)

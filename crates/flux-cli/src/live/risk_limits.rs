@@ -347,18 +347,27 @@ impl RiskLimits {
         let (symbol, qty) = signal_symbol_qty(signal);
 
         // Step 4a: Unknown symbol check
+        // Try direct lookup first, then fall back to stripping generic symbol suffix
+        // (e.g., "ES=F" → "ES", "NQ=2" → "NQ") for futures roll manager symbols.
         let spec = match self.registry.get(&symbol) {
             Some(spec) => spec,
             None => {
-                alerts.push(AlertEvent::UnknownSymbolRejected {
-                    symbol: symbol.clone(),
-                });
-                return (
-                    RiskDecision::Reject {
-                        reason: RejectionReason::UnknownSymbol { symbol },
-                    },
-                    alerts,
-                );
+                // Try stripping generic symbol suffix (everything after '=')
+                let root = symbol.split('=').next().unwrap_or(&symbol);
+                match self.registry.get(root) {
+                    Some(spec) => spec,
+                    None => {
+                        alerts.push(AlertEvent::UnknownSymbolRejected {
+                            symbol: symbol.clone(),
+                        });
+                        return (
+                            RiskDecision::Reject {
+                                reason: RejectionReason::UnknownSymbol { symbol },
+                            },
+                            alerts,
+                        );
+                    }
+                }
             }
         };
 

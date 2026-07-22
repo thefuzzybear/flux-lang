@@ -17,7 +17,8 @@ use crate::live::aggregator::{RiskConstraints, SignalAggregator};
 use crate::live::broker::ibkr::IbkrAdapter;
 use crate::live::broker::mock::MockBrokerAdapter;
 use crate::live::broker::{resolve_execution_policy, BrokerAdapter, DeduplicationGuard, ExecutionPolicy};
-use crate::live::connector::ReconnectPolicy;
+use crate::live::connector::{Connector, ReconnectPolicy};
+use crate::live::futures_roll::{parse_generic, FuturesRollManager, GenericSymbol};
 use crate::live::harness::LiveHarness;
 use crate::live::loader::StrategyModule;
 use crate::live::market_calendar::MarketCalendar;
@@ -128,48 +129,220 @@ timezone = "US/Eastern"
     };
     let aggregator = SignalAggregator::new(constraints);
 
-    // 7. Connect broker adapter with exponential backoff retry
-    let broker_arc: Arc<dyn BrokerAdapter> = connect_broker_with_retry(&config).await?;
+    // 7. Connect broker adapter (mock for replay, real for live)
+    let broker_arc: Arc<dyn BrokerAdapter> = if config.data.source == "replay" {
+        eprintln!("[boot] replay mode — using mock broker (no live execution)");
+        Arc::new(MockBrokerAdapter::new())
+    } else {
+        connect_broker_with_retry(&config).await?
+    };
 
     // 8. Reconcile DeduplicationGuard against broker open orders
     let mut dedup = DeduplicationGuard::new();
-    match dedup.reconcile(broker_arc.as_ref()).await {
-        Ok(open_ids) => {
-            if !open_ids.is_empty() {
+    if config.data.source != "replay" {
+        match dedup.reconcile(broker_arc.as_ref()).await {
+            Ok(open_ids) => {
+                if !open_ids.is_empty() {
+                    eprintln!(
+                        "[boot] reconciled {} open orders into dedup guard",
+                        open_ids.len()
+                    );
+                }
+            }
+            Err(e) => {
                 eprintln!(
-                    "[boot] reconciled {} open orders into dedup guard",
-                    open_ids.len()
+                    "[boot] warning: dedup reconciliation failed: {} — proceeding with empty guard",
+                    e
                 );
             }
         }
-        Err(e) => {
-            eprintln!(
-                "[boot] warning: dedup reconciliation failed: {} — proceeding with empty guard",
-                e
-            );
-        }
     }
 
-    // 9. Build LiveHarness with all components
+    // 9. Build FuturesRollManager if generic symbols are present in data.symbols
+    let futures_roll_manager = {
+        // Detect generic symbols (contain '=') in the data block
+        let generic_symbols: Vec<GenericSymbol> = config
+            .data
+            .symbols
+            .iter()
+            .filter_map(|s| parse_generic(s).ok())
+            .collect();
+
+        if generic_symbols.is_empty() {
+            None
+        } else {
+            let cal = calendar.clone().unwrap_or_else(|| {
+                // Fall back to a minimal calendar for the roll manager
+                let minimal_toml = r#"
+[[session]]
+exchange = "CME"
+open = "09:30"
+close = "16:00"
+timezone = "US/Eastern"
+"#;
+                MarketCalendar::from_toml(minimal_toml).expect("minimal calendar should parse")
+            });
+            let mut frm = FuturesRollManager::new(
+                Arc::new(registry.clone()),
+                Arc::new(cal),
+            );
+
+            // For replay mode, determine the start date from the CSV so we
+            // initialize L1/L2 relative to the data's time frame, not today.
+            let init_date = if config.data.source == "replay" {
+                if let Some(ref replay_file) = config.data.replay_file {
+                    let replay_path = account_dir.join(replay_file);
+                    peek_first_date(&replay_path).unwrap_or_else(|| chrono::Utc::now().date_naive())
+                } else {
+                    chrono::Utc::now().date_naive()
+                }
+            } else {
+                chrono::Utc::now().date_naive()
+            };
+
+            for sym in &generic_symbols {
+                let strategy_name = config
+                    .strategies
+                    .first()
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "default".to_string());
+
+                // Use the init_date to determine L1/L2 contracts
+                let contracts = crate::live::futures_roll::QuarterlyCycle::nearest_contracts(
+                    &sym.root, init_date, 2,
+                );
+                if contracts.len() >= 2 {
+                    frm.register_subscription_with_contracts(
+                        sym.clone(),
+                        strategy_name,
+                        contracts[0].clone(),
+                        contracts[1].clone(),
+                    );
+                } else {
+                    frm.register_subscription(sym.clone(), strategy_name);
+                }
+            }
+            let concrete_subs = frm.required_subscriptions();
+            if !concrete_subs.is_empty() {
+                eprintln!(
+                    "[boot] futures roll manager active — subscribing to: {}",
+                    concrete_subs.join(", ")
+                );
+            }
+
+            // For replay mode with per-contract data: pre-scan the CSV to find all
+            // roll points and compute backward adjustment factors. This seeds the
+            // adjuster so that from bar 1, the =F series is fully backward-adjusted.
+            if config.data.source == "replay" {
+                if let Some(ref replay_file) = config.data.replay_file {
+                    let replay_path = account_dir.join(replay_file);
+                    let bars = crate::csv_loader::load_csv(&replay_path).ok();
+                    if let Some(bars) = bars {
+                        // Check if the data has per-contract symbols (ESH4, etc.)
+                        // vs already-continuous symbols (ES=F)
+                        let has_concrete = bars.iter().any(|b| {
+                            crate::live::futures_roll::parse_concrete(&b.symbol).is_ok()
+                        });
+
+                        if has_concrete {
+                            eprintln!("[boot] pre-scanning replay data for backward adjustment...");
+                            // Run a dry-run of the roll manager to find all roll ratios
+                            let today = chrono::Utc::now().date_naive();
+                            let mut prescan_frm = FuturesRollManager::new(
+                                frm.product_registry.clone(),
+                                frm.calendar.clone(),
+                            );
+                            // Register same subscriptions on prescan copy
+                            for sym in &generic_symbols {
+                                let contracts = crate::live::futures_roll::QuarterlyCycle::nearest_contracts(
+                                    &sym.root, init_date, 2,
+                                );
+                                if contracts.len() >= 2 {
+                                    prescan_frm.register_subscription_with_contracts(
+                                        sym.clone(),
+                                        "prescan".to_string(),
+                                        contracts[0].clone(),
+                                        contracts[1].clone(),
+                                    );
+                                }
+                            }
+                            // Run all bars through the prescan to accumulate ratios
+                            for bar in &bars {
+                                let live_bar = crate::live::connector::LiveBar {
+                                    bar: bar.clone(),
+                                    connector_id: "prescan".to_string(),
+                                    received_at: chrono::Utc::now(),
+                                };
+                                prescan_frm.process_daily_bar(&live_bar, today);
+                            }
+                            // Extract the cumulative factors and seed the real FRM
+                            let prescan_state = prescan_frm.snapshot_state();
+                            for adj in &prescan_state.adjusters {
+                                if let Some(real_adj) = frm.adjusters.get_mut(&adj.product_root) {
+                                    // The prescan computed the forward cumulative factor
+                                    // (product of all ratios). Seed the real adjuster with this
+                                    // as the initial factor and enable backward mode so that
+                                    // each subsequent roll DIVIDES instead of multiplies.
+                                    real_adj.cumulative_factor = adj.cumulative_factor;
+                                    real_adj.adjustments = adj.adjustments.clone();
+                                    real_adj.backward_mode = true;
+                                    eprintln!(
+                                        "[boot] {} backward adjustment factor: {:.6} ({} rolls)",
+                                        adj.product_root,
+                                        adj.cumulative_factor,
+                                        adj.adjustments.len(),
+                                    );
+                                }
+                            }
+                            // Also restore roll history
+                            frm.roll_history = prescan_state.roll_history;
+                        }
+                    }
+                }
+            }
+
+            Some(frm)
+        }
+    };
+
+    // 10. Build LiveHarness with all components
+    // Set up position tracker with contract multipliers for generic symbols.
+    // Maps "ES=F" → 50.0, "NQ=F" → 20.0, etc. from the product registry.
+    let tracker = {
+        let mut t = LivePositionTracker::new(config.risk.initial_equity);
+        for product in &config.products {
+            let multiplier = product.multiplier;
+            // Set multiplier for the root symbol (ES, NQ, etc.)
+            t.inner.set_multiplier(&product.name, multiplier);
+            // Also set for generic symbol variants (ES=F, ES=1, ES=2, etc.)
+            t.inner.set_multiplier(&format!("{}=F", product.name), multiplier);
+            for n in 1..=4u8 {
+                t.inner.set_multiplier(&format!("{}={}", product.name, n), multiplier);
+            }
+        }
+        t
+    };
+
     let mut harness = LiveHarness::new(
         strategies,
         aggregator,
-        LivePositionTracker::new(config.risk.initial_equity),
+        tracker,
         None, // state_file — using storage backend instead
         ReconnectPolicy::default(),
         Duration::from_secs(30), // heartbeat interval
         None,                    // fill_logger
         None,                    // checkpoint_scheduler
-        risk_limits,
+        if config.data.source == "replay" { None } else { risk_limits }, // skip risk limits in replay for backtest parity
         storage.clone(),
         calendar,
         None, // notifications — TODO: wire from AlertConfig when support is added
         Some(broker_arc),
         execution_policies,
         dedup,
+        futures_roll_manager,
     );
 
-    // 10. Load and restore checkpoint from storage (if available)
+    // 11. Load and restore checkpoint from storage (if available)
     if let Some(ref store) = storage {
         match store.load_latest_checkpoint().await {
             Ok(Some(state)) => {
@@ -188,20 +361,52 @@ timezone = "US/Eastern"
         }
     }
 
-    // 11. Print startup summary and enter event loop
+    // 12. Print startup summary and enter event loop
     harness.print_startup_summary();
 
-    // Create channel for bars — in account mode, the broker adapter/connectors
-    // will feed bars through their own mechanism. For now we create the channel
-    // and let the harness manage the event loop. The broker's data feed spawns
-    // tasks that send bars into bar_tx.
+    // Create channel for bars
     let (bar_tx, bar_rx) = mpsc::channel(256);
 
-    // Drop sender — broker adapter feeds bars internally or via a connector.
-    // In the future, IBKR historical data bar streaming would use bar_tx.
-    drop(bar_tx);
+    // Wire data source based on config.data.source
+    let connector_count = if config.data.source == "replay" {
+        // Replay mode: read daily bars from CSV file
+        if let Some(ref replay_file) = config.data.replay_file {
+            let replay_path = account_dir.join(replay_file);
+            if !replay_path.exists() {
+                return Err(format!(
+                    "replay_file not found: {} (resolved to {})",
+                    replay_file,
+                    replay_path.display()
+                ).into());
+            }
+            eprintln!("[boot] replay mode — loading bars from {}", replay_path.display());
 
-    harness.run(bar_rx, 0).await?;
+            let mut connector = crate::live::replay_connector::ReplayConnector::new(
+                "databento-replay",
+                replay_path,
+                0.0, // instant playback for backtesting
+            );
+
+            let tx = bar_tx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = connector.connect(&[], tx).await {
+                    eprintln!("[replay] connector error: {}", e);
+                }
+            });
+            drop(bar_tx);
+            1
+        } else {
+            eprintln!("[boot] warning: source=replay but no replay_file specified");
+            drop(bar_tx);
+            0
+        }
+    } else {
+        // Live mode: broker adapter feeds bars via its own mechanism
+        drop(bar_tx);
+        0
+    };
+
+    harness.run(bar_rx, connector_count).await?;
     Ok(())
 }
 
@@ -431,4 +636,24 @@ pub enum AccountRuntimeError {
 
     #[error("live harness error: {0}")]
     HarnessError(#[from] crate::live::harness::LiveError),
+}
+
+/// Peek at the first data row of a CSV file to extract the start date.
+/// Used for replay mode to initialize the roll manager's L1/L2 relative
+/// to the historical data's time frame rather than the current date.
+fn peek_first_date(csv_path: &Path) -> Option<chrono::NaiveDate> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(csv_path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Skip header
+    lines.next()?;
+
+    // Read first data line
+    let first_line = lines.next()?.ok()?;
+    let date_str = first_line.split(',').next()?;
+
+    // Parse YYYY-MM-DD
+    chrono::NaiveDate::parse_from_str(date_str.trim(), "%Y-%m-%d").ok()
 }

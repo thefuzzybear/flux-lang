@@ -401,6 +401,7 @@ fn build_test_account_config(strategies: Vec<StrategyEntry>) -> AccountConfig {
             source: "mock".into(),
             symbols: vec!["TEST".into()],
             interval: "1d".into(),
+            replay_file: None,
         },
         database: DatabaseSection {
             url: "".into(),

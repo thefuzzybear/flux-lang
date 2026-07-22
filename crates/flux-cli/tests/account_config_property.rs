@@ -180,6 +180,7 @@ fn arb_valid_account_config() -> impl Strategy<Value = AccountConfig> {
                             source: data_source.clone(),
                             symbols: symbols.clone(),
                             interval: interval.clone(),
+                            replay_file: None,
                         },
                         database: DatabaseSection {
                             url: db_url.clone(),
@@ -322,6 +323,7 @@ fn arb_unconstrained_account_config() -> impl Strategy<Value = AccountConfig> {
                         source: data_source.clone(),
                         symbols: symbols.clone(),
                         interval: interval.clone(),
+                        replay_file: None,
                     },
                     database: DatabaseSection {
                         url: db_url.clone(),

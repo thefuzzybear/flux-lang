@@ -114,6 +114,7 @@ async fn replay_connector_matches_backtest_output() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     // Create the replay connector with instant playback
@@ -235,6 +236,7 @@ async fn replay_connector_produces_fills() {
         None,
         std::collections::HashMap::new(),
         flux_cli::live::broker::DeduplicationGuard::new(),
+        None,
     );
 
     let mut connector = ReplayConnector::new("replay-test", csv_path, 0.0);
