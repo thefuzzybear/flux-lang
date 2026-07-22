@@ -114,7 +114,7 @@ timezone = "US/Eastern"
 
     // 4. Load and compile strategy modules (partial failure tolerated)
     let strategies = load_strategies_from_config(&config, account_dir)
-        .map_err(|errs| AccountRuntimeError::AllStrategiesFailed(errs))?;
+        .map_err(AccountRuntimeError::AllStrategiesFailed)?;
 
     eprintln!("[boot] loaded {} strategies", strategies.len());
 
@@ -335,7 +335,7 @@ timezone = "US/Eastern"
         if config.data.source == "replay" { None } else { risk_limits }, // skip risk limits in replay for backtest parity
         storage.clone(),
         calendar,
-        None, // notifications — TODO: wire from AlertConfig when support is added
+        None, // notifications — not yet wired; requires AlertConfig parsing in account.flux
         Some(broker_arc),
         execution_policies,
         dedup,
@@ -479,7 +479,13 @@ pub fn load_strategies_from_config(
 
 /// Compile a single strategy source file through the full pipeline.
 ///
-/// Resolves module imports relative to the strategy file's parent directory.
+/// Runs: lex → parse → module resolution → typecheck → interpreter construction.
+/// Module imports are resolved relative to the strategy file's parent directory,
+/// so `from lib::portfolio import { ... }` resolves to `./lib/portfolio.flux`.
+///
+/// # Errors
+/// Returns a human-readable error string if any compilation stage fails
+/// (lexer, parser, module resolution, or type checker).
 fn compile_strategy_from_source(
     source: &str,
     strategy_path: &Path,
@@ -518,7 +524,11 @@ fn compile_strategy_from_source(
     })
 }
 
-/// Extract symbols from a typed program's connector_block or data_block.
+/// Extract the list of subscribed symbols from a compiled program.
+///
+/// Checks `connector_block.symbols` first (live mode), then falls back
+/// to `data_block.symbols` (backtest/replay mode). Returns an empty vec
+/// if neither block declares symbols.
 fn extract_symbols_from_program(
     program: &flux_compiler::typeck::typed_ast::TypedProgram,
 ) -> Vec<String> {
@@ -622,25 +632,48 @@ pub async fn connect_broker_with_retry(
 /// Errors that can occur when booting an account runtime.
 #[derive(Debug, thiserror::Error)]
 pub enum AccountRuntimeError {
+    /// The broker adapter failed to connect after exhausting the 5-minute
+    /// exponential backoff retry window. Usually indicates the gateway
+    /// (TWS/IB Gateway) is not running or the port is misconfigured.
     #[error("broker connection failed after retries: {0}")]
     BrokerConnectionFailed(String),
 
+    /// Every strategy declared in the account manifest failed to compile.
+    /// Contains a vec of `(strategy_name, error_message)` pairs. Individual
+    /// failures are tolerated — this only fires when zero strategies load.
     #[error("all strategies failed to compile:\n{}", .0.iter().map(|(n, e)| format!("  - {}: {}", n, e)).collect::<Vec<_>>().join("\n"))]
     AllStrategiesFailed(Vec<(String, String)>),
 
+    /// The `market_calendar.toml` file exists but could not be parsed.
+    /// A missing file is a warning (not an error); an unparseable file
+    /// is fatal because it likely indicates a configuration mistake.
     #[error("market calendar parse error: {0}")]
     CalendarParseError(String),
 
+    /// The storage backend (e.g. Postgres) failed to initialize during boot.
+    /// Occurs when the connection string is invalid or the database is unreachable.
     #[error("storage initialization failed: {0}")]
     StorageInitFailed(String),
 
+    /// An error propagated from the LiveHarness event loop after boot
+    /// completed successfully. Wraps `LiveError` variants (connector
+    /// disconnect, unrecoverable broker fault, etc.).
     #[error("live harness error: {0}")]
     HarnessError(#[from] crate::live::harness::LiveError),
 }
 
 /// Peek at the first data row of a CSV file to extract the start date.
-/// Used for replay mode to initialize the roll manager's L1/L2 relative
-/// to the historical data's time frame rather than the current date.
+///
+/// Used in replay mode to initialize the futures roll manager's L1/L2
+/// contracts relative to the historical data's time frame rather than
+/// the current date.
+///
+/// Expects the standard CSV format with a `YYYY-MM-DD` date in the first
+/// column and a header row.
+///
+/// # Returns
+/// `Some(date)` if the file exists, has at least one data row, and the
+/// first column parses as a valid date. `None` otherwise.
 fn peek_first_date(csv_path: &Path) -> Option<chrono::NaiveDate> {
     use std::io::BufRead;
     let file = std::fs::File::open(csv_path).ok()?;
@@ -648,7 +681,7 @@ fn peek_first_date(csv_path: &Path) -> Option<chrono::NaiveDate> {
     let mut lines = reader.lines();
 
     // Skip header
-    lines.next()?;
+    let _ = lines.next()?;
 
     // Read first data line
     let first_line = lines.next()?.ok()?;

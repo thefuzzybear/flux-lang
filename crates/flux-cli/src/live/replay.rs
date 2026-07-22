@@ -58,7 +58,7 @@ impl FillReplayer {
         // Handle missing file gracefully
         if !fill_log_path.exists() {
             eprintln!(
-                "[REPLAY] warning: fill log not found at '{}', proceeding without replay",
+                "[replay] warning: fill log not found at '{}', proceeding without replay",
                 fill_log_path.display()
             );
             return Ok(Vec::new());
@@ -83,7 +83,7 @@ impl FillReplayer {
         // Handle empty file
         if all_fills.is_empty() {
             eprintln!(
-                "[REPLAY] warning: fill log at '{}' is empty, proceeding without replay",
+                "[replay] warning: fill log at '{}' is empty, proceeding without replay",
                 fill_log_path.display()
             );
             return Ok(Vec::new());
@@ -92,13 +92,13 @@ impl FillReplayer {
         let total = all_fills.len() as u64;
 
         if total == state_fill_count {
-            eprintln!("[REPLAY] no replay needed (fill log has {} records, state fill_count = {})", total, state_fill_count);
+            eprintln!("[replay] no replay needed (fill log has {} records, state fill_count = {})", total, state_fill_count);
             return Ok(Vec::new());
         }
 
         if total < state_fill_count {
             eprintln!(
-                "[REPLAY] warning: fill log has {} records but state fill_count is {} (log may be truncated), proceeding with restored state",
+                "[replay] warning: fill log has {} records but state fill_count is {} (log may be truncated), proceeding with restored state",
                 total, state_fill_count
             );
             return Ok(Vec::new());
@@ -108,7 +108,7 @@ impl FillReplayer {
         let replay_start = state_fill_count as usize;
         let fills_to_replay = all_fills[replay_start..].to_vec();
         eprintln!(
-            "[REPLAY] replaying {} fills (log has {}, state checkpoint at {})",
+            "[replay] replaying {} fills (log has {}, state checkpoint at {})",
             fills_to_replay.len(),
             total,
             state_fill_count
@@ -123,14 +123,14 @@ impl FillReplayer {
     /// - "buy" → `Signal::open(symbol, qty)`
     /// - "sell" → `Signal::close_qty(symbol, qty)`
     ///
-    /// Each fill is logged to stderr with a "[REPLAY]" prefix.
+    /// Each fill is logged to stderr with a "[replay]" prefix.
     pub fn replay_fills(
         fills: &[FillRecord],
         tracker: &mut LivePositionTracker,
     ) {
         for fill in fills {
             eprintln!(
-                "[REPLAY] seq={} {} {} qty={} price={} strategy={} bar={}",
+                "[replay] seq={} {} {} qty={} price={} strategy={} bar={}",
                 fill.seq, fill.side, fill.symbol, fill.qty, fill.price, fill.strategy, fill.bar_index
             );
 
@@ -138,7 +138,7 @@ impl FillReplayer {
                 "buy" => Signal::open(fill.symbol.clone(), fill.qty),
                 "sell" => Signal::close_qty(fill.symbol.clone(), fill.qty),
                 other => {
-                    eprintln!("[REPLAY] warning: unknown side '{}' for seq={}, skipping", other, fill.seq);
+                    eprintln!("[replay] warning: unknown side '{}' for seq={}, skipping", other, fill.seq);
                     continue;
                 }
             };

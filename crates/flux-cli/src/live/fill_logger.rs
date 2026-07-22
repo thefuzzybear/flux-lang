@@ -76,7 +76,7 @@ impl FillLogger {
         output.seq = seq;
 
         let line = serde_json::to_string(&output)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         writeln!(self.writer, "{}", line)?;
         self.writer.flush()?;

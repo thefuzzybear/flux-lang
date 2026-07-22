@@ -104,7 +104,7 @@ impl std::fmt::Display for LoadError {
 /// Individual compile failures are logged to stderr but do not prevent
 /// other strategies from loading (requirement 2.5).
 pub fn load_strategies(path: &Path) -> Result<Vec<StrategyModule>, Vec<LoadError>> {
-    if path.extension().map_or(false, |e| e == "toml") {
+    if path.extension().is_some_and(|e| e == "toml") {
         load_multi_strategy_config(path)
     } else {
         load_single_strategy(path)
@@ -164,7 +164,7 @@ fn load_multi_strategy_config(config_path: &Path) -> Result<Vec<StrategyModule>,
                     path: strategy_path.clone(),
                     message: format!("failed to read file: {}", e),
                 };
-                eprintln!("[loader] error: {}", err);
+                eprintln!("[boot] error: {}", err);
                 errors.push(err);
                 continue;
             }
@@ -173,7 +173,7 @@ fn load_multi_strategy_config(config_path: &Path) -> Result<Vec<StrategyModule>,
         match compile_strategy(&source, &strategy_path, Some(&entry.symbols)) {
             Ok(module) => modules.push(module),
             Err(err) => {
-                eprintln!("[loader] error: {}", err);
+                eprintln!("[boot] error: {}", err);
                 errors.push(err);
             }
         }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use flux_runtime::{PositionTracker, Signal};
 
 /// Portfolio-level risk constraints applied to aggregated signals.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RiskConstraints {
     /// Maximum position size per symbol (in quantity units).
     /// If `None`, no per-symbol size limit is enforced.
@@ -20,16 +20,6 @@ pub struct RiskConstraints {
     /// Maximum number of concurrent open positions.
     /// If `None`, no position count limit is enforced.
     pub max_positions: Option<usize>,
-}
-
-impl Default for RiskConstraints {
-    fn default() -> Self {
-        Self {
-            max_position_size: None,
-            max_exposure: None,
-            max_positions: None,
-        }
-    }
 }
 
 /// Reason a signal was rejected by the aggregator.
@@ -109,7 +99,7 @@ impl SignalAggregator {
 
                         if current_qty + qty > max_size {
                             eprintln!(
-                                "  [RISK] rejected OPEN({}, {}) from {}: \
+                                "  [aggregator] rejected OPEN({}, {}) from {}: \
                                  position size {:.4} + {:.4} > limit {:.4}",
                                 symbol, qty, strategy_name, current_qty, qty, max_size
                             );
@@ -128,7 +118,7 @@ impl SignalAggregator {
 
                         if current_exposure + additional_exposure > max_exp {
                             eprintln!(
-                                "  [RISK] rejected OPEN({}, {}) from {}: \
+                                "  [aggregator] rejected OPEN({}, {}) from {}: \
                                  exposure {:.2} + {:.2} > limit {:.2}",
                                 symbol, qty, strategy_name,
                                 current_exposure, additional_exposure, max_exp
@@ -149,7 +139,7 @@ impl SignalAggregator {
 
                         if is_new_position && current_count >= max_pos {
                             eprintln!(
-                                "  [RISK] rejected OPEN({}, {}) from {}: \
+                                "  [aggregator] rejected OPEN({}, {}) from {}: \
                                  position count {} >= limit {}",
                                 symbol, qty, strategy_name, current_count, max_pos
                             );

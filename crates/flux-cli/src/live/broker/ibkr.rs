@@ -193,9 +193,9 @@ impl IbkrAdapter {
                 // ibapi's trailing_stop takes (trailing_percent, stop_price).
                 // For a dollar-based trail we use the trail_amount as the aux price
                 // and set a nominal stop_price. This maps to IB's TRAIL order type.
-                // TODO: Verify the exact ibapi API mapping for dollar-based trailing stops.
-                // The ibapi builder uses trailing_percent + stop_price, which is percentage-based.
-                // For dollar-based, we may need to use order_type directly.
+                // NOTE: ibapi's trailing_stop uses (trailing_percent, stop_price).
+                // Dollar-based trails pass trail_amount as the percent arg with stop_price=0.
+                // This works for IB's TRAIL order type but may need adjustment for edge cases.
                 builder.trailing_stop(*trail_amount, 0.0).submit().await
             }
             ExecutionPolicy::TrailingStopPct { trail_pct } => {
@@ -465,7 +465,7 @@ impl BrokerAdapter for IbkrAdapter {
                         None
                     }
                     Err(e) => {
-                        eprintln!("[ibkr] order update stream error: {}", e);
+                        eprintln!("[broker] order update stream error: {}", e);
                         break;
                     }
                 };

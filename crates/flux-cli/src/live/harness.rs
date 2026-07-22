@@ -31,15 +31,32 @@ use super::storage::{self, StorageBackend};
 use crate::interpreter::Value;
 
 /// Errors that can occur during live harness operation.
+///
+/// These errors represent terminal conditions where the harness event loop
+/// can no longer continue. Non-fatal issues (strategy panics, single connector
+/// failures) are logged but do not produce a `LiveError`.
 #[derive(Debug, thiserror::Error)]
 pub enum LiveError {
     /// All connectors have permanently failed — no data sources remain.
+    ///
+    /// Returned from [`LiveHarness::run()`] when the bar channel closes and
+    /// at least one connector was originally configured. This indicates that
+    /// every data source has exhausted its reconnection attempts (per the
+    /// configured [`ReconnectPolicy`]) and the harness has no way to receive
+    /// further market data.
     #[error("all connectors failed: no data sources remain")]
     AllConnectorsFailed,
-    /// State persistence error during shutdown.
+    /// State persistence failed during graceful shutdown.
+    ///
+    /// Returned when the harness attempts to serialize and write its state
+    /// file on SIGINT shutdown but encounters an I/O or serialization error.
+    /// The inner string contains the underlying error message.
     #[error("state persistence error: {0}")]
     StatePersistence(String),
-    /// An I/O error occurred.
+    /// A low-level I/O error occurred during harness operation.
+    ///
+    /// Wraps standard library I/O errors that can surface during file-based
+    /// operations (state file reads/writes, fill log appends).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -123,7 +140,7 @@ fn spawn_fill_consumer(
             match update {
                 OrderUpdate::Fill(fill) => {
                     eprintln!(
-                        "[broker-fill] {} | {} {:?} x {} @ {:.2}",
+                        "[broker] fill {} | {} {:?} x {} @ {:.2}",
                         fill.order_id.0, fill.symbol, fill.side, fill.qty, fill.price
                     );
 
@@ -145,12 +162,12 @@ fn spawn_fill_consumer(
                             bar_index: 0,
                         };
                         if let Err(e) = storage.record_fill(&record).await {
-                            eprintln!("[broker-fill] storage error: {}", e);
+                            eprintln!("[broker] storage error: {}", e);
                         }
                     }
                 }
                 OrderUpdate::Rejection { order_id, reason } => {
-                    eprintln!("[broker-reject] order {} rejected: {}", order_id.0, reason);
+                    eprintln!("[broker] order {} rejected: {}", order_id.0, reason);
 
                     // Emit notification alert for rejected orders
                     if let Some(ref notifier) = notifications {
@@ -163,16 +180,24 @@ fn spawn_fill_consumer(
                     }
                 }
                 OrderUpdate::StatusChange { order_id, status } => {
-                    eprintln!("[broker-status] order {} → {:?}", order_id.0, status);
+                    eprintln!("[broker] order {} → {:?}", order_id.0, status);
                 }
             }
         }
-        eprintln!("[broker-fill] order update stream closed");
+        eprintln!("[broker] order update stream closed");
     })
 }
 
 impl LiveHarness {
     /// Create a new `LiveHarness` with the given configuration.
+    ///
+    /// Assembles the harness from its component subsystems. All fields are
+    /// optional-by-design — the harness gracefully degrades when subsystems
+    /// (risk limits, broker, storage, calendar, etc.) are `None`.
+    ///
+    /// Call [`Self::restore_state()`] after construction to reload persisted
+    /// state, then [`Self::run()`] to enter the event loop.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         strategies: Vec<StrategyModule>,
         aggregator: SignalAggregator,
@@ -217,15 +242,17 @@ impl LiveHarness {
     /// Print a startup summary to stderr listing all loaded strategies,
     /// configured risk constraints, state file, and heartbeat interval.
     ///
-    /// Called once when the harness starts to provide visibility into the
-    /// running configuration (requirement 9.1).
+    /// Called once when the harness boots to provide visibility into the
+    /// running configuration. Outputs the strategy list with subscribed
+    /// symbols, risk constraint values, state persistence paths, and
+    /// subsystem status (risk limits, calendar).
     pub fn print_startup_summary(&self) {
-        eprintln!("=== Flux Live Harness ===");
+        eprintln!("[harness] === Flux Live Harness ===");
         eprintln!();
 
         // Loaded strategies
         eprintln!(
-            "Strategies: {} loaded",
+            "[harness] Strategies: {} loaded",
             self.strategies.len()
         );
         for strategy in &self.strategies {
@@ -234,42 +261,42 @@ impl LiveHarness {
             } else {
                 strategy.subscribed_symbols.join(", ")
             };
-            eprintln!("  • {} [{}]", strategy.name, symbols);
+            eprintln!("[harness]   • {} [{}]", strategy.name, symbols);
         }
         eprintln!();
 
         // Risk constraints
         let constraints = self.aggregator.constraints();
-        eprintln!("Risk constraints:");
+        eprintln!("[harness] Risk constraints:");
         match constraints.max_position_size {
-            Some(v) => eprintln!("  max_position_size: {:.2}", v),
-            None => eprintln!("  max_position_size: unlimited"),
+            Some(v) => eprintln!("[harness]   max_position_size: {:.2}", v),
+            None => eprintln!("[harness]   max_position_size: unlimited"),
         }
         match constraints.max_exposure {
-            Some(v) => eprintln!("  max_exposure: {:.2}", v),
-            None => eprintln!("  max_exposure: unlimited"),
+            Some(v) => eprintln!("[harness]   max_exposure: {:.2}", v),
+            None => eprintln!("[harness]   max_exposure: unlimited"),
         }
         match constraints.max_positions {
-            Some(v) => eprintln!("  max_positions: {}", v),
-            None => eprintln!("  max_positions: unlimited"),
+            Some(v) => eprintln!("[harness]   max_positions: {}", v),
+            None => eprintln!("[harness]   max_positions: unlimited"),
         }
         eprintln!();
 
         // State file
         match &self.state_file {
-            Some(path) => eprintln!("State file: {}", path.display()),
-            None => eprintln!("State file: (none)"),
+            Some(path) => eprintln!("[harness] State file: {}", path.display()),
+            None => eprintln!("[harness] State file: (none)"),
         }
 
         // Heartbeat interval
-        eprintln!("Heartbeat interval: {}s", self.heartbeat_interval.as_secs());
+        eprintln!("[harness] Heartbeat interval: {}s", self.heartbeat_interval.as_secs());
         eprintln!();
 
         // Risk limits
         if self.risk_limits.is_some() {
-            eprintln!("Risk limits: enabled");
+            eprintln!("[harness] Risk limits: enabled");
         } else {
-            eprintln!("Risk limits: disabled");
+            eprintln!("[harness] Risk limits: disabled");
         }
         eprintln!();
 
@@ -277,16 +304,16 @@ impl LiveHarness {
         if let Some(ref cal) = self.calendar {
             let exchange_names = cal.exchanges();
             eprintln!(
-                "Calendar: enabled ({} exchanges: {})",
+                "[harness] Calendar: enabled ({} exchanges: {})",
                 exchange_names.len(),
                 exchange_names.join(", ")
             );
         } else {
-            eprintln!("Calendar: disabled (no calendar file)");
+            eprintln!("[harness] Calendar: disabled (no calendar file)");
         }
         eprintln!();
 
-        eprintln!("Listening for bars...");
+        eprintln!("[harness] Listening for bars...");
         eprintln!();
     }
 
@@ -347,10 +374,8 @@ impl LiveHarness {
                     // if broker doesn't support native spreads.
                     // On failure: emit Critical notification and halt roll processing.
                     tokio::spawn(async move {
-                        // TODO: Implement calendar spread order submission when
-                        // BrokerAdapter gains spread order support.
-                        // For now, log the intent. The actual order execution will be
-                        // wired when the BrokerAdapter trait adds spread_order() method.
+                        // Calendar spread order submission requires BrokerAdapter
+                        // to gain a spread_order() method. Until then, log the intent.
                         eprintln!(
                             "[futures-roll] would submit calendar spread: close {} / open {}",
                             old_contract, new_contract,
@@ -432,7 +457,7 @@ impl LiveHarness {
                 Ok(signals) => signals,
                 Err(_) => {
                     eprintln!(
-                        "  [ERROR] strategy '{}' panicked during on_bar for {} — skipping",
+                        "  [harness] strategy '{}' panicked during on_bar for {} — skipping",
                         strategy.name, bar.symbol
                     );
                     continue;
@@ -443,7 +468,7 @@ impl LiveHarness {
                 let kind = signal_kind_str(&signal);
                 let qty_display = signal_qty_display(&signal);
                 eprintln!(
-                    "  [SIGNAL] {} | {} | {} | qty: {}",
+                    "  [harness] signal {} | {} | {} | qty: {}",
                     strategy.name,
                     bar.symbol,
                     kind,
@@ -469,7 +494,7 @@ impl LiveHarness {
 
                 // Log any alerts
                 for alert in &alerts {
-                    eprintln!("  [RISK ALERT] {:?}", alert);
+                    eprintln!("  [risk] alert {:?}", alert);
                 }
                 all_alert_events.extend(alerts);
 
@@ -490,14 +515,14 @@ impl LiveHarness {
                             let s = storage.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = s.record_signal(&record).await {
-                                    eprintln!("[storage] error recording signal: {}", e);
+                                    eprintln!("[harness] error recording signal: {}", e);
                                 }
                             });
                         }
                     }
                     RiskDecision::Reject { reason } => {
                         eprintln!(
-                            "  [RISK REJECT] {} signal for {} rejected: {:?}",
+                            "  [risk] {} signal for {} rejected: {:?}",
                             strategy_name,
                             signal_kind_str(signal),
                             reason,
@@ -516,14 +541,14 @@ impl LiveHarness {
                             let s = storage.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = s.record_signal(&record).await {
-                                    eprintln!("[storage] error recording signal: {}", e);
+                                    eprintln!("[harness] error recording signal: {}", e);
                                 }
                             });
                         }
                     }
                     RiskDecision::FlattenAll { reason } => {
                         eprintln!(
-                            "  [RISK FLATTEN] system halt triggered: {:?}",
+                            "  [risk] system halt triggered: {:?}",
                             reason,
                         );
                         // Record risk event in storage backend
@@ -536,7 +561,7 @@ impl LiveHarness {
                             let s = storage.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = s.record_risk_event(&event).await {
-                                    eprintln!("[storage] error recording risk event: {}", e);
+                                    eprintln!("[harness] error recording risk event: {}", e);
                                 }
                             });
                         }
@@ -581,7 +606,7 @@ impl LiveHarness {
                     let s = storage.clone();
                     tokio::spawn(async move {
                         if let Err(e) = s.record_signal(&record).await {
-                            eprintln!("[storage] error recording signal: {}", e);
+                            eprintln!("[harness] error recording signal: {}", e);
                         }
                     });
                 }
@@ -599,7 +624,7 @@ impl LiveHarness {
             let price = bar.close;
             if let Some(fill) = self.tracker.process_signal(signal, price, 0, strategy_name) {
                 eprintln!(
-                    "  [FILL] {} | {:?} {} x {:.4} @ {:.2}",
+                    "  [fill] {} | {:?} {} x {:.4} @ {:.2}",
                     strategy_name, fill.side, fill.symbol, fill.qty, fill.price
                 );
 
@@ -660,7 +685,7 @@ impl LiveHarness {
                     let s = storage.clone();
                     tokio::spawn(async move {
                         if let Err(e) = s.record_fill(&storage_fill).await {
-                            eprintln!("[storage] error recording fill: {}", e);
+                            eprintln!("[harness] error recording fill: {}", e);
                         }
                     });
                 }
@@ -674,7 +699,7 @@ impl LiveHarness {
                         let s = storage.clone();
                         tokio::spawn(async move {
                             if let Err(e) = s.upsert_position(&sym, qty, avg_entry).await {
-                                eprintln!("[storage] error upserting position: {}", e);
+                                eprintln!("[harness] error upserting position: {}", e);
                             }
                         });
                     }
@@ -707,7 +732,7 @@ impl LiveHarness {
 
                 // Get last price and tick size for the signal's symbol
                 let last_price = bar.close;
-                let tick_size = 0.25; // TODO: get from ProductRegistry for the symbol
+                let tick_size = 0.25; // placeholder — needs ProductRegistry lookup per symbol
                 let current_position_qty = self
                     .tracker
                     .inner
@@ -716,8 +741,8 @@ impl LiveHarness {
                     .unwrap_or(0.0);
 
                 // Translate signal to order
-                let bar_index = 0u64; // TODO: use actual bar index
-                let account = "default"; // TODO: get from AccountConfig
+                let bar_index = 0u64; // placeholder — harness doesn't track bar index yet
+                let account = "default"; // placeholder — needs AccountConfig field on harness
 
                 let order = super::broker::execution::translate_signal(
                     signal,
@@ -733,7 +758,7 @@ impl LiveHarness {
                 if let Some(order) = order {
                     // Check dedup guard
                     if self.dedup.is_duplicate(&order.id) {
-                        eprintln!("  [BROKER] duplicate order {} — skipping", order.id.0);
+                        eprintln!("  [broker] duplicate order {} — skipping", order.id.0);
                         continue;
                     }
 
@@ -748,7 +773,7 @@ impl LiveHarness {
                             .is_err()
                         {
                             eprintln!(
-                                "  [BROKER] session closed for {} — skipping order",
+                                "  [broker] session closed for {} — skipping order",
                                 exchange
                             );
                             continue;
@@ -763,9 +788,9 @@ impl LiveHarness {
                     let order_id_str = order.id.0.clone();
                     tokio::spawn(async move {
                         match broker.submit_order(&order).await {
-                            Ok(id) => eprintln!("  [BROKER] order submitted: {}", id.0),
+                            Ok(id) => eprintln!("  [broker] order submitted: {}", id.0),
                             Err(e) => eprintln!(
-                                "  [BROKER] submission error for {}: {}",
+                                "  [broker] submission error for {}: {}",
                                 order_id_str, e
                             ),
                         }
@@ -788,7 +813,7 @@ impl LiveHarness {
                 .mark_to_market(&portfolio_state);
 
             for alert in &mtm_alerts {
-                eprintln!("  [RISK ALERT] {:?}", alert);
+                eprintln!("  [risk] alert {:?}", alert);
             }
 
             // Collect mtm alerts and dispatch to notification pipeline
@@ -804,7 +829,7 @@ impl LiveHarness {
 
             if let Some(RiskDecision::FlattenAll { reason }) = mtm_decision {
                 eprintln!(
-                    "  [RISK FLATTEN] mark-to-market halt triggered: {:?}",
+                    "  [risk] mark-to-market halt triggered: {:?}",
                     reason,
                 );
                 // Record risk event in storage backend
@@ -817,7 +842,7 @@ impl LiveHarness {
                     let s = storage.clone();
                     tokio::spawn(async move {
                         if let Err(e) = s.record_risk_event(&event).await {
-                            eprintln!("[storage] error recording risk event: {}", e);
+                            eprintln!("[harness] error recording risk event: {}", e);
                         }
                     });
                 }
@@ -854,7 +879,7 @@ impl LiveHarness {
                 let s = storage.clone();
                 tokio::spawn(async move {
                     if let Err(e) = s.save_checkpoint(&state).await {
-                        eprintln!("[storage] error saving checkpoint: {}", e);
+                        eprintln!("[harness] error saving checkpoint: {}", e);
                     }
                 });
             }
@@ -948,7 +973,7 @@ impl LiveHarness {
             let signal = Signal::close(symbol);
             if let Some(fill) = self.tracker.process_signal(&signal, price, 0, "risk_limits") {
                 eprintln!(
-                    "  [RISK FLATTEN] closed {:?} {} x {:.4} @ {:.2}",
+                    "  [risk] flatten closed {:?} {} x {:.4} @ {:.2}",
                     fill.side, fill.symbol, fill.qty, fill.price
                 );
             }
@@ -970,6 +995,10 @@ impl LiveHarness {
     /// the harness treats this as all connectors having permanently failed
     /// and returns `LiveError::AllConnectorsFailed`. When `connector_count == 0`
     /// (e.g., no connectors configured), it returns `Ok(())`.
+    ///
+    /// # Errors
+    /// Returns [`LiveError::AllConnectorsFailed`] when all data sources
+    /// have permanently disconnected.
     pub async fn run(
         &mut self,
         mut bar_rx: mpsc::Receiver<LiveBar>,
@@ -1046,7 +1075,7 @@ impl LiveHarness {
         let realized_pnl = self.tracker.inner.realized_pnl();
 
         eprintln!(
-            "[heartbeat] equity: {:.2} | open positions: {} | realized P&L: {:.2} | strategies: {}",
+            "[harness] equity: {:.2} | open positions: {} | realized P&L: {:.2} | strategies: {}",
             equity,
             open_positions,
             realized_pnl,
@@ -1056,7 +1085,10 @@ impl LiveHarness {
 
     /// Print a final performance summary when the harness exits.
     ///
-    /// Shows total trades, realized P&L, final equity, open positions, and return.
+    /// Outputs a formatted report to stderr with initial/final equity,
+    /// realized P&L, total return percentage, trade count, and open
+    /// position details. Called automatically when the event loop terminates
+    /// (channel close or SIGINT).
     fn print_final_summary(&self) {
         let equity = self.tracker.inner.equity();
         let realized_pnl = self.tracker.inner.realized_pnl();
@@ -1066,31 +1098,31 @@ impl LiveHarness {
         let trade_count = self.tracker.inner.fills().len();
 
         eprintln!();
-        eprintln!("═══════════════════════════════════════════════════");
-        eprintln!("  REPLAY COMPLETE — Performance Summary");
-        eprintln!("═══════════════════════════════════════════════════");
-        eprintln!("  Initial Equity:    ${:.2}", initial_equity);
-        eprintln!("  Final Equity:      ${:.2}", equity);
-        eprintln!("  Realized P&L:      ${:.2}", realized_pnl);
-        eprintln!("  Total Return:      {:.2}%", total_return_pct);
-        eprintln!("  Total Trades:      {}", trade_count);
-        eprintln!("  Open Positions:    {}", open_positions);
+        eprintln!("[harness] ═══════════════════════════════════════════════════");
+        eprintln!("[harness]   REPLAY COMPLETE — Performance Summary");
+        eprintln!("[harness] ═══════════════════════════════════════════════════");
+        eprintln!("[harness]   Initial Equity:    ${:.2}", initial_equity);
+        eprintln!("[harness]   Final Equity:      ${:.2}", equity);
+        eprintln!("[harness]   Realized P&L:      ${:.2}", realized_pnl);
+        eprintln!("[harness]   Total Return:      {:.2}%", total_return_pct);
+        eprintln!("[harness]   Total Trades:      {}", trade_count);
+        eprintln!("[harness]   Open Positions:    {}", open_positions);
 
         // Print per-position details if any are open
         let positions = self.tracker.inner.positions();
         if !positions.is_empty() {
-            eprintln!("  ─────────────────────────────────────────────────");
-            eprintln!("  Open Position Details:");
+            eprintln!("[harness]   ─────────────────────────────────────────────────");
+            eprintln!("[harness]   Open Position Details:");
             for (symbol, pos) in positions {
                 if pos.qty != 0.0 {
                     eprintln!(
-                        "    {} | qty: {:.4} | avg entry: {:.2}",
+                        "[harness]     {} | qty: {:.4} | avg entry: {:.2}",
                         symbol, pos.qty, pos.avg_entry_price
                     );
                 }
             }
         }
-        eprintln!("═══════════════════════════════════════════════════");
+        eprintln!("[harness] ═══════════════════════════════════════════════════");
         eprintln!();
     }
 
@@ -1499,15 +1531,15 @@ impl LiveHarness {
         // Load latest checkpoint
         let checkpoint = match storage.load_latest_checkpoint().await {
             Ok(Some(state)) => {
-                eprintln!("[storage] loaded checkpoint (bars_processed={})", state.bars_processed);
+                eprintln!("[harness] loaded checkpoint (bars_processed={})", state.bars_processed);
                 Some(state)
             }
             Ok(None) => {
-                eprintln!("[storage] no checkpoint found, starting fresh");
+                eprintln!("[harness] no checkpoint found, starting fresh");
                 None
             }
             Err(e) => {
-                eprintln!("[storage] warning: failed to load checkpoint: {} (starting fresh)", e);
+                eprintln!("[harness] warning: failed to load checkpoint: {} (starting fresh)", e);
                 None
             }
         };
@@ -1529,11 +1561,11 @@ impl LiveHarness {
                         .collect();
                     self.tracker.inner.restore_from_state(pos_data, 0.0, vec![]);
                 }
-                eprintln!("[storage] loaded {} position(s) from storage", positions.len());
+                eprintln!("[harness] loaded {} position(s) from storage", positions.len());
             }
             Ok(_) => {} // No positions
             Err(e) => {
-                eprintln!("[storage] warning: failed to load positions: {} (continuing with empty)", e);
+                eprintln!("[harness] warning: failed to load positions: {} (continuing with empty)", e);
             }
         }
 
@@ -1592,7 +1624,7 @@ pub fn log_connector_state_transition(
     to: ConnectorState,
 ) {
     eprintln!(
-        "  [CONNECTOR] {} | {} -> {}",
+        "  [harness] connector {} | {} -> {}",
         connector_id,
         format_connector_state(from),
         format_connector_state(to),

@@ -54,7 +54,7 @@ impl LivePositionTracker {
     /// field on `BarContext` before calling a strategy's `on bar` handler.
     pub fn in_position_for(&self, symbols: &[String]) -> bool {
         symbols.iter().any(|sym| {
-            self.inner.position(sym).map_or(false, |p| p.qty > 0.0)
+            self.inner.position(sym).is_some_and(|p| p.qty > 0.0)
         })
     }
 }

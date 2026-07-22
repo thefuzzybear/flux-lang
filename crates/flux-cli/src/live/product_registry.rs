@@ -1,3 +1,9 @@
+//! Product registry mapping symbol names to instrument specifications.
+//!
+//! Constructed from the account manifest's `products` block at startup,
+//! then queried by the risk limits module and harness for multiplier,
+//! tick size, and margin requirements per symbol.
+
 use std::collections::HashMap;
 
 use crate::live::account_config::ProductEntry;

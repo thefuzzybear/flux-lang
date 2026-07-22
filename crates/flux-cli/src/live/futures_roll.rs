@@ -76,7 +76,9 @@ impl fmt::Display for MonthCode {
 /// Result of parsing either symbol type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolKind {
+    /// A strategy-facing generic symbol (e.g., "ES=F", "NQ=2").
     Generic(GenericSymbol),
+    /// An exchange-traded concrete contract (e.g., "ESH5").
     Concrete(ConcreteContract),
 }
 
@@ -91,65 +93,114 @@ pub enum RollPhase {
     Rolling,
 }
 
-/// Signal emitted when volume crossover is detected.
+/// Signal emitted when the 5-day average volume crossover is detected.
+///
+/// Contains all the information needed to decide whether and how to execute
+/// a position roll, including old/new contracts and volume evidence.
 #[derive(Debug, Clone)]
 pub struct RollSignal {
+    /// Product root for which the crossover was detected (e.g., "ES").
     pub product_root: String,
+    /// The outgoing front-month contract being rolled away from.
     pub old_l1: ConcreteContract,
+    /// The new front-month contract (previously L2) being rolled into.
     pub new_l1: ConcreteContract,
+    /// The new L2 contract (next in the quarterly cycle after new L1).
     pub new_l2: ConcreteContract,
+    /// 5-day average volume of the outgoing L1 at crossover time.
     pub l1_avg_volume: f64,
+    /// 5-day average volume of the incoming L1 (old L2) at crossover time.
     pub l2_avg_volume: f64,
+    /// Date of the session close that triggered the crossover.
     pub trigger_date: NaiveDate,
 }
 
 /// Event sent to the harness to execute a position roll.
+///
+/// The harness fills in position details (qty, direction) from the position
+/// tracker and submits the roll via the broker adapter.
 #[derive(Debug, Clone)]
 pub struct RollEvent {
+    /// Product root being rolled (e.g., "ES").
     pub product_root: String,
+    /// Contract being closed out.
     pub old_contract: ConcreteContract,
+    /// Contract being opened.
     pub new_contract: ConcreteContract,
+    /// Quantity to roll (filled by harness from position tracker).
     pub position_qty: f64,
+    /// Direction of the existing position (filled by harness).
     pub direction: Side,
+    /// Price ratio between new and old contract at roll time.
     pub adjustment_ratio: f64,
+    /// Whether to use a calendar spread order (atomic roll) vs. two legs.
     pub use_calendar_spread: bool,
 }
 
 /// Record of a completed roll (for history/persistence).
+///
+/// Stored in roll history and serialized with checkpoint state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollRecord {
+    /// Date the roll was executed.
     pub date: NaiveDate,
+    /// Product root that rolled (e.g., "ES").
     pub product_root: String,
+    /// The old front-month contract string (e.g., "ESH5").
     pub old_contract: String,
+    /// The new front-month contract string (e.g., "ESM5").
     pub new_contract: String,
+    /// Price ratio (new_close / old_close) applied at roll time.
     pub adjustment_ratio: f64,
+    /// Whether a position was actually rolled (false if flat at roll time).
     pub position_rolled: bool,
 }
 
 /// Individual adjustment at a roll point.
+///
+/// Records a single ratio adjustment entry in the continuous adjuster history,
+/// used for reconstruction and audit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdjustmentRecord {
+    /// Date the adjustment was applied.
     pub date: NaiveDate,
+    /// Contract being rolled out of (e.g., "ESH5").
     pub old_contract: String,
+    /// Contract being rolled into (e.g., "ESM5").
     pub new_contract: String,
+    /// The price ratio for this roll (new_close / old_close).
     pub ratio: f64,
+    /// Cumulative adjustment factor after applying this ratio.
     pub cumulative_factor_after: f64,
 }
 
 /// Current contract mapping for a product (query/monitoring).
+///
+/// Snapshot of the roll manager's state for a single product, used by
+/// the harness for logging and by the broker adapter for order routing.
 #[derive(Debug, Clone)]
 pub struct ContractMapping {
+    /// Product root (e.g., "ES").
     pub product_root: String,
+    /// Current front-month (active) contract.
     pub l1: ConcreteContract,
+    /// Next contract in the quarterly cycle (monitored for volume crossover).
     pub l2: ConcreteContract,
+    /// Product of all historical adjustment ratios applied to this series.
     pub cumulative_adjustment_factor: f64,
+    /// Whether the state machine is in Active or Rolling phase.
     pub phase: RollPhase,
 }
 
 /// Subscription record linking a strategy to a generic symbol.
+///
+/// Registered during strategy initialization via `register_subscription`.
+/// The roll manager uses these to determine which synthetic bars to emit.
 #[derive(Debug, Clone)]
 pub struct SymbolSubscription {
+    /// Name of the subscribing strategy (for logging and diagnostics).
     pub strategy_name: String,
+    /// The generic symbol this strategy wants to receive bars for.
     pub generic_symbol: GenericSymbol,
 }
 
@@ -158,18 +209,23 @@ pub struct SymbolSubscription {
 /// Errors from the futures roll module.
 #[derive(Debug, thiserror::Error)]
 pub enum RollError {
+    /// The symbol string could not be parsed as either a generic or concrete contract.
     #[error("invalid symbol: {0}")]
     InvalidSymbol(String),
 
+    /// The product root is not registered in the roll manager.
     #[error("unknown product root: {0}")]
     UnknownProduct(String),
 
+    /// State restoration from a checkpoint failed (version mismatch or corrupt data).
     #[error("state restoration failed: {0}")]
     StateRestore(String),
 
+    /// A roll execution failed (e.g., zero close price makes ratio undefined).
     #[error("roll execution failed for {product}: {reason}")]
     RollFailed { product: String, reason: String },
 
+    /// A calendar spread order to the broker was rejected or timed out.
     #[error("calendar spread order failed: {0}")]
     SpreadOrderFailed(String),
 }
@@ -188,8 +244,12 @@ pub struct ProcessResult {
 // ─── Persistence Types ───────────────────────────────────────────────────────
 
 /// Serializable state for persistence across restarts.
+///
+/// Captured by `snapshot_state()` and restored by `restore_state()` to resume
+/// roll management without re-triggering historical rolls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuturesRollState {
+    /// Schema version for forward compatibility (currently 1).
     pub version: u32,
     /// Per-product: current L1, L2, volume buffers, roll_latched.
     pub machines: Vec<SerializedRollMachine>,
@@ -200,29 +260,44 @@ pub struct FuturesRollState {
 }
 
 /// Serialized per-product roll state machine.
+///
+/// Contains the minimal state needed to reconstruct a `RollStateMachine`
+/// without replaying historical data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedRollMachine {
+    /// Product root (e.g., "ES").
     pub product_root: String,
+    /// Current L1 contract as a string (e.g., "ESM5").
     pub l1: String,
+    /// Current L2 contract as a string (e.g., "ESU5").
     pub l2: String,
+    /// Saved L1 volume buffer contents (oldest first).
     pub l1_volumes: Vec<u64>,
+    /// Saved L2 volume buffer contents (oldest first).
     pub l2_volumes: Vec<u64>,
+    /// Whether the roll latch was engaged.
     pub roll_latched: bool,
+    /// State machine phase ("active" or "rolling").
     pub phase: String,
 }
 
 /// Serialized per-product continuous adjuster.
+///
+/// Stores the cumulative factor and full adjustment history for reconstruction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedAdjuster {
+    /// Product root (e.g., "ES").
     pub product_root: String,
+    /// Cumulative adjustment factor at time of serialization.
     pub cumulative_factor: f64,
+    /// Ordered history of individual roll adjustments.
     pub adjustments: Vec<AdjustmentRecord>,
 }
 
 // ─── Volume Buffer ───────────────────────────────────────────────────────────
 
 /// Rolling 5-day volume buffer (circular).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VolumeBuffer {
     /// Circular buffer of daily volumes.
     days: [u64; 5],
@@ -235,11 +310,7 @@ pub struct VolumeBuffer {
 impl VolumeBuffer {
     /// Create a new empty volume buffer.
     pub fn new() -> Self {
-        Self {
-            days: [0; 5],
-            count: 0,
-            index: 0,
-        }
+        Self::default()
     }
 
     /// Push a new daily volume into the buffer.
@@ -433,7 +504,12 @@ pub fn format_concrete(contract: &ConcreteContract) -> String {
 
 // ─── Roll State Machine ─────────────────────────────────────────────────────
 
-/// Per-product state machine tracking L1/L2 and volume crossover.
+/// Per-product state machine tracking L1/L2 contracts and volume crossover.
+///
+/// Monitors 5-day average volume for the front-month (L1) and next-month (L2)
+/// contracts. When L2's average exceeds L1's, a roll signal fires: L2 is
+/// promoted to L1, a new L2 is computed from the quarterly cycle, and volume
+/// buffers are reset for the next cycle.
 pub struct RollStateMachine {
     pub(crate) product_root: String,
     pub(crate) state: RollPhase,
@@ -453,10 +529,15 @@ pub struct RollStateMachine {
 }
 
 /// Result of executing a roll transition.
+///
+/// Describes the contract changes that occurred when `execute_roll()` was called.
 #[derive(Debug, Clone)]
 pub struct RollTransition {
+    /// The former front-month contract that was rolled out of.
     pub old_l1: ConcreteContract,
+    /// The new front-month contract (promoted from L2).
     pub new_l1: ConcreteContract,
+    /// The new second-month contract (computed from the quarterly cycle).
     pub new_l2: ConcreteContract,
 }
 
@@ -648,6 +729,9 @@ impl MonthCode {
 // ─── QuarterlyCycle ──────────────────────────────────────────────────────────
 
 /// Navigate the CME quarterly cycle (H, M, U, Z).
+///
+/// Provides stateless utility methods for computing the next/previous contract
+/// in the cycle and finding the nearest non-expired contracts for a product root.
 pub struct QuarterlyCycle;
 
 impl QuarterlyCycle {
@@ -737,7 +821,21 @@ impl QuarterlyCycle {
 
 // ─── Continuous Adjuster ──────────────────────────────────────────────────────
 
-/// Manages backward ratio adjustment for continuous series.
+/// Manages backward ratio adjustment for continuous futures series (`=F` symbols).
+///
+/// Maintains a cumulative factor that is applied to raw prices to produce a
+/// gap-free continuous price series across contract rolls. Supports two modes:
+///
+/// - **Forward mode** (`backward_mode = false`): Used during live trading. Each roll
+///   multiplies the new ratio (new_close / old_close) into the cumulative factor.
+///   The factor starts at 1.0 and grows with each roll, adjusting historical prices
+///   relative to the current contract.
+///
+/// - **Backward mode** (`backward_mode = true`): Used during replay of historical data
+///   with a pre-seeded cumulative factor. The factor starts at the total product of
+///   all historical ratios and is progressively divided at each roll, converging to 1.0
+///   by the end of history. This ensures that the most recent prices are unadjusted
+///   while older prices are scaled down.
 pub struct ContinuousAdjuster {
     /// Product of all historical adjustment ratios.
     pub(crate) cumulative_factor: f64,
@@ -748,14 +846,20 @@ pub struct ContinuousAdjuster {
     pub(crate) backward_mode: bool,
 }
 
-impl ContinuousAdjuster {
-    /// Create a new adjuster with factor = 1.0 (no adjustment).
-    pub fn new() -> Self {
+impl Default for ContinuousAdjuster {
+    fn default() -> Self {
         Self {
             cumulative_factor: 1.0,
             adjustments: Vec::new(),
             backward_mode: false,
         }
+    }
+}
+
+impl ContinuousAdjuster {
+    /// Create a new adjuster with factor = 1.0 (no adjustment).
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Apply a new roll adjustment. Returns the ratio on success, or an error if `old_close` is zero.
@@ -820,7 +924,16 @@ impl ContinuousAdjuster {
 
 // ─── Futures Roll Manager ────────────────────────────────────────────────────
 
-/// Top-level orchestrator: routes bars, coordinates state machines, emits synthetic bars.
+/// Top-level orchestrator for futures contract roll management.
+///
+/// Sits between the data connector and strategy dispatch, intercepting raw
+/// per-contract bars (e.g., ESH5, ESM5) and emitting synthetic bars using
+/// generic symbol notation (ES=F, ES=1, ES=2). Coordinates:
+///
+/// - Per-product `RollStateMachine` instances that track volume crossover
+/// - Per-product `ContinuousAdjuster` instances for `=F` ratio adjustment
+/// - Strategy subscriptions that determine which synthetic bars to emit
+/// - Roll history for observability and state persistence
 pub struct FuturesRollManager {
     /// Per-product roll state machines.
     pub(crate) state_machines: HashMap<String, RollStateMachine>,
@@ -1139,8 +1252,8 @@ impl FuturesRollManager {
                         synthetic_bars.push(nth_bar);
                     }
                 }
-                SymbolMode::NthMonth(2) => {
-                    if contract == l2 {
+                SymbolMode::NthMonth(2)
+                    if contract == l2 => {
                         let nth_bar = LiveBar {
                             bar: flux_runtime::BarContext {
                                 symbol: format!("{}=2", root),
@@ -1151,7 +1264,6 @@ impl FuturesRollManager {
                         };
                         synthetic_bars.push(nth_bar);
                     }
-                }
                 _ => {}
             }
         }
@@ -1337,8 +1449,8 @@ impl FuturesRollManager {
     pub fn snapshot_state(&self) -> FuturesRollState {
         let machines = self
             .state_machines
-            .iter()
-            .map(|(_, sm)| SerializedRollMachine {
+            .values()
+            .map(|sm| SerializedRollMachine {
                 product_root: sm.product_root.clone(),
                 l1: format_concrete(&sm.l1),
                 l2: format_concrete(&sm.l2),

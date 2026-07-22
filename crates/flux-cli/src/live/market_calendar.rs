@@ -208,7 +208,7 @@ impl MarketCalendar {
         }
 
         // Validate half-day constraints against all exchanges
-        for (_, early_close) in &half_days {
+        for early_close in half_days.values() {
             for session in exchanges.values() {
                 if *early_close >= session.close {
                     return Err(CalendarError::HalfDayAfterClose {

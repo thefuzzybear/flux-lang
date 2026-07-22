@@ -6,9 +6,10 @@
 
 /// How to execute an order against the broker.
 /// Configured per-strategy in account.flux, resolved at runtime.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ExecutionPolicy {
     /// Market order — guaranteed fill, worst price. Default.
+    #[default]
     Market,
     /// Aggressive limit: last price ± offset_ticks (chases the market).
     AggressiveLimit { offset_ticks: i32 },
@@ -41,11 +42,7 @@ pub enum AdaptiveUrgency {
     Urgent,
 }
 
-impl Default for ExecutionPolicy {
-    fn default() -> Self {
-        ExecutionPolicy::Market
-    }
-}
+
 
 /// Parse a string representation into an ExecutionPolicy variant.
 /// Returns the default (Market) for unrecognized strings.
@@ -98,6 +95,7 @@ use crate::live::market_calendar::MarketCalendar;
 /// Returns None if qty rounds to 0 (signal "sized out").
 ///
 /// For Close signals, `current_position_qty` provides the full position size.
+#[allow(clippy::too_many_arguments)]
 pub fn translate_signal(
     signal: &Signal,
     policy: &ExecutionPolicy,
